@@ -1,0 +1,290 @@
+package net.runelite.client.plugins.gpuvulkan;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.LongBuffer;
+import org.lwjgl.system.MemoryStack;
+import org.lwjgl.vulkan.VkDescriptorSetLayoutBinding;
+import org.lwjgl.vulkan.VkDescriptorSetLayoutCreateInfo;
+import org.lwjgl.vulkan.VkGraphicsPipelineCreateInfo;
+import org.lwjgl.vulkan.VkPipelineColorBlendAttachmentState;
+import org.lwjgl.vulkan.VkPipelineColorBlendStateCreateInfo;
+import org.lwjgl.vulkan.VkPipelineDepthStencilStateCreateInfo;
+import org.lwjgl.vulkan.VkPipelineDynamicStateCreateInfo;
+import org.lwjgl.vulkan.VkPipelineInputAssemblyStateCreateInfo;
+import org.lwjgl.vulkan.VkPipelineLayoutCreateInfo;
+import org.lwjgl.vulkan.VkPipelineMultisampleStateCreateInfo;
+import org.lwjgl.vulkan.VkPipelineRasterizationStateCreateInfo;
+import org.lwjgl.vulkan.VkPipelineShaderStageCreateInfo;
+import org.lwjgl.vulkan.VkPipelineVertexInputStateCreateInfo;
+import org.lwjgl.vulkan.VkPipelineViewportStateCreateInfo;
+import org.lwjgl.vulkan.VkPushConstantRange;
+import org.lwjgl.vulkan.VkShaderModuleCreateInfo;
+import org.lwjgl.vulkan.VkVertexInputAttributeDescription;
+import org.lwjgl.vulkan.VkVertexInputBindingDescription;
+
+import static org.lwjgl.system.MemoryStack.stackPush;
+import static org.lwjgl.system.MemoryUtil.memAlloc;
+import static org.lwjgl.system.MemoryUtil.memFree;
+import static org.lwjgl.vulkan.VK13.*;
+
+/**
+ * Pipeline for captured scene geometry. Vertex layout is 36 bytes:
+ * {@code vec3 pos + vec3 color + vec2 uv + uint texLayer}.
+ *
+ * <p>Bindings:
+ * <ul>
+ *   <li>Push constant: 64-byte mat4 MVP at the vertex stage.</li>
+ *   <li>Descriptor set 0, binding 0: combined image sampler (the OSRS
+ *       texture array — {@link TextureArray}).</li>
+ * </ul>
+ */
+final class ScenePipeline implements AutoCloseable
+{
+	static final int VERTEX_STRIDE = 40; // 10 × 4 bytes
+	static final int OFFSET_POS      = 0;
+	static final int OFFSET_COLOR    = 12;
+	static final int OFFSET_LIGHT    = 24;
+	static final int OFFSET_UV       = 28;
+	static final int OFFSET_TEXLAYER = 36;
+
+	private final VulkanDevice device;
+	private final long descriptorSetLayout;
+	private final long pipelineLayout;
+	private final long pipeline;
+
+	ScenePipeline(VulkanDevice device, RenderPass renderPass, int polygonMode, boolean depthTest, int samples)
+	{
+		this.device = device;
+		Disposables tmp = new Disposables();
+		try (MemoryStack stack = stackPush())
+		{
+			long vertModule = createShaderModule(loadResource("scene.vert.spv"));
+			tmp.add(() -> vkDestroyShaderModule(device.handle(), vertModule, null));
+			long fragModule = createShaderModule(loadResource("scene.frag.spv"));
+			tmp.add(() -> vkDestroyShaderModule(device.handle(), fragModule, null));
+
+			ByteBuffer entry = stack.UTF8("main");
+
+			VkPipelineShaderStageCreateInfo.Buffer stages = VkPipelineShaderStageCreateInfo.calloc(2, stack);
+			stages.get(0).sType$Default().stage(VK_SHADER_STAGE_VERTEX_BIT)  .module(vertModule).pName(entry);
+			stages.get(1).sType$Default().stage(VK_SHADER_STAGE_FRAGMENT_BIT).module(fragModule).pName(entry);
+
+			VkVertexInputBindingDescription.Buffer binding = VkVertexInputBindingDescription.calloc(1, stack);
+			binding.get(0).binding(0).stride(VERTEX_STRIDE).inputRate(VK_VERTEX_INPUT_RATE_VERTEX);
+
+			VkVertexInputAttributeDescription.Buffer attrs = VkVertexInputAttributeDescription.calloc(5, stack);
+			attrs.get(0).binding(0).location(0).format(VK_FORMAT_R32G32B32_SFLOAT).offset(OFFSET_POS);
+			attrs.get(1).binding(0).location(1).format(VK_FORMAT_R32G32B32_SFLOAT).offset(OFFSET_COLOR);
+			attrs.get(2).binding(0).location(2).format(VK_FORMAT_R32_SFLOAT)      .offset(OFFSET_LIGHT);
+			attrs.get(3).binding(0).location(3).format(VK_FORMAT_R32G32_SFLOAT)   .offset(OFFSET_UV);
+			attrs.get(4).binding(0).location(4).format(VK_FORMAT_R32_UINT)        .offset(OFFSET_TEXLAYER);
+
+			VkPipelineVertexInputStateCreateInfo vertexInput =
+				VkPipelineVertexInputStateCreateInfo.calloc(stack).sType$Default()
+					.pVertexBindingDescriptions(binding)
+					.pVertexAttributeDescriptions(attrs);
+
+			VkPipelineInputAssemblyStateCreateInfo inputAssembly =
+				VkPipelineInputAssemblyStateCreateInfo.calloc(stack).sType$Default()
+					.topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+					.primitiveRestartEnable(false);
+
+			VkPipelineViewportStateCreateInfo viewportState =
+				VkPipelineViewportStateCreateInfo.calloc(stack).sType$Default()
+					.viewportCount(1)
+					.scissorCount(1);
+
+			VkPipelineRasterizationStateCreateInfo raster =
+				VkPipelineRasterizationStateCreateInfo.calloc(stack).sType$Default()
+					.polygonMode(polygonMode)
+					.cullMode(VK_CULL_MODE_NONE)
+					.frontFace(VK_FRONT_FACE_COUNTER_CLOCKWISE)
+					.lineWidth(1.0f);
+
+			VkPipelineMultisampleStateCreateInfo multisample =
+				VkPipelineMultisampleStateCreateInfo.calloc(stack).sType$Default()
+					.rasterizationSamples(samples)
+					.minSampleShading(1.0f)
+					// Alpha-to-coverage: the GPU emits subsamples in proportion
+					// to the fragment's output alpha, so faces with low alpha
+					// (high faceTransparencies) effectively dissolve into the
+					// background WITHOUT needing a sorted alpha-blend pass.
+					// Stock GpuPlugin sorts and blends them in a separate pass;
+					// we get a close approximation by writing alpha=1-trans/255
+					// from the frag shader and letting MSAA's coverage hardware
+					// translate that into per-sample visibility. Stops fire
+					// "glow tip" faces (transparency 252+) from rendering as
+					// opaque red blobs while still keeping translucent geometry
+					// (tent drapes, banners, water surfaces) visible.
+					.alphaToCoverageEnable(samples != VK_SAMPLE_COUNT_1_BIT);
+
+			// When MSAA is on, alpha-to-coverage above handles translucency
+			// via sample-mask dithering, so the blend stage stays disabled
+			// (output sample-count is determined by alpha, color writes are
+			// per-sample opaque). When MSAA is OFF, alpha-to-coverage is a
+			// no-op and the frag shader's `alpha = 1 - trans/255` would just
+			// be discarded — leaving translucent geometry (drapes, banners,
+			// glow tips) rendering fully opaque. Enable standard src-over
+			// blending in that case so we get *some* translucency at the
+			// cost of order-dependent compositing (no sorted alpha pass).
+			boolean blendFallback = samples == VK_SAMPLE_COUNT_1_BIT;
+			VkPipelineColorBlendAttachmentState.Buffer blend =
+				VkPipelineColorBlendAttachmentState.calloc(1, stack);
+			blend.get(0)
+				.colorWriteMask(VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
+					| VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT)
+				.blendEnable(blendFallback)
+				.srcColorBlendFactor(VK_BLEND_FACTOR_SRC_ALPHA)
+				.dstColorBlendFactor(VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA)
+				.colorBlendOp(VK_BLEND_OP_ADD)
+				.srcAlphaBlendFactor(VK_BLEND_FACTOR_ONE)
+				.dstAlphaBlendFactor(VK_BLEND_FACTOR_ZERO)
+				.alphaBlendOp(VK_BLEND_OP_ADD);
+
+			VkPipelineColorBlendStateCreateInfo colorBlend =
+				VkPipelineColorBlendStateCreateInfo.calloc(stack).sType$Default()
+					.pAttachments(blend);
+
+			// Reverse-Z to match OSRS's projection (z_ndc = 2n/z, closer = bigger).
+			// Paired with depth-clear value 0.0 in VulkanRenderer.
+			VkPipelineDepthStencilStateCreateInfo depth =
+				VkPipelineDepthStencilStateCreateInfo.calloc(stack).sType$Default()
+					.depthTestEnable(depthTest)
+					.depthWriteEnable(depthTest)
+					.depthCompareOp(VK_COMPARE_OP_GREATER)
+					.depthBoundsTestEnable(false)
+					.stencilTestEnable(false);
+
+			VkPipelineDynamicStateCreateInfo dynamic =
+				VkPipelineDynamicStateCreateInfo.calloc(stack).sType$Default()
+					.pDynamicStates(stack.ints(VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR));
+
+			// Descriptor set 0:
+			//   binding 0 = combined image sampler (OSRS texture array, frag)
+			//   binding 1 = UBO of per-layer texture-animation vec2's (vert) —
+			//               vert shader looks them up to scroll UV per game tick.
+			VkDescriptorSetLayoutBinding.Buffer dsBindings = VkDescriptorSetLayoutBinding.calloc(2, stack);
+			dsBindings.get(0)
+				.binding(0)
+				.descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+				.descriptorCount(1)
+				.stageFlags(VK_SHADER_STAGE_FRAGMENT_BIT);
+			dsBindings.get(1)
+				.binding(1)
+				.descriptorType(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
+				.descriptorCount(1)
+				.stageFlags(VK_SHADER_STAGE_VERTEX_BIT);
+			VkDescriptorSetLayoutCreateInfo dsInfo = VkDescriptorSetLayoutCreateInfo.calloc(stack)
+				.sType$Default()
+				.pBindings(dsBindings);
+			LongBuffer pDsl = stack.mallocLong(1);
+			if (vkCreateDescriptorSetLayout(device.handle(), dsInfo, null, pDsl) != VK_SUCCESS)
+			{
+				throw new RuntimeException("vkCreateDescriptorSetLayout (scene) failed");
+			}
+			descriptorSetLayout = pDsl.get(0);
+
+			// Push constant layout (112 bytes total — within Vulkan's 128-byte
+			// guaranteed minimum):
+			//   Vertex   0..63  : mat4 mvp
+			//   Vertex   64..79 : vec4 (cameraX, cameraZ, drawDistance, fogDepth)
+			//   Vertex   80..95 : ivec4 misc (.x = tick, rest unused/padding for vec4 alignment)
+			//   Fragment 96..111: vec4 (fogR, fogG, fogB, brightness)
+			VkPushConstantRange.Buffer pc = VkPushConstantRange.calloc(2, stack);
+			pc.get(0).stageFlags(VK_SHADER_STAGE_VERTEX_BIT)  .offset(0) .size(96);
+			pc.get(1).stageFlags(VK_SHADER_STAGE_FRAGMENT_BIT).offset(96).size(16);
+
+			VkPipelineLayoutCreateInfo layoutInfo = VkPipelineLayoutCreateInfo.calloc(stack)
+				.sType$Default()
+				.pSetLayouts(stack.longs(descriptorSetLayout))
+				.pPushConstantRanges(pc);
+
+			LongBuffer pLayout = stack.mallocLong(1);
+			if (vkCreatePipelineLayout(device.handle(), layoutInfo, null, pLayout) != VK_SUCCESS)
+			{
+				vkDestroyDescriptorSetLayout(device.handle(), descriptorSetLayout, null);
+				throw new RuntimeException("vkCreatePipelineLayout (scene) failed");
+			}
+			pipelineLayout = pLayout.get(0);
+
+			VkGraphicsPipelineCreateInfo.Buffer info = VkGraphicsPipelineCreateInfo.calloc(1, stack);
+			info.get(0).sType$Default()
+				.pStages(stages)
+				.pVertexInputState(vertexInput)
+				.pInputAssemblyState(inputAssembly)
+				.pViewportState(viewportState)
+				.pRasterizationState(raster)
+				.pMultisampleState(multisample)
+				.pColorBlendState(colorBlend)
+				.pDepthStencilState(depth)
+				.pDynamicState(dynamic)
+				.layout(pipelineLayout)
+				.renderPass(renderPass.handle())
+				.subpass(0);
+
+			LongBuffer pPipe = stack.mallocLong(1);
+			int r = vkCreateGraphicsPipelines(device.handle(), VK_NULL_HANDLE, info, null, pPipe);
+			if (r != VK_SUCCESS)
+			{
+				vkDestroyPipelineLayout(device.handle(), pipelineLayout, null);
+				vkDestroyDescriptorSetLayout(device.handle(), descriptorSetLayout, null);
+				throw new RuntimeException("vkCreateGraphicsPipelines (scene) failed: " + r);
+			}
+			pipeline = pPipe.get(0);
+		}
+		finally
+		{
+			tmp.close();
+		}
+	}
+
+	long handle() { return pipeline; }
+	long layout() { return pipelineLayout; }
+	long descriptorSetLayout() { return descriptorSetLayout; }
+
+	@Override
+	public void close()
+	{
+		vkDestroyPipeline(device.handle(), pipeline, null);
+		vkDestroyPipelineLayout(device.handle(), pipelineLayout, null);
+		vkDestroyDescriptorSetLayout(device.handle(), descriptorSetLayout, null);
+	}
+
+	private long createShaderModule(ByteBuffer code)
+	{
+		try (MemoryStack stack = stackPush())
+		{
+			VkShaderModuleCreateInfo info = VkShaderModuleCreateInfo.calloc(stack)
+				.sType$Default()
+				.pCode(code);
+			LongBuffer p = stack.mallocLong(1);
+			if (vkCreateShaderModule(device.handle(), info, null, p) != VK_SUCCESS)
+			{
+				throw new RuntimeException("vkCreateShaderModule failed");
+			}
+			return p.get(0);
+		}
+		finally
+		{
+			memFree(code);
+		}
+	}
+
+	private static ByteBuffer loadResource(String resource)
+	{
+		try (InputStream in = ScenePipeline.class.getResourceAsStream(resource))
+		{
+			if (in == null) throw new RuntimeException("missing resource: " + resource);
+			byte[] bytes = in.readAllBytes();
+			ByteBuffer buf = memAlloc(bytes.length);
+			buf.put(bytes).flip();
+			return buf;
+		}
+		catch (IOException e)
+		{
+			throw new RuntimeException("failed to read " + resource, e);
+		}
+	}
+}
