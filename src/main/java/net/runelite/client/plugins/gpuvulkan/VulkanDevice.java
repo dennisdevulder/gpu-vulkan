@@ -5,6 +5,7 @@ import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.KHRSwapchain;
 import org.lwjgl.vulkan.VkDevice;
+import org.lwjgl.vulkan.VkExtensionProperties;
 import org.lwjgl.vulkan.VkDeviceCreateInfo;
 import org.lwjgl.vulkan.VkDeviceQueueCreateInfo;
 import org.lwjgl.vulkan.VkPhysicalDevice;
@@ -45,6 +46,16 @@ final class VulkanDevice implements AutoCloseable
 	 *  either one. */
 	private final boolean supportsFillModeNonSolid;
 	private final boolean supportsSamplerAnisotropy;
+	/** {@code true} when VK_EXT_metal_objects is enabled (macOS only).
+	 *  Populated at the device-extension-enable step. Other code branches
+	 *  on this to pick between the KHR_swapchain present path (Linux) and
+	 *  the custom MTLCommandQueue present path (macOS). */
+	private final boolean supportsMetalObjects;
+	/** {@code id<MTLCommandQueue>} pointer the custom present path uses to
+	 *  schedule {@code [drawable present]} after our Vulkan render. Extracted
+	 *  via vkExportMetalObjectsEXT in {@link #extractMetalCommandQueue}.
+	 *  Zero when {@link #supportsMetalObjects} is false. */
+	private long metalCommandQueue;
 
 	VulkanDevice(VulkanInstance instance, VulkanSurface surface)
 	{
@@ -95,9 +106,37 @@ final class VulkanDevice implements AutoCloseable
 				.queueFamilyIndex(graphicsQueueFamily)
 				.pQueuePriorities(stack.floats(1.0f));
 
-			PointerBuffer devExtensions = stack.pointers(
-				stack.UTF8(KHRSwapchain.VK_KHR_SWAPCHAIN_EXTENSION_NAME)
-			);
+			// Spec: if a device advertises VK_KHR_portability_subset, the app
+			// MUST enable it at vkCreateDevice or device creation fails with
+			// VK_ERROR_EXTENSION_NOT_PRESENT. MoltenVK always reports it.
+			// Stock desktop drivers (NVIDIA / AMD / Intel / Mesa) never do,
+			// so this is a no-op for them.
+			boolean hasPortabilitySubset = deviceSupportsExtension(
+				stack, physicalDevice, "VK_KHR_portability_subset");
+			// VK_EXT_metal_objects lets us extract the MTLCommandQueue our
+			// VkQueue maps to, so we can present CAMetalDrawables ourselves
+			// (bypassing MoltenVK's vkQueuePresentKHR — see MacOSMetalHelper
+			// + VulkanRenderer.drawFrame). macOS only; advertised by MoltenVK.
+			boolean hasMetalObjects = deviceSupportsExtension(
+				stack, physicalDevice, "VK_EXT_metal_objects");
+			this.supportsMetalObjects = hasMetalObjects;
+
+			int extCount = 1
+				+ (hasPortabilitySubset ? 1 : 0)
+				+ (hasMetalObjects ? 1 : 0);
+			PointerBuffer devExtensions = stack.mallocPointer(extCount);
+			devExtensions.put(stack.UTF8(KHRSwapchain.VK_KHR_SWAPCHAIN_EXTENSION_NAME));
+			if (hasPortabilitySubset)
+			{
+				devExtensions.put(stack.UTF8("VK_KHR_portability_subset"));
+				log.info("Enabling VK_KHR_portability_subset (MoltenVK / portability impl)");
+			}
+			if (hasMetalObjects)
+			{
+				devExtensions.put(stack.UTF8("VK_EXT_metal_objects"));
+				log.info("Enabling VK_EXT_metal_objects (custom-present path)");
+			}
+			devExtensions.flip();
 
 			// Enable only what's both wanted AND supported. Downstream code
 			// (ScenePipeline wireframe, TextureArray sampler) reads the
@@ -123,7 +162,41 @@ final class VulkanDevice implements AutoCloseable
 			PointerBuffer pQueue = stack.mallocPointer(1);
 			vkGetDeviceQueue(handle, graphicsQueueFamily, 0, pQueue);
 			this.graphicsQueue = new VkQueue(pQueue.get(0), handle);
+
+			if (supportsMetalObjects)
+			{
+				this.metalCommandQueue = extractMetalCommandQueue(stack);
+				log.info("Extracted MTLCommandQueue 0x{} for custom-present path",
+					Long.toHexString(metalCommandQueue));
+			}
+			else
+			{
+				this.metalCommandQueue = 0L;
+			}
 		}
+	}
+
+	/**
+	 * Calls {@code vkExportMetalObjectsEXT} with a
+	 * {@link org.lwjgl.vulkan.VkExportMetalCommandQueueInfoEXT} pNext chain to
+	 * pull out the {@code id<MTLCommandQueue>} MoltenVK created for our
+	 * {@link VkQueue}. The returned pointer is owned by MoltenVK; we don't
+	 * release it — the queue's lifetime is the device's lifetime.
+	 */
+	private long extractMetalCommandQueue(MemoryStack stack)
+	{
+		org.lwjgl.vulkan.VkExportMetalCommandQueueInfoEXT qInfo =
+			org.lwjgl.vulkan.VkExportMetalCommandQueueInfoEXT.calloc(stack)
+				.sType$Default()
+				.queue(graphicsQueue);
+
+		org.lwjgl.vulkan.VkExportMetalObjectsInfoEXT info =
+			org.lwjgl.vulkan.VkExportMetalObjectsInfoEXT.calloc(stack)
+				.sType$Default()
+				.pNext(qInfo.address());
+
+		org.lwjgl.vulkan.EXTMetalObjects.vkExportMetalObjectsEXT(handle, info);
+		return qInfo.mtlCommandQueue();
 	}
 
 	VkDevice handle()
@@ -144,6 +217,18 @@ final class VulkanDevice implements AutoCloseable
 	int graphicsQueueFamily()
 	{
 		return graphicsQueueFamily;
+	}
+
+	boolean supportsMetalObjects()
+	{
+		return supportsMetalObjects;
+	}
+
+	/** {@code id<MTLCommandQueue>} for the custom-present path. Zero on Linux
+	 *  or if the device didn't advertise VK_EXT_metal_objects. */
+	long metalCommandQueue()
+	{
+		return metalCommandQueue;
 	}
 
 	String deviceName()
@@ -256,6 +341,23 @@ final class VulkanDevice implements AutoCloseable
 			}
 		}
 		return -1;
+	}
+
+	private static boolean deviceSupportsExtension(MemoryStack stack, VkPhysicalDevice pd, String name)
+	{
+		IntBuffer count = stack.mallocInt(1);
+		vkEnumerateDeviceExtensionProperties(pd, (CharSequence) null, count, null);
+		if (count.get(0) == 0) return false;
+		VkExtensionProperties.Buffer props = VkExtensionProperties.calloc(count.get(0), stack);
+		vkEnumerateDeviceExtensionProperties(pd, (CharSequence) null, count, props);
+		for (int i = 0; i < props.capacity(); i++)
+		{
+			if (name.equals(props.get(i).extensionNameString()))
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 
 }

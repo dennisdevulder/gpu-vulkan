@@ -45,7 +45,7 @@ final class SceneRenderer implements AutoCloseable
 	private static final int LAYER_COUNT = LAYERS.length;
 	private static final Layer LAST_STATIC = Layer.GAME_OBJECTS;
 
-	private static final int MAX_VERTICES = 2_000_000;
+	private static final int MAX_VERTICES = 8_000_000;
 	private static final long BUFFER_BYTES = (long) MAX_VERTICES * ScenePipeline.VERTEX_STRIDE;
 	private static final int HSL_HIDDEN = 12345678;
 	private static final int SCENE_OFFSET = (Constants.EXTENDED_SCENE_SIZE - Constants.SCENE_SIZE) / 2;
@@ -160,9 +160,21 @@ final class SceneRenderer implements AutoCloseable
 	 * Drops the dynamic suffix; static layers are preserved. Position the write
 	 * cursor at the dynamic-region start of this frame's slot — the static
 	 * prefix is already mirrored across all slots by {@link #captureScene}.
+	 *
+	 * <p>Waits on this slot's in-flight fence before any CPU write. The OSRS
+	 * engine calls drawScene → drawDynamic → drawTemp → draw, so the CPU writes
+	 * happen before renderer.drawFrame and its own vkWaitForFences. Without
+	 * this wait, the CPU overwrites slot[currentFrame] while the GPU is still
+	 * reading the same slot's vertices from FRAMES_IN_FLIGHT frames ago —
+	 * producing torn-vertex flicker that is wider on macOS because Metal's
+	 * deferred submission keeps frames in flight longer.
 	 */
 	void beginFrame()
 	{
+		try (MemoryStack stack = stackPush())
+		{
+			vkWaitForFences(device.handle(), stack.longs(sync.inFlightFence()), true, Long.MAX_VALUE);
+		}
 		vertexCount = regionEnds[LAST_STATIC.ordinal()];
 		mapped.position(sync.currentFrame() * slotBytes + vertexCount * ScenePipeline.VERTEX_STRIDE);
 		overflowed = false;
@@ -654,11 +666,18 @@ final class SceneRenderer implements AutoCloseable
 					int tick)
 	{
 		if (vertexCount == 0) return;
+		// Slot offset folded into firstVertex below. Binding the buffer
+		// at offset 0 and shifting via firstVertex is mathematically
+		// equivalent to binding with the slot's byte-offset, but avoids
+		// MoltenVK's vertex-buffer-offset translation path which appears
+		// to produce no visible geometry for offsets in the hundreds of
+		// megabytes on Apple Silicon.
+		final int slotFirstVertex = sync.currentFrame() * MAX_VERTICES;
 		try (MemoryStack stack = stackPush())
 		{
 			vkCmdBindVertexBuffers(cmd, 0,
 				stack.longs(vbuf.handle()),
-				stack.longs((long) sync.currentFrame() * slotBytes));
+				stack.longs(0L));
 
 			// Vertex push (96 bytes): mat4 mvp + vec4 fogVtx + ivec4 (tick + pad).
 			ByteBuffer vertPush = stack.malloc(96);
@@ -731,19 +750,25 @@ final class SceneRenderer implements AutoCloseable
 					if (want != boundPipeline)
 					{
 						vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, want.handle());
-						vkCmdPushConstants(cmd, want.layout(), VK_SHADER_STAGE_VERTEX_BIT,   0,  vertPush);
-						vkCmdPushConstants(cmd, want.layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
 						vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
 							want.layout(), 0, stack.longs(descriptorSet), null);
 						boundPipeline = want;
 					}
+					// Re-push every draw. MoltenVK #2483: push constant values
+					// can become undefined across consecutive vkCmdDraw* on the
+					// same command buffer when not re-pushed per draw. Cheap on
+					// the CPU side; eliminates an entire class of macOS-only
+					// glitches where some draws read stale MVP/fog values.
+					vkCmdPushConstants(cmd, want.layout(), VK_SHADER_STAGE_VERTEX_BIT,   0,  vertPush);
+					vkCmdPushConstants(cmd, want.layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
 					if (skipPairs > 0)
 					{
-						drawWithSkips(cmd, drawStart, drawEnd, skipScratch, skipPairs);
+						drawWithSkips(cmd, drawStart, drawEnd, skipScratch, skipPairs, slotFirstVertex,
+							want.layout(), vertPush, fragPush);
 					}
 					else
 					{
-						vkCmdDraw(cmd, count, 1, drawStart, 0);
+						vkCmdDraw(cmd, count, 1, slotFirstVertex + drawStart, 0);
 					}
 				}
 				layerStart = regionEnd;
@@ -779,7 +804,8 @@ final class SceneRenderer implements AutoCloseable
 	/** Issue {@code vkCmdDraw} calls covering [start, end) but skipping each
 	 *  [skips[2k], skips[2k+1]) sub-range. {@code skips} must be sorted by
 	 *  start. Overlapping skip ranges are merged on the fly. */
-	private static void drawWithSkips(VkCommandBuffer cmd, int start, int end, int[] skips, int pairCount)
+	private static void drawWithSkips(VkCommandBuffer cmd, int start, int end, int[] skips, int pairCount, int slotFirstVertex,
+									  long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
 	{
 		int cursor = start;
 		for (int k = 0; k < pairCount; k++)
@@ -790,12 +816,22 @@ final class SceneRenderer implements AutoCloseable
 			if (s > cursor)
 			{
 				int n = Math.min(s, end) - cursor;
-				if (n > 0) vkCmdDraw(cmd, n, 1, cursor, 0);
+				if (n > 0)
+				{
+					vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,   0,  vertPush);
+					vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
+					vkCmdDraw(cmd, n, 1, slotFirstVertex + cursor, 0);
+				}
 			}
 			cursor = Math.max(cursor, e);
 			if (cursor >= end) return;
 		}
-		if (cursor < end) vkCmdDraw(cmd, end - cursor, 1, cursor, 0);
+		if (cursor < end)
+		{
+			vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,   0,  vertPush);
+			vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
+			vkCmdDraw(cmd, end - cursor, 1, slotFirstVertex + cursor, 0);
+		}
 	}
 
 	int vertexCount() { return vertexCount; }
@@ -827,12 +863,17 @@ final class SceneRenderer implements AutoCloseable
 		// Pre-decoding HSL→RGB on CPU and letting the GPU linearly
 		// interpolate RGB blurs everything into uniform color.
 		float light = (float) (hsl16 & 0xFFFF);
+		// 12 floats per vertex; vec3 position and vec3 color each padded
+		// to vec4 (trailing 0f) to satisfy Metal's 16-byte attribute
+		// alignment via MoltenVK. See ScenePipeline.VERTEX_STRIDE comment.
 		mapped.putFloat(rx + wx);
 		mapped.putFloat(ly + wy);
 		mapped.putFloat(rz + wz);
+		mapped.putFloat(0f);            // pad
 		mapped.putFloat(rgb[0]);
 		mapped.putFloat(rgb[1]);
 		mapped.putFloat(rgb[2]);
+		mapped.putFloat(0f);            // pad
 		mapped.putFloat(light);
 		mapped.putFloat(u);
 		mapped.putFloat(v);
@@ -852,12 +893,16 @@ final class SceneRenderer implements AutoCloseable
 		// Pre-decoding HSL→RGB on CPU and letting the GPU linearly
 		// interpolate RGB blurs everything into uniform color.
 		float light = (float) (hsl16 & 0xFFFF);
+		// 12 floats per vertex; vec3 position and vec3 color each padded
+		// to vec4 (trailing 0f) — see ScenePipeline.VERTEX_STRIDE comment.
 		mapped.putFloat(x);
 		mapped.putFloat(y);
 		mapped.putFloat(z);
+		mapped.putFloat(0f);            // pad
 		mapped.putFloat(rgb[0]);
 		mapped.putFloat(rgb[1]);
 		mapped.putFloat(rgb[2]);
+		mapped.putFloat(0f);            // pad
 		mapped.putFloat(light);
 		mapped.putFloat(u);
 		mapped.putFloat(v);

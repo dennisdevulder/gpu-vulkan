@@ -26,8 +26,14 @@ interface PlatformSurface
 
 	/** Pick the implementation matching the running OS. Throws with a clear
 	 *  message on platforms we don't yet support so the plugin enable path
-	 *  surfaces a usable error rather than a confusing Vulkan failure. */
-	static PlatformSurface current()
+	 *  surfaces a usable error rather than a confusing Vulkan failure.
+	 *
+	 *  @param vsync macOS only — when true, CAMetalLayer is configured with
+	 *               {@code displaySyncEnabled = YES} so presents block until
+	 *               the next display refresh. Other platforms ignore this
+	 *               (their vsync behaviour is controlled via Vulkan present
+	 *               modes on the swapchain side). */
+	static PlatformSurface current(boolean vsync)
 	{
 		String os = System.getProperty("os.name", "").toLowerCase();
 		if (os.contains("linux") || os.contains("nix") || os.contains("nux") || os.contains("aix"))
@@ -40,7 +46,7 @@ interface PlatformSurface
 		}
 		if (os.contains("mac") || os.contains("darwin"))
 		{
-			return new MacOSPlatformSurface();
+			return new MacOSPlatformSurface(vsync);
 		}
 		throw new UnsupportedOperationException(
 			"GPU (Vulkan) plugin: unsupported OS \"" + System.getProperty("os.name") + "\"");

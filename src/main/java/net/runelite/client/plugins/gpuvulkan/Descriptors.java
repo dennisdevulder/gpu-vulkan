@@ -14,23 +14,23 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK13.*;
 
 /**
- * Single combined-image-sampler descriptor: binding 0 in the fragment shader.
- * One pool, one layout, one set — no per-frame variation yet (M4 always
- * samples the same UI texture).
- *
- * <p>{@link #updateBinding} is called whenever the texture is recreated
- * (canvas resize → new VkImageView → set must be rewritten).
+ * Single combined-image-sampler descriptor (binding 0 in the UI fragment
+ * shader), allocated once per in-flight frame slot. Each slot's set is bound
+ * to its own UI texture so frame N's GPU sampling can't conflict with frame
+ * N+1's GPU texture write — without per-slot sets we'd be rebinding the
+ * SAME set's image while the previous frame might still be reading it.
  */
 final class Descriptors implements AutoCloseable
 {
 	private final VulkanDevice device;
 	private final long pool;
 	private final long layout;
-	private final long descriptorSet;
+	private final long[] descriptorSets;
 
 	Descriptors(VulkanDevice device)
 	{
 		this.device = device;
+		this.descriptorSets = new long[FrameSync.FRAMES_IN_FLIGHT];
 		try (MemoryStack stack = stackPush())
 		{
 			VkDescriptorSetLayoutBinding.Buffer binding = VkDescriptorSetLayoutBinding.calloc(1, stack);
@@ -53,11 +53,11 @@ final class Descriptors implements AutoCloseable
 			VkDescriptorPoolSize.Buffer sizes = VkDescriptorPoolSize.calloc(1, stack);
 			sizes.get(0)
 				.type(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
-				.descriptorCount(1);
+				.descriptorCount(FrameSync.FRAMES_IN_FLIGHT);
 
 			VkDescriptorPoolCreateInfo poolInfo = VkDescriptorPoolCreateInfo.calloc(stack)
 				.sType$Default()
-				.maxSets(1)
+				.maxSets(FrameSync.FRAMES_IN_FLIGHT)
 				.pPoolSizes(sizes);
 			LongBuffer pPool = stack.mallocLong(1);
 			if (vkCreateDescriptorPool(device.handle(), poolInfo, null, pPool) != VK_SUCCESS)
@@ -67,18 +67,26 @@ final class Descriptors implements AutoCloseable
 			}
 			pool = pPool.get(0);
 
+			LongBuffer pLayouts = stack.mallocLong(FrameSync.FRAMES_IN_FLIGHT);
+			for (int i = 0; i < FrameSync.FRAMES_IN_FLIGHT; i++)
+			{
+				pLayouts.put(i, layout);
+			}
 			VkDescriptorSetAllocateInfo alloc = VkDescriptorSetAllocateInfo.calloc(stack)
 				.sType$Default()
 				.descriptorPool(pool)
-				.pSetLayouts(stack.longs(layout));
-			LongBuffer pSet = stack.mallocLong(1);
-			if (vkAllocateDescriptorSets(device.handle(), alloc, pSet) != VK_SUCCESS)
+				.pSetLayouts(pLayouts);
+			LongBuffer pSets = stack.mallocLong(FrameSync.FRAMES_IN_FLIGHT);
+			if (vkAllocateDescriptorSets(device.handle(), alloc, pSets) != VK_SUCCESS)
 			{
 				vkDestroyDescriptorPool(device.handle(), pool, null);
 				vkDestroyDescriptorSetLayout(device.handle(), layout, null);
 				throw new RuntimeException("vkAllocateDescriptorSets failed");
 			}
-			descriptorSet = pSet.get(0);
+			for (int i = 0; i < FrameSync.FRAMES_IN_FLIGHT; i++)
+			{
+				descriptorSets[i] = pSets.get(i);
+			}
 		}
 	}
 
@@ -87,12 +95,12 @@ final class Descriptors implements AutoCloseable
 		return layout;
 	}
 
-	long descriptorSet()
+	long descriptorSet(int slot)
 	{
-		return descriptorSet;
+		return descriptorSets[slot];
 	}
 
-	void updateBinding(Texture texture)
+	void updateBinding(int slot, Texture texture)
 	{
 		try (MemoryStack stack = stackPush())
 		{
@@ -105,7 +113,7 @@ final class Descriptors implements AutoCloseable
 			VkWriteDescriptorSet.Buffer write = VkWriteDescriptorSet.calloc(1, stack);
 			write.get(0)
 				.sType$Default()
-				.dstSet(descriptorSet)
+				.dstSet(descriptorSets[slot])
 				.dstBinding(0)
 				.dstArrayElement(0)
 				.descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)

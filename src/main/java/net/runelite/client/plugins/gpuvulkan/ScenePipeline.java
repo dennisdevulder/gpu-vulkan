@@ -42,12 +42,18 @@ import static org.lwjgl.vulkan.VK13.*;
  */
 final class ScenePipeline implements AutoCloseable
 {
-	static final int VERTEX_STRIDE = 40; // 10 × 4 bytes
-	static final int OFFSET_POS      = 0;
-	static final int OFFSET_COLOR    = 12;
-	static final int OFFSET_LIGHT    = 24;
-	static final int OFFSET_UV       = 28;
-	static final int OFFSET_TEXLAYER = 36;
+	// 12 × 4 bytes — vec3 position and vec3 color are bound as 4-component
+	// formats with a trailing dummy float, because MoltenVK's vec3 attribute
+	// alignment handling produces garbage values in the vertex shader on
+	// Metal (KhronosGroup/MoltenVK#2182). Padding to vec4-aligned bindings
+	// sidesteps the bug — the shader still declares vec3 inputs and Vulkan
+	// drops the unused W component, so Linux drivers are unaffected.
+	static final int VERTEX_STRIDE = 48;
+	static final int OFFSET_POS      = 0;   // vec3, padded to vec4 (16 bytes)
+	static final int OFFSET_COLOR    = 16;  // vec3, padded to vec4 (16 bytes)
+	static final int OFFSET_LIGHT    = 32;
+	static final int OFFSET_UV       = 36;
+	static final int OFFSET_TEXLAYER = 44;
 
 	private final VulkanDevice device;
 	private final long descriptorSetLayout;
@@ -75,11 +81,11 @@ final class ScenePipeline implements AutoCloseable
 			binding.get(0).binding(0).stride(VERTEX_STRIDE).inputRate(VK_VERTEX_INPUT_RATE_VERTEX);
 
 			VkVertexInputAttributeDescription.Buffer attrs = VkVertexInputAttributeDescription.calloc(5, stack);
-			attrs.get(0).binding(0).location(0).format(VK_FORMAT_R32G32B32_SFLOAT).offset(OFFSET_POS);
-			attrs.get(1).binding(0).location(1).format(VK_FORMAT_R32G32B32_SFLOAT).offset(OFFSET_COLOR);
-			attrs.get(2).binding(0).location(2).format(VK_FORMAT_R32_SFLOAT)      .offset(OFFSET_LIGHT);
-			attrs.get(3).binding(0).location(3).format(VK_FORMAT_R32G32_SFLOAT)   .offset(OFFSET_UV);
-			attrs.get(4).binding(0).location(4).format(VK_FORMAT_R32_UINT)        .offset(OFFSET_TEXLAYER);
+			attrs.get(0).binding(0).location(0).format(VK_FORMAT_R32G32B32A32_SFLOAT).offset(OFFSET_POS);
+			attrs.get(1).binding(0).location(1).format(VK_FORMAT_R32G32B32A32_SFLOAT).offset(OFFSET_COLOR);
+			attrs.get(2).binding(0).location(2).format(VK_FORMAT_R32_SFLOAT)         .offset(OFFSET_LIGHT);
+			attrs.get(3).binding(0).location(3).format(VK_FORMAT_R32G32_SFLOAT)      .offset(OFFSET_UV);
+			attrs.get(4).binding(0).location(4).format(VK_FORMAT_R32_UINT)           .offset(OFFSET_TEXLAYER);
 
 			VkPipelineVertexInputStateCreateInfo vertexInput =
 				VkPipelineVertexInputStateCreateInfo.calloc(stack).sType$Default()

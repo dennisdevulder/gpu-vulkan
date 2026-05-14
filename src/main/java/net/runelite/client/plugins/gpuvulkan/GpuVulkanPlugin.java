@@ -7,6 +7,7 @@ import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.BufferProvider;
 import net.runelite.api.Client;
 import net.runelite.api.GameObject;
+import net.runelite.api.GameState;
 import net.runelite.api.Model;
 import net.runelite.api.NPC;
 import net.runelite.api.Player;
@@ -17,6 +18,7 @@ import net.runelite.api.SceneTileModel;
 import java.util.Set;
 import net.runelite.api.SceneTilePaint;
 import net.runelite.api.Texture;
+import net.runelite.api.TextureProvider;
 import net.runelite.api.TileObject;
 import net.runelite.api.hooks.DrawCallbacks;
 import net.runelite.client.callback.ClientThread;
@@ -69,24 +71,26 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 	private final DrawCallbackStats stats = new DrawCallbackStats();
 	private volatile double lastCamX, lastCamY, lastCamZ;
 	private volatile double lastCamPitch, lastCamYaw;
+	private volatile boolean startRequested;
 	private static boolean shutdownHookRegistered;
 
 	@Override
 	protected void startUp()
 	{
 		log.info("Starting GPU (Vulkan)");
-		// Bail out before touching AWT state on platforms we can't render on
-		// yet (currently macOS). Doing this here gives the user a clear
-		// reason in the plugin-enable error toast instead of letting them
-		// hit a confusing JAWT/Vulkan failure mid-setup.
-		platform = PlatformSurface.current();
-		if (platform instanceof MacOSPlatformSurface)
-		{
-			platform = null;
-			throw new UnsupportedOperationException(
-				"GPU (Vulkan) plugin on macOS is not implemented yet — "
-					+ "use the stock GPU (OpenGL) plugin in the meantime.");
-		}
+		startRequested = true;
+		// macOS CAMetalLayer.displaySyncEnabled is set from this. VSYNC and
+		// TRIPLE_BUFFER both pin to display refresh (the macOS compositor has
+		// only one knob — vsync on/off); UNCAPPED releases it. Linux/Windows
+		// path picks Vulkan present mode separately based on the same config.
+		boolean wantVsync = config.fpsMode() != GpuVulkanPluginConfig.FpsMode.UNCAPPED;
+		platform = PlatformSurface.current(wantVsync);
+		// macOS doesn't need (and shouldn't run) the rlawt/X11 canvas-attach
+		// dance below — Cocoa's AWT layer model is JAWT_SurfaceLayers-based
+		// and MacOSPlatformSurface does the JAWT lock + CAMetalLayer attach
+		// itself. Attaching rlawt's CAOpenGLLayer first would also conflict
+		// with our subsequent setLayer: call.
+		final boolean isMac = platform instanceof MacOSPlatformSurface;
 		// One-time JVM-lifetime hook: logs when the JVM is shutting down so
 		// we can distinguish clean exit (System.exit / window close / etc.)
 		// from a hard native crash (no hook fires). Registered once; the
@@ -101,47 +105,85 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 		{
 			try
 			{
-				canvas = client.getCanvas();
-				// Mirror stock GpuPlugin's full canvas-attachment dance.
-				// We render via Vulkan, NOT GL — but the GLX context AWT thinks
-				// the canvas has is what keeps libawt_xawt.so's native state
-				// consistent across canvas peer manipulations (sidebar collapse
-				// fires Component resize events with no hierarchy change, but
-				// the underlying X11 backing buffer/pixmap still gets rebuilt
-				// by AWT). Without a GL context bound, AWT's resize-handler
-				// hits a dangling pointer mid-rebuild and exit_group(1)s the
-				// EDT (verified via strace).
-				//
-				// detachCurrent() right after creation: rlawt's createGLContext
-				// makes the new context current on the calling thread by
-				// default. We don't render through GL, so we unbind it
-				// immediately. The context still exists and AWT's native state
-				// is well-formed; we just don't hold it as the active GL
-				// context on the Client thread.
-				net.runelite.rlawt.AWTContext.loadNatives();
-				synchronized (canvas.getTreeLock())
+				if (!startRequested)
 				{
-					if (!canvas.isValid())
-					{
-						throw new RuntimeException("Canvas not valid at plugin start");
-					}
-					awtContext = new net.runelite.rlawt.AWTContext(canvas);
-					awtContext.configurePixelFormat(0, 0, 0);
+					return true;
 				}
-				awtContext.createGLContext();
-				// NOT calling detachCurrent — stock leaves the GL context
-				// current on the Client thread for the lifetime of its rendering.
-				// AWT's native code may expect the canvas's GLX context to be
-				// "owned" by a thread for canvas state operations to be coherent
-				// (resize/peer manipulation walks the context's binding). We
-				// don't actually USE the GL context for rendering; we just keep
-				// it bound so AWT's tracking stays consistent.
+				TextureProvider textureProvider = client.getTextureProvider();
+				if (textureProvider == null)
+				{
+					log.debug("Deferring GPU (Vulkan) startup until the texture provider is available");
+					return false;
+				}
+				/* Defer until the user is actually in the world. Attaching on
+				 * the login screen attaches over a canvas that the OSRS client
+				 * isn't yet pushing scene data to, which on macOS makes
+				 * debugging the surface/compositing path harder (empty layer
+				 * = "broken" even when everything works). Wait for LOGGED_IN
+				 * so the first attach happens with a real scene rendering. */
+				if (client.getGameState() != GameState.LOGGED_IN)
+				{
+					log.debug("Deferring GPU (Vulkan) startup until game state is LOGGED_IN (currently {})",
+						client.getGameState());
+					return false;
+				}
+				canvas = client.getCanvas();
+				// X11 specifically requires that the canvas have a live GL
+				// context bound for AWT's resize handling to remain coherent;
+				// see the long comment below. macOS doesn't share this quirk
+				// (Cocoa's layer-backed AWT canvas doesn't depend on a GL
+				// context for peer state) — and on macOS we attach a Metal
+				// layer ourselves in MacOSPlatformSurface, so an rlawt GL
+				// layer here would conflict. Skip on Mac.
+				if (!isMac)
+				{
+					// Mirror stock GpuPlugin's full canvas-attachment dance.
+					// We render via Vulkan, NOT GL — but the GLX context AWT thinks
+					// the canvas has is what keeps libawt_xawt.so's native state
+					// consistent across canvas peer manipulations (sidebar collapse
+					// fires Component resize events with no hierarchy change, but
+					// the underlying X11 backing buffer/pixmap still gets rebuilt
+					// by AWT). Without a GL context bound, AWT's resize-handler
+					// hits a dangling pointer mid-rebuild and exit_group(1)s the
+					// EDT (verified via strace).
+					//
+					// detachCurrent() right after creation: rlawt's createGLContext
+					// makes the new context current on the calling thread by
+					// default. We don't render through GL, so we unbind it
+					// immediately. The context still exists and AWT's native state
+					// is well-formed; we just don't hold it as the active GL
+					// context on the Client thread.
+					net.runelite.rlawt.AWTContext.loadNatives();
+					synchronized (canvas.getTreeLock())
+					{
+						if (!canvas.isValid())
+						{
+							throw new RuntimeException("Canvas not valid at plugin start");
+						}
+						awtContext = new net.runelite.rlawt.AWTContext(canvas);
+						awtContext.configurePixelFormat(0, 0, 0);
+					}
+					awtContext.createGLContext();
+					// NOT calling detachCurrent — stock leaves the GL context
+					// current on the Client thread for the lifetime of its rendering.
+					// AWT's native code may expect the canvas's GLX context to be
+					// "owned" by a thread for canvas state operations to be coherent
+					// (resize/peer manipulation walks the context's binding). We
+					// don't actually USE the GL context for rendering; we just keep
+					// it bound so AWT's tracking stays consistent.
+				}
 				canvas.setIgnoreRepaint(true);
 				canvas.setFocusable(true);
 				canvas.requestFocusInWindow();
 
 				disposables = new Disposables();
-				instance = new VulkanInstance(config.validation(), platform);
+				// System property wins over stored config: `-Dvkgpu.validation=true`
+				// always forces validation on, regardless of whether the user ever
+				// toggled the config option in the UI (which would otherwise
+				// persist `false` and shadow the property via the config proxy).
+				boolean validationOn = Boolean.parseBoolean(System.getProperty("vkgpu.validation", "false"))
+					|| config.validation();
+				instance = new VulkanInstance(validationOn, platform);
 				disposables.add(instance);
 
 				surface = new VulkanSurface(instance, platform, canvas);
@@ -199,7 +241,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 				// Texture array gets populated from the OSRS texture provider
 				// once at startup. Layer 0 is the white "no-texture" tile;
 				// layer N+1 holds OSRS texture id N.
-				textureArray = new TextureArray(device, client.getTextureProvider(),
+				textureArray = new TextureArray(device, textureProvider,
 					config.anisotropicFilteringLevel());
 				disposables.add(textureArray);
 
@@ -207,7 +249,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 				applyWireframeConfig();
 				disposables.add(sceneRenderer);
 
-				interfaceRenderer = new InterfaceRenderer(device, renderPass);
+				interfaceRenderer = new InterfaceRenderer(device, sync, renderPass);
 				disposables.add(interfaceRenderer);
 
 				framebuffers = new Framebuffers(device, renderPass, swapchain, depthBuffer, msaaColor);
@@ -298,6 +340,10 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 				{
 					canvas.setIgnoreRepaint(false);
 				}
+				if (platform instanceof MacOSPlatformSurface)
+				{
+					MacOSMetalHelper.detachMetalLayer();
+				}
 				instance = null;
 				surface = null;
 				device = null;
@@ -314,6 +360,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 				canvas = null;
 				throw e;
 			}
+			return true;
 		});
 	}
 
@@ -321,6 +368,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 	protected void shutDown()
 	{
 		log.info("Stopping GPU (Vulkan)");
+		startRequested = false;
 		clientThread.invoke(() ->
 		{
 			// Teardown order mirrors stock GpuPlugin's shutDown. awtContext.destroy()
@@ -361,6 +409,14 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 				awtContext = null;
 			}
 
+			if (platform instanceof MacOSPlatformSurface)
+			{
+				MacOSMetalHelper.detachMetalLayer();
+			}
+			if (canvas != null)
+			{
+				canvas.setIgnoreRepaint(false);
+			}
 			client.resizeCanvas();
 			instance = null;
 			surface = null;

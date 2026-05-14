@@ -101,6 +101,14 @@ final class Swapchain implements AutoCloseable
 		}
 		if (retiringHandle != VK_NULL_HANDLE)
 		{
+			// Second drain immediately before the old VkSwapchainKHR goes
+			// away. MoltenVK#2609 reports artifacts on Apple Silicon when
+			// the old swapchain's Metal resources are still being touched
+			// by the just-created new swapchain at destroy time. The
+			// vkDeviceWaitIdle at the top of recreate() drains submits BEFORE
+			// the new swapchain is built; this one drains anything the
+			// build path itself queued, eliminating the window.
+			vkDeviceWaitIdle(device.handle());
 			KHRSwapchain.vkDestroySwapchainKHR(device.handle(), retiringHandle, null);
 		}
 	}
@@ -137,7 +145,14 @@ final class Swapchain implements AutoCloseable
 
 			int presentMode = pickPresentMode(stack);
 
-			int imageCount = caps.minImageCount() + 1;
+			// MoltenVK Runtime Guide explicitly recommends 3 swapchain
+			// images (triple-buffering) on Apple Silicon: "particularly
+			// important when rendering to a full-screen surface, because
+			// in that situation, Metal uses its Direct to Display feature".
+			// On other platforms minImageCount + 1 happens to land on 3 by
+			// chance; pin it explicitly so we don't drop to 2 if a driver
+			// advertises minImageCount = 1.
+			int imageCount = Math.max(3, caps.minImageCount());
 			if (caps.maxImageCount() > 0 && imageCount > caps.maxImageCount())
 			{
 				imageCount = caps.maxImageCount();
@@ -256,6 +271,19 @@ final class Swapchain implements AutoCloseable
 		}
 
 		// FIFO is always supported and is the spec-required fallback.
+		// On macOS (MoltenVK), MAILBOX is layered over CAMetalLayer's
+		// drawable pool and lets newer drawables replace older ones in
+		// the queue. Combined with AppKit's CAMetalLayer compositing
+		// (no synchronous render callback like CAOpenGLLayer), this
+		// causes older drawables to occasionally present out of order
+		// for one refresh — the user sees the previous frame's average
+		// color flickering through. Force FIFO on macOS to guarantee
+		// strict drawable ordering regardless of fpsMode preference.
+		boolean isMac = System.getProperty("os.name", "").toLowerCase().contains("mac");
+		if (isMac)
+		{
+			return KHRSurface.VK_PRESENT_MODE_FIFO_KHR;
+		}
 		switch (fpsMode)
 		{
 			case UNCAPPED:
