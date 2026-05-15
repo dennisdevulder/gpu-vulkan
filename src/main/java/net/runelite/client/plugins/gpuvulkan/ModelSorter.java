@@ -1,15 +1,38 @@
 /*
- * Port of stock GPU plugin's FacePrioritySorter (CPU-side face sort).
+ * The bucket-sort algorithm and the per-vertex projection / orient-rotate
+ * scaffolding below are ported from RuneLite's
+ * {@code net.runelite.client.plugins.gpu.FacePrioritySorter} (BSD-2-Clause).
+ * Original copyright + license:
  *
- * Stock GpuPlugin runs this once per dynamic model per frame: project the
- * model's vertices through the engine-supplied Projection, bucket each face
- * by camera-space depth, then emit triangles back-to-front. We don't ship
- * the per-priority interleave yet (stock's prioritySort path) — it only
- * fires for the rare RENDERMODE_SORTED_NO_DEPTH renderables.
+ *   Copyright (c) 2018, Adam <Adam@sigterm.info>
+ *   All rights reserved.
  *
- * This class owns scratch arrays so we don't allocate per-call. One instance
- * is shared by SceneRenderer; the sort is run sequentially from the Client
- * thread, so no thread-safety concerns.
+ *   Redistribution and use in source and binary forms, with or without
+ *   modification, are permitted provided that the following conditions are met:
+ *
+ *   1. Redistributions of source code must retain the above copyright notice, this
+ *      list of conditions and the following disclaimer.
+ *   2. Redistributions in binary form must reproduce the above copyright notice,
+ *      this list of conditions and the following disclaimer in the documentation
+ *      and/or other materials provided with the distribution.
+ *
+ *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ *   ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ *   WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ *   DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ *   ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ *   (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ *   LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ *   ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ *   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ * Adapted to Vulkan: stock writes pre-shuffled vertex bytes into an
+ * {@code IntBuffer}; we return ordered face indices via {@link #sortedFaces}
+ * and let {@link SceneRenderer#captureModelSorted} emit each face into the
+ * shared vertex buffer. The per-priority interleave (stock's
+ * {@code prioritySort = true} path) is not ported — it only fires for the
+ * rare {@code RENDERMODE_SORTED_NO_DEPTH} renderables.
  */
 package net.runelite.client.plugins.gpuvulkan;
 

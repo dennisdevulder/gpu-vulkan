@@ -69,10 +69,7 @@ final class DepthBuffer implements AutoCloseable
 				.initialLayout(VK_IMAGE_LAYOUT_UNDEFINED);
 
 			LongBuffer pImage = stack.mallocLong(1);
-			if (vkCreateImage(device.handle(), info, null, pImage) != VK_SUCCESS)
-			{
-				throw new RuntimeException("vkCreateImage (depth) failed");
-			}
+			Vk.check("vkCreateImage (depth)", vkCreateImage(device.handle(), info, null, pImage));
 			image = pImage.get(0);
 
 			VkMemoryRequirements memReq = VkMemoryRequirements.calloc(stack);
@@ -105,10 +102,7 @@ final class DepthBuffer implements AutoCloseable
 				.baseArrayLayer(0).layerCount(1);
 
 			LongBuffer pView = stack.mallocLong(1);
-			if (vkCreateImageView(device.handle(), viewInfo, null, pView) != VK_SUCCESS)
-			{
-				throw new RuntimeException("vkCreateImageView (depth) failed");
-			}
+			Vk.check("vkCreateImageView (depth)", vkCreateImageView(device.handle(), viewInfo, null, pView));
 			view = pView.get(0);
 		}
 	}

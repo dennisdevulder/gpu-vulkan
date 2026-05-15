@@ -79,12 +79,8 @@ final class Win32PlatformSurface implements PlatformSurface
 								.hinstance(hinstance)
 								.hwnd(hwnd);
 							LongBuffer pSurface = stack.mallocLong(1);
-							int r = KHRWin32Surface.vkCreateWin32SurfaceKHR(
-								instance.handle(), info, null, pSurface);
-							if (r != VK_SUCCESS)
-							{
-								throw new RuntimeException("vkCreateWin32SurfaceKHR failed: " + r);
-							}
+							Vk.check("vkCreateWin32SurfaceKHR", KHRWin32Surface.vkCreateWin32SurfaceKHR(
+								instance.handle(), info, null, pSurface));
 							return pSurface.get(0);
 						}
 					}

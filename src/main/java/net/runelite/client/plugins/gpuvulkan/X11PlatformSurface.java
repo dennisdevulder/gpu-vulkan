@@ -72,12 +72,8 @@ final class X11PlatformSurface implements PlatformSurface
 								.dpy(x11.display())
 								.window(x11.drawable());
 							LongBuffer pSurface = stack.mallocLong(1);
-							int r = KHRXlibSurface.vkCreateXlibSurfaceKHR(
-								instance.handle(), info, null, pSurface);
-							if (r != VK_SUCCESS)
-							{
-								throw new RuntimeException("vkCreateXlibSurfaceKHR failed: " + r);
-							}
+							Vk.check("vkCreateXlibSurfaceKHR", KHRXlibSurface.vkCreateXlibSurfaceKHR(
+								instance.handle(), info, null, pSurface));
 							return pSurface.get(0);
 						}
 					}

@@ -140,11 +140,7 @@ final class MetalDrawableSet implements AutoCloseable
 				.initialLayout(VK_IMAGE_LAYOUT_UNDEFINED);
 
 			LongBuffer pImage = stack.mallocLong(1);
-			int r = vkCreateImage(device.handle(), imageInfo, null, pImage);
-			if (r != VK_SUCCESS)
-			{
-				throw new RuntimeException("vkCreateImage (imported MTLTexture) failed: " + r);
-			}
+			Vk.check("vkCreateImage (imported MTLTexture)", vkCreateImage(device.handle(), imageInfo, null, pImage));
 			long image = pImage.get(0);
 
 			// Imported images come pre-bound to the Metal storage. The spec

@@ -175,11 +175,7 @@ final class Swapchain implements AutoCloseable
 				.oldSwapchain(oldSwapchainHandle);
 
 			LongBuffer pSwap = stack.mallocLong(1);
-			int r = KHRSwapchain.vkCreateSwapchainKHR(device.handle(), info, null, pSwap);
-			if (r != VK_SUCCESS)
-			{
-				throw new RuntimeException("vkCreateSwapchainKHR failed: " + r);
-			}
+			Vk.check("vkCreateSwapchainKHR", KHRSwapchain.vkCreateSwapchainKHR(device.handle(), info, null, pSwap));
 			handle = pSwap.get(0);
 
 			IntBuffer count = stack.mallocInt(1);
@@ -210,10 +206,7 @@ final class Swapchain implements AutoCloseable
 			.baseArrayLayer(0).layerCount(1);
 
 		LongBuffer p = stack.mallocLong(1);
-		if (vkCreateImageView(device.handle(), info, null, p) != VK_SUCCESS)
-		{
-			throw new RuntimeException("vkCreateImageView failed");
-		}
+		Vk.check("vkCreateImageView (swapchain)", vkCreateImageView(device.handle(), info, null, p));
 		return p.get(0);
 	}
 

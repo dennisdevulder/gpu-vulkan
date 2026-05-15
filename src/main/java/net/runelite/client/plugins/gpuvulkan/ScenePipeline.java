@@ -186,10 +186,7 @@ final class ScenePipeline implements AutoCloseable
 				.sType$Default()
 				.pBindings(dsBindings);
 			LongBuffer pDsl = stack.mallocLong(1);
-			if (vkCreateDescriptorSetLayout(device.handle(), dsInfo, null, pDsl) != VK_SUCCESS)
-			{
-				throw new RuntimeException("vkCreateDescriptorSetLayout (scene) failed");
-			}
+			Vk.check("vkCreateDescriptorSetLayout (scene)", vkCreateDescriptorSetLayout(device.handle(), dsInfo, null, pDsl));
 			descriptorSetLayout = pDsl.get(0);
 
 			// Push constant layout (128 bytes total — at Vulkan's guaranteed minimum):
@@ -267,10 +264,7 @@ final class ScenePipeline implements AutoCloseable
 				.sType$Default()
 				.pCode(code);
 			LongBuffer p = stack.mallocLong(1);
-			if (vkCreateShaderModule(device.handle(), info, null, p) != VK_SUCCESS)
-			{
-				throw new RuntimeException("vkCreateShaderModule failed");
-			}
+			Vk.check("vkCreateShaderModule", vkCreateShaderModule(device.handle(), info, null, p));
 			return p.get(0);
 		}
 		finally

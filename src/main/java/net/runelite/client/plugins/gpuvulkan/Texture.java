@@ -54,10 +54,7 @@ final class Texture implements AutoCloseable
 				.initialLayout(VK_IMAGE_LAYOUT_UNDEFINED);
 
 			LongBuffer pImage = stack.mallocLong(1);
-			if (vkCreateImage(device.handle(), info, null, pImage) != VK_SUCCESS)
-			{
-				throw new RuntimeException("vkCreateImage failed");
-			}
+			Vk.check("vkCreateImage", vkCreateImage(device.handle(), info, null, pImage));
 			image = pImage.get(0);
 
 			VkMemoryRequirements memReq = VkMemoryRequirements.calloc(stack);
@@ -90,10 +87,7 @@ final class Texture implements AutoCloseable
 				.baseArrayLayer(0).layerCount(1);
 
 			LongBuffer pView = stack.mallocLong(1);
-			if (vkCreateImageView(device.handle(), viewInfo, null, pView) != VK_SUCCESS)
-			{
-				throw new RuntimeException("vkCreateImageView failed");
-			}
+			Vk.check("vkCreateImageView", vkCreateImageView(device.handle(), viewInfo, null, pView));
 			view = pView.get(0);
 
 			VkSamplerCreateInfo sampInfo = VkSamplerCreateInfo.calloc(stack)
@@ -108,10 +102,7 @@ final class Texture implements AutoCloseable
 				.unnormalizedCoordinates(false);
 
 			LongBuffer pSamp = stack.mallocLong(1);
-			if (vkCreateSampler(device.handle(), sampInfo, null, pSamp) != VK_SUCCESS)
-			{
-				throw new RuntimeException("vkCreateSampler failed");
-			}
+			Vk.check("vkCreateSampler", vkCreateSampler(device.handle(), sampInfo, null, pSamp));
 			sampler = pSamp.get(0);
 		}
 	}
@@ -122,6 +113,23 @@ final class Texture implements AutoCloseable
 	int width() { return width; }
 	int height() { return height; }
 
+	/**
+	 * Layout-transition helper for the three transitions the UI texture cycle
+	 * needs:
+	 * <ol>
+	 *   <li>{@code UNDEFINED -> TRANSFER_DST_OPTIMAL} — initial upload.
+	 *       {@code TOP_OF_PIPE} as the src stage is correct for an initial
+	 *       transition: there are no prior writes to synchronise against,
+	 *       only the layout switch itself.</li>
+	 *   <li>{@code TRANSFER_DST_OPTIMAL -> SHADER_READ_ONLY_OPTIMAL} — after
+	 *       upload, before sampling.</li>
+	 *   <li>{@code SHADER_READ_ONLY_OPTIMAL -> TRANSFER_DST_OPTIMAL} — start of
+	 *       the next frame's upload cycle.</li>
+	 * </ol>
+	 * Any other (old, new) pair throws — the texture's usage pattern is
+	 * deliberately constrained and adding new transitions should be a
+	 * conscious change, not a silently-accepted one.
+	 */
 	void transitionLayout(VkCommandBuffer cmd, int newLayout)
 	{
 		try (MemoryStack stack = stackPush())
@@ -150,7 +158,11 @@ final class Texture implements AutoCloseable
 			}
 			else
 			{
-				throw new IllegalStateException("Unsupported transition: " + currentLayout + " -> " + newLayout);
+				throw new IllegalStateException(
+					"Texture.transitionLayout: unsupported (oldLayout=" + currentLayout
+						+ ", newLayout=" + newLayout + "). Only the UI upload cycle's "
+						+ "three transitions are wired up — add a new branch with the "
+						+ "matching stage/access masks if you need another.");
 			}
 
 			VkImageMemoryBarrier.Buffer barrier = VkImageMemoryBarrier.calloc(1, stack);

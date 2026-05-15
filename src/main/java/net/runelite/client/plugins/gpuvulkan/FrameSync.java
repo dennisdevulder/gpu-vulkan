@@ -124,20 +124,14 @@ final class FrameSync implements AutoCloseable
 	private long createSemaphore(MemoryStack stack, VkSemaphoreCreateInfo info)
 	{
 		LongBuffer p = stack.mallocLong(1);
-		if (vkCreateSemaphore(device.handle(), info, null, p) != VK_SUCCESS)
-		{
-			throw new RuntimeException("vkCreateSemaphore failed");
-		}
+		Vk.check("vkCreateSemaphore", vkCreateSemaphore(device.handle(), info, null, p));
 		return p.get(0);
 	}
 
 	private long createFence(MemoryStack stack, VkFenceCreateInfo info)
 	{
 		LongBuffer p = stack.mallocLong(1);
-		if (vkCreateFence(device.handle(), info, null, p) != VK_SUCCESS)
-		{
-			throw new RuntimeException("vkCreateFence failed");
-		}
+		Vk.check("vkCreateFence", vkCreateFence(device.handle(), info, null, p));
 		return p.get(0);
 	}
 }

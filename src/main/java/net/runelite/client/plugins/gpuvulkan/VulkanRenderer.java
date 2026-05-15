@@ -99,10 +99,7 @@ final class VulkanRenderer implements AutoCloseable
 				.flags(VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT)
 				.queueFamilyIndex(device.graphicsQueueFamily());
 			LongBuffer pPool = stack.mallocLong(1);
-			if (vkCreateCommandPool(device.handle(), poolInfo, null, pPool) != VK_SUCCESS)
-			{
-				throw new RuntimeException("vkCreateCommandPool failed");
-			}
+			Vk.check("vkCreateCommandPool", vkCreateCommandPool(device.handle(), poolInfo, null, pPool));
 			commandPool = pPool.get(0);
 
 			VkCommandBufferAllocateInfo allocInfo = VkCommandBufferAllocateInfo.calloc(stack)
@@ -111,10 +108,7 @@ final class VulkanRenderer implements AutoCloseable
 				.level(VK_COMMAND_BUFFER_LEVEL_PRIMARY)
 				.commandBufferCount(FrameSync.FRAMES_IN_FLIGHT);
 			PointerBuffer pBufs = stack.mallocPointer(FrameSync.FRAMES_IN_FLIGHT);
-			if (vkAllocateCommandBuffers(device.handle(), allocInfo, pBufs) != VK_SUCCESS)
-			{
-				throw new RuntimeException("vkAllocateCommandBuffers failed");
-			}
+			Vk.check("vkAllocateCommandBuffers", vkAllocateCommandBuffers(device.handle(), allocInfo, pBufs));
 			commandBuffers = new VkCommandBuffer[FrameSync.FRAMES_IN_FLIGHT];
 			for (int i = 0; i < FrameSync.FRAMES_IN_FLIGHT; i++)
 			{
@@ -350,10 +344,7 @@ final class VulkanRenderer implements AutoCloseable
 		VkCommandBufferBeginInfo begin = VkCommandBufferBeginInfo.calloc(stack)
 			.sType$Default()
 			.flags(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
-		if (vkBeginCommandBuffer(cmd, begin) != VK_SUCCESS)
-		{
-			throw new RuntimeException("vkBeginCommandBuffer failed");
-		}
+		Vk.check("vkBeginCommandBuffer", vkBeginCommandBuffer(cmd, begin));
 
 		// UI texture upload + transitions happen OUTSIDE the render pass —
 		// vkCmdCopyBufferToImage isn't allowed inside one.
@@ -427,11 +418,11 @@ final class VulkanRenderer implements AutoCloseable
 		// projection (z_ndc = 2n/z) inside Vulkan's [0,1] clip range.
 		int vw = Math.max(viewportWidth, 1);
 		int vh = Math.max(viewportHeight, 1);
-		float[] sceneMvp = net.runelite.client.plugins.gpu.Mat4.scale(scale, -scale, 1);
-		net.runelite.client.plugins.gpu.Mat4.mul(sceneMvp, net.runelite.client.plugins.gpu.Mat4.projection(vw, vh, 50));
-		net.runelite.client.plugins.gpu.Mat4.mul(sceneMvp, net.runelite.client.plugins.gpu.Mat4.rotateX((float) cameraPitch));
-		net.runelite.client.plugins.gpu.Mat4.mul(sceneMvp, net.runelite.client.plugins.gpu.Mat4.rotateY((float) cameraYaw));
-		net.runelite.client.plugins.gpu.Mat4.mul(sceneMvp, net.runelite.client.plugins.gpu.Mat4.translate(-(float) cameraX, -(float) cameraY, -(float) cameraZ));
+		float[] sceneMvp = Mat4Ops.scale(scale, -scale, 1);
+		Mat4Ops.mul(sceneMvp, Mat4Ops.projection(vw, vh, 50));
+		Mat4Ops.mul(sceneMvp, Mat4Ops.rotateX((float) cameraPitch));
+		Mat4Ops.mul(sceneMvp, Mat4Ops.rotateY((float) cameraYaw));
+		Mat4Ops.mul(sceneMvp, Mat4Ops.translate(-(float) cameraX, -(float) cameraY, -(float) cameraZ));
 
 		sceneRenderer.recordDraw(cmd, sceneMvp, brightness,
 			(float) cameraX, (float) cameraZ, drawDistanceTiles, fogDepthTiles,
@@ -462,10 +453,7 @@ final class VulkanRenderer implements AutoCloseable
 
 		vkCmdEndRenderPass(cmd);
 
-		if (vkEndCommandBuffer(cmd) != VK_SUCCESS)
-		{
-			throw new RuntimeException("vkEndCommandBuffer failed");
-		}
+		Vk.check("vkEndCommandBuffer", vkEndCommandBuffer(cmd));
 	}
 
 	private void submit(MemoryStack stack, VkCommandBuffer cmd, int imageIdx)
@@ -483,11 +471,7 @@ final class VulkanRenderer implements AutoCloseable
 			.pCommandBuffers(cmdBuf)
 			.pSignalSemaphores(signal);
 
-		int r = vkQueueSubmit(device.graphicsQueue(), submit, sync.inFlightFence());
-		if (r != VK_SUCCESS)
-		{
-			throw new RuntimeException("vkQueueSubmit failed: " + r);
-		}
+		Vk.check("vkQueueSubmit", vkQueueSubmit(device.graphicsQueue(), submit, sync.inFlightFence()));
 	}
 
 	/**
@@ -505,11 +489,7 @@ final class VulkanRenderer implements AutoCloseable
 		VkSubmitInfo submit = VkSubmitInfo.calloc(stack)
 			.sType$Default()
 			.pCommandBuffers(cmdBuf);
-		int r = vkQueueSubmit(device.graphicsQueue(), submit, sync.inFlightFence());
-		if (r != VK_SUCCESS)
-		{
-			throw new RuntimeException("vkQueueSubmit (custom present) failed: " + r);
-		}
+		Vk.check("vkQueueSubmit (custom present)", vkQueueSubmit(device.graphicsQueue(), submit, sync.inFlightFence()));
 	}
 
 	private int present(MemoryStack stack, int imageIdx)

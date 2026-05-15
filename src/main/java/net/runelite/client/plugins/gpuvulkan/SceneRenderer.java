@@ -1,3 +1,37 @@
+/*
+ * The {@code computeFaceUvs} helper near the bottom of this file is ported
+ * verbatim from RuneLite's
+ * {@code net.runelite.client.plugins.gpu.SceneUploader.computeFaceUvs}
+ * (BSD-2-Clause). Original copyright + license:
+ *
+ *   Copyright (c) 2018, Adam <Adam@sigterm.info>
+ *   All rights reserved.
+ *
+ *   Redistribution and use in source and binary forms, with or without
+ *   modification, are permitted provided that the following conditions are met:
+ *
+ *   1. Redistributions of source code must retain the above copyright notice, this
+ *      list of conditions and the following disclaimer.
+ *   2. Redistributions in binary form must reproduce the above copyright notice,
+ *      this list of conditions and the following disclaimer in the documentation
+ *      and/or other materials provided with the distribution.
+ *
+ *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ *   ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ *   WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ *   DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ *   ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ *   (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ *   LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ *   ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ *   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ * Other methods are original to this project, even where their behaviour
+ * mirrors stock GpuPlugin (e.g. tile-paint capture). They were re-derived
+ * from the Scene / Tile / SceneTilePaint / SceneTileModel public API and the
+ * stock comments only.
+ */
 package net.runelite.client.plugins.gpuvulkan;
 
 import java.nio.ByteBuffer;
@@ -61,6 +95,17 @@ final class SceneRenderer implements AutoCloseable
 	private final int slotBytes;
 
 	private static final int MAX_PLANES = 4;
+
+	/** Tiles per side in a zone. Matches the OSRS engine's
+	 *  {@code invalidateZone(scene, zx, zz)} convention — the zone grid is
+	 *  {@code SCENE_SIZE / ZONE_SIZE = 13} zones per side. Per-zone vertex
+	 *  range tracking (see {@link #zoneVertexStart}) uses this layout so we
+	 *  can re-emit a single zone's geometry when {@code invalidateZone}
+	 *  fires (gap #8). */
+	static final int ZONE_SIZE = 8;
+	static final int ZONES_PER_SIDE = Constants.SCENE_SIZE / ZONE_SIZE;
+	static final int ZONE_COUNT = ZONES_PER_SIDE * ZONES_PER_SIDE;
+
 	private final int[] regionEnds = new int[LAYER_COUNT];
 	/** Per-static-layer, per-plane: vertex count after that plane's tiles were emitted.
 	 *  Used to clip TERRAIN at {@code planeEnds[TERRAIN][visiblePlane]} — upper-plane
@@ -70,6 +115,16 @@ final class SceneRenderer implements AutoCloseable
 	 *  hideRoofIds semantics) belongs on tile geometry and isn't wired yet —
 	 *  see {@link #setHideRoofIds}. */
 	private final int[][] planeEnds = new int[LAYER_COUNT][MAX_PLANES];
+
+	/** Per (layer, plane, zone) starting vertex offset and count within the
+	 *  static region. Filled by {@link #captureScene} as it walks each
+	 *  (layer, plane) zone-by-zone. Reads enable per-zone re-upload on
+	 *  {@code invalidateZone} (gap #8); step 1 just records the ranges,
+	 *  step 2 will wire up the actual re-emit + skip-list. Index =
+	 *  {@code zx * ZONES_PER_SIDE + zy}. */
+	private final int[][][] zoneVertexStart = new int[LAYER_COUNT][MAX_PLANES][ZONE_COUNT];
+	private final int[][][] zoneVertexCount = new int[LAYER_COUNT][MAX_PLANES][ZONE_COUNT];
+
 	private final boolean[] wireframe = new boolean[LAYER_COUNT];
 	/** Plane range to render this frame. Set per-frame from preSceneDraw's
 	 *  (minLevel, maxLevel). Stock GpuPlugin uses these exact bounds in
@@ -208,7 +263,15 @@ final class SceneRenderer implements AutoCloseable
 		for (int i = 0; i < LAYER_COUNT; i++)
 		{
 			regionEnds[i] = 0;
-			for (int p = 0; p < MAX_PLANES; p++) planeEnds[i][p] = 0;
+			for (int p = 0; p < MAX_PLANES; p++)
+			{
+				planeEnds[i][p] = 0;
+				for (int z = 0; z < ZONE_COUNT; z++)
+				{
+					zoneVertexStart[i][p][z] = 0;
+					zoneVertexCount[i][p][z] = 0;
+				}
+			}
 		}
 		vertexCount = 0;
 		mapped.position(0);
@@ -312,27 +375,46 @@ final class SceneRenderer implements AutoCloseable
 		int[][][] roofs, int roofOffset,
 		TileCapture body)
 	{
+		final int L = layer.ordinal();
 		for (int p = 0; p < planes; p++)
 		{
-			for (int sx = 0; sx < sceneSize; sx++)
-				for (int sy = 0; sy < sceneSize; sy++)
+			// Zone-major walk: each zone's tiles are contiguous in the vertex
+			// buffer so we can re-emit a single zone (gap #8) without
+			// disturbing the others. Within a zone we still walk tile-by-tile
+			// in scene-coord order, matching stock's tile traversal.
+			for (int zx = 0; zx < ZONES_PER_SIDE; zx++)
+			{
+				for (int zy = 0; zy < ZONES_PER_SIDE; zy++)
 				{
-					Tile t = tiles[p][sx][sy];
-					if (t == null) continue;
-					int roofId = tileRoofIdAt(roofs, p, sx + roofOffset, sy + roofOffset);
-					Tile cur = t;
-					while (cur != null)
+					int zoneStart = vertexCount;
+					int x0 = zx * ZONE_SIZE, x1 = Math.min(x0 + ZONE_SIZE, sceneSize);
+					int y0 = zy * ZONE_SIZE, y1 = Math.min(y0 + ZONE_SIZE, sceneSize);
+					for (int sx = x0; sx < x1; sx++)
 					{
-						int before = vertexCount;
-						body.capture(cur, p, sx, sy);
-						if (roofId != 0 && vertexCount > before)
-							recordRoofRange(roofId, before, vertexCount - before);
-						cur = (cur == t) ? t.getBridge() : null;
+						for (int sy = y0; sy < y1; sy++)
+						{
+							Tile t = tiles[p][sx][sy];
+							if (t == null) continue;
+							int roofId = tileRoofIdAt(roofs, p, sx + roofOffset, sy + roofOffset);
+							Tile cur = t;
+							while (cur != null)
+							{
+								int before = vertexCount;
+								body.capture(cur, p, sx, sy);
+								if (roofId != 0 && vertexCount > before)
+									recordRoofRange(roofId, before, vertexCount - before);
+								cur = (cur == t) ? t.getBridge() : null;
+							}
+						}
 					}
+					int zoneIdx = zx * ZONES_PER_SIDE + zy;
+					zoneVertexStart[L][p][zoneIdx] = zoneStart;
+					zoneVertexCount[L][p][zoneIdx] = vertexCount - zoneStart;
 				}
-			planeEnds[layer.ordinal()][p] = vertexCount;
+			}
+			planeEnds[L][p] = vertexCount;
 		}
-		regionEnds[layer.ordinal()] = vertexCount;
+		regionEnds[L] = vertexCount;
 	}
 
 	/**
@@ -344,39 +426,55 @@ final class SceneRenderer implements AutoCloseable
 	private void captureGameObjectsLayer(Tile[][][] tiles, int planes, int sceneSize,
 		int[][][] roofs, int roofOffset)
 	{
+		final int L = Layer.GAME_OBJECTS.ordinal();
 		for (int p = 0; p < planes; p++)
 		{
-			for (int sx = 0; sx < sceneSize; sx++)
-				for (int sy = 0; sy < sceneSize; sy++)
+			// Zone-major walk (see captureLayer).
+			for (int zx = 0; zx < ZONES_PER_SIDE; zx++)
+			{
+				for (int zy = 0; zy < ZONES_PER_SIDE; zy++)
 				{
-					Tile t = tiles[p][sx][sy];
-					if (t == null) continue;
-					int roofId = tileRoofIdAt(roofs, p, sx + roofOffset, sy + roofOffset);
-					Tile cur = t;
-					while (cur != null)
+					int zoneStart = vertexCount;
+					int x0 = zx * ZONE_SIZE, x1 = Math.min(x0 + ZONE_SIZE, sceneSize);
+					int y0 = zy * ZONE_SIZE, y1 = Math.min(y0 + ZONE_SIZE, sceneSize);
+					for (int sx = x0; sx < x1; sx++)
 					{
-						GameObject[] objs = cur.getGameObjects();
-						if (objs == null) { cur = (cur == t) ? t.getBridge() : null; continue; }
-						net.runelite.api.Point tilePoint = cur.getSceneLocation();
-						for (GameObject o : objs)
+						for (int sy = y0; sy < y1; sy++)
 						{
-							if (o == null) continue;
-							net.runelite.api.Point min = o.getSceneMinLocation();
-							if (min == null || !min.equals(tilePoint)) continue;
-							int before = vertexCount;
-							// getModelOrientation(), not getOrientation() — the latter folds
-							// in animation orient and rotates static arches / walls / fences.
-							captureRenderable(o.getRenderable(), o.getModelOrientation(),
-								o.getX(), o.getZ(), o.getY());
-							if (roofId != 0 && vertexCount > before)
-								recordRoofRange(roofId, before, vertexCount - before);
+							Tile t = tiles[p][sx][sy];
+							if (t == null) continue;
+							int roofId = tileRoofIdAt(roofs, p, sx + roofOffset, sy + roofOffset);
+							Tile cur = t;
+							while (cur != null)
+							{
+								GameObject[] objs = cur.getGameObjects();
+								if (objs == null) { cur = (cur == t) ? t.getBridge() : null; continue; }
+								net.runelite.api.Point tilePoint = cur.getSceneLocation();
+								for (GameObject o : objs)
+								{
+									if (o == null) continue;
+									net.runelite.api.Point min = o.getSceneMinLocation();
+									if (min == null || !min.equals(tilePoint)) continue;
+									int before = vertexCount;
+									// getModelOrientation(), not getOrientation() — the latter folds
+									// in animation orient and rotates static arches / walls / fences.
+									captureRenderable(o.getRenderable(), o.getModelOrientation(),
+										o.getX(), o.getZ(), o.getY());
+									if (roofId != 0 && vertexCount > before)
+										recordRoofRange(roofId, before, vertexCount - before);
+								}
+								cur = (cur == t) ? t.getBridge() : null;
+							}
 						}
-						cur = (cur == t) ? t.getBridge() : null;
 					}
+					int zoneIdx = zx * ZONES_PER_SIDE + zy;
+					zoneVertexStart[L][p][zoneIdx] = zoneStart;
+					zoneVertexCount[L][p][zoneIdx] = vertexCount - zoneStart;
 				}
-			planeEnds[Layer.GAME_OBJECTS.ordinal()][p] = vertexCount;
+			}
+			planeEnds[L][p] = vertexCount;
 		}
-		regionEnds[Layer.GAME_OBJECTS.ordinal()] = vertexCount;
+		regionEnds[L] = vertexCount;
 	}
 
 	private void captureRenderable(Renderable r, int orient, int x, int y, int z)

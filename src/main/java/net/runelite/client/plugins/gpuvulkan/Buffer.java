@@ -26,6 +26,11 @@ final class Buffer implements AutoCloseable
 	private final long memory;
 	private final long size;
 	private long mappedAddress;
+	/** Cached ByteBuffer view over the mapped region. Allocated once in
+	 *  {@link #mapPersistent()} so we don't churn a fresh wrapper per write —
+	 *  and so callers can't race on the {@code position/limit} state of two
+	 *  independently-created views over the same memory. */
+	private ByteBuffer mappedView;
 
 	Buffer(VulkanDevice device, long size, int usage, int memoryProperties)
 	{
@@ -39,10 +44,7 @@ final class Buffer implements AutoCloseable
 				.usage(usage)
 				.sharingMode(VK_SHARING_MODE_EXCLUSIVE);
 			LongBuffer pBuf = stack.mallocLong(1);
-			if (vkCreateBuffer(device.handle(), info, null, pBuf) != VK_SUCCESS)
-			{
-				throw new RuntimeException("vkCreateBuffer failed");
-			}
+			Vk.check("vkCreateBuffer", vkCreateBuffer(device.handle(), info, null, pBuf));
 			handle = pBuf.get(0);
 
 			VkMemoryRequirements memReq = VkMemoryRequirements.calloc(stack);
@@ -80,26 +82,30 @@ final class Buffer implements AutoCloseable
 		try (MemoryStack stack = stackPush())
 		{
 			PointerBuffer pp = stack.mallocPointer(1);
-			if (vkMapMemory(device.handle(), memory, 0, size, 0, pp) != VK_SUCCESS)
-			{
-				throw new RuntimeException("vkMapMemory failed");
-			}
+			Vk.check("vkMapMemory", vkMapMemory(device.handle(), memory, 0, size, 0, pp));
 			mappedAddress = pp.get(0);
+			mappedView = memByteBuffer(mappedAddress, (int) size);
 		}
 	}
 
-	/** Direct access to the mapped region as a ByteBuffer. */
+	/**
+	 * The single cached ByteBuffer view over the mapped region. Callers must
+	 * not assume the {@code position/limit} state on entry — reset before
+	 * use ({@code rewind()}, {@code clear()}, or build a fresh view via
+	 * {@link ByteBuffer#duplicate()} if you need concurrent views).
+	 */
 	ByteBuffer mappedByteBuffer()
 	{
 		if (mappedAddress == 0L) throw new IllegalStateException("buffer not mapped");
-		return memByteBuffer(mappedAddress, (int) size);
+		return mappedView;
 	}
 
 	/** Convenience: copy an int[] (one pixel = one int) into the mapped region. */
 	void writeInts(int[] src, int srcOffset, int count)
 	{
-		IntBuffer dst = mappedByteBuffer().asIntBuffer();
-		dst.put(src, srcOffset, count);
+		ByteBuffer view = mappedByteBuffer();
+		view.clear();
+		view.asIntBuffer().put(src, srcOffset, count);
 	}
 
 	@Override

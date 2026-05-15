@@ -73,10 +73,7 @@ final class TextureArray implements AutoCloseable
 				.initialLayout(VK_IMAGE_LAYOUT_UNDEFINED);
 
 			LongBuffer pImage = stack.mallocLong(1);
-			if (vkCreateImage(device.handle(), info, null, pImage) != VK_SUCCESS)
-			{
-				throw new RuntimeException("vkCreateImage (textureArray) failed");
-			}
+			Vk.check("vkCreateImage (textureArray)", vkCreateImage(device.handle(), info, null, pImage));
 			image = pImage.get(0);
 
 			VkMemoryRequirements memReq = VkMemoryRequirements.calloc(stack);
@@ -88,10 +85,7 @@ final class TextureArray implements AutoCloseable
 				.allocationSize(memReq.size())
 				.memoryTypeIndex(memType);
 			LongBuffer pMem = stack.mallocLong(1);
-			if (vkAllocateMemory(device.handle(), alloc, null, pMem) != VK_SUCCESS)
-			{
-				throw new RuntimeException("vkAllocateMemory (textureArray) failed");
-			}
+			Vk.check("vkAllocateMemory (textureArray)", vkAllocateMemory(device.handle(), alloc, null, pMem));
 			memory = pMem.get(0);
 			vkBindImageMemory(device.handle(), image, memory, 0);
 
@@ -105,10 +99,7 @@ final class TextureArray implements AutoCloseable
 				.baseMipLevel(0).levelCount(1)
 				.baseArrayLayer(0).layerCount(layerCount);
 			LongBuffer pView = stack.mallocLong(1);
-			if (vkCreateImageView(device.handle(), viewInfo, null, pView) != VK_SUCCESS)
-			{
-				throw new RuntimeException("vkCreateImageView (textureArray) failed");
-			}
+			Vk.check("vkCreateImageView (textureArray)", vkCreateImageView(device.handle(), viewInfo, null, pView));
 			view = pView.get(0);
 
 			// Anisotropic filtering — clamped to whatever the GPU allows.
@@ -138,10 +129,7 @@ final class TextureArray implements AutoCloseable
 				.maxAnisotropy(1.0f)
 				.unnormalizedCoordinates(false);
 			LongBuffer pSamp = stack.mallocLong(1);
-			if (vkCreateSampler(device.handle(), sampInfo, null, pSamp) != VK_SUCCESS)
-			{
-				throw new RuntimeException("vkCreateSampler (textureArray) failed");
-			}
+			Vk.check("vkCreateSampler (textureArray)", vkCreateSampler(device.handle(), sampInfo, null, pSamp));
 			sampler = pSamp.get(0);
 		}
 
@@ -155,10 +143,7 @@ final class TextureArray implements AutoCloseable
 				.flags(VK_COMMAND_POOL_CREATE_TRANSIENT_BIT)
 				.queueFamilyIndex(device.graphicsQueueFamily());
 			LongBuffer pPool = stack.mallocLong(1);
-			if (vkCreateCommandPool(device.handle(), cpInfo, null, pPool) != VK_SUCCESS)
-			{
-				throw new RuntimeException("vkCreateCommandPool (textureArray) failed");
-			}
+			Vk.check("vkCreateCommandPool (textureArray)", vkCreateCommandPool(device.handle(), cpInfo, null, pPool));
 			localPool = pPool.get(0);
 		}
 		try
@@ -312,10 +297,7 @@ final class TextureArray implements AutoCloseable
 					.level(VK_COMMAND_BUFFER_LEVEL_PRIMARY)
 					.commandBufferCount(1);
 				PointerBuffer pCmd = stack.mallocPointer(1);
-				if (vkAllocateCommandBuffers(device.handle(), cbInfo, pCmd) != VK_SUCCESS)
-				{
-					throw new RuntimeException("vkAllocateCommandBuffers (textureArray) failed");
-				}
+				Vk.check("vkAllocateCommandBuffers (textureArray)", vkAllocateCommandBuffers(device.handle(), cbInfo, pCmd));
 				VkCommandBuffer cmd = new VkCommandBuffer(pCmd.get(0), device.handle());
 
 				VkCommandBufferBeginInfo begin = VkCommandBufferBeginInfo.calloc(stack)

@@ -97,12 +97,8 @@ final class MacOSPlatformSurface implements PlatformSurface
 				caMetalLayer);
 
 			LongBuffer pSurface = stack.mallocLong(1);
-			int r = EXTMetalSurface.vkCreateMetalSurfaceEXT(
-				instance.handle(), info, null, pSurface);
-			if (r != VK_SUCCESS)
-			{
-				throw new RuntimeException("vkCreateMetalSurfaceEXT failed: " + r);
-			}
+			Vk.check("vkCreateMetalSurfaceEXT", EXTMetalSurface.vkCreateMetalSurfaceEXT(
+				instance.handle(), info, null, pSurface));
 			return pSurface.get(0);
 		}
 	}

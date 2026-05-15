@@ -60,10 +60,7 @@ final class SceneVertexBuffer implements AutoCloseable
 				.maxSets(1)
 				.pPoolSizes(poolSizes);
 			LongBuffer pPool = stack.mallocLong(1);
-			if (vkCreateDescriptorPool(device.handle(), poolInfo, null, pPool) != VK_SUCCESS)
-			{
-				throw new RuntimeException("vkCreateDescriptorPool (scene) failed");
-			}
+			Vk.check("vkCreateDescriptorPool (scene)", vkCreateDescriptorPool(device.handle(), poolInfo, null, pPool));
 			descriptorPool = pPool.get(0);
 
 			VkDescriptorSetAllocateInfo allocInfo = VkDescriptorSetAllocateInfo.calloc(stack)
@@ -71,10 +68,7 @@ final class SceneVertexBuffer implements AutoCloseable
 				.descriptorPool(descriptorPool)
 				.pSetLayouts(stack.longs(descriptorSetLayout));
 			LongBuffer pSet = stack.mallocLong(1);
-			if (vkAllocateDescriptorSets(device.handle(), allocInfo, pSet) != VK_SUCCESS)
-			{
-				throw new RuntimeException("vkAllocateDescriptorSets (scene) failed");
-			}
+			Vk.check("vkAllocateDescriptorSets (scene)", vkAllocateDescriptorSets(device.handle(), allocInfo, pSet));
 			descriptorSet = pSet.get(0);
 
 			VkDescriptorImageInfo.Buffer imgInfo = VkDescriptorImageInfo.calloc(1, stack);

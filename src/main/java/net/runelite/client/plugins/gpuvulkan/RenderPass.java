@@ -135,10 +135,7 @@ final class RenderPass implements AutoCloseable
 				.pDependencies(dep);
 
 			LongBuffer p = stack.mallocLong(1);
-			if (vkCreateRenderPass(device.handle(), info, null, p) != VK_SUCCESS)
-			{
-				throw new RuntimeException("vkCreateRenderPass failed");
-			}
+			Vk.check("vkCreateRenderPass", vkCreateRenderPass(device.handle(), info, null, p));
 			handle = p.get(0);
 		}
 	}

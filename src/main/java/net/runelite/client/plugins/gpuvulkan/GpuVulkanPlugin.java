@@ -62,6 +62,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 	private SceneRenderer sceneRenderer;
 	private TextureArray textureArray;
 	private InterfaceRenderer interfaceRenderer;
+	private net.runelite.client.plugins.gpuvulkan.gfx.Renderer gfx;
 	private net.runelite.rlawt.AWTContext awtContext;
 	private Framebuffers framebuffers;
 	private FrameSync sync;
@@ -331,6 +332,12 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 				renderPass = new RenderPass(device, swapchain.imageFormat(), samples);
 				disposables.add(renderPass);
 
+				// Gfx layer adopts the device/sync/renderPass we just built.
+				// Currently only InterfaceRenderer consumes the layer; other
+				// renderers stay on raw Vulkan until they're migrated.
+				gfx = Gfx.wrap(device, sync, renderPass);
+				disposables.add(gfx);
+
 				// Texture array gets populated from the OSRS texture provider
 				// once at startup. Layer 0 is the white "no-texture" tile;
 				// layer N+1 holds OSRS texture id N.
@@ -342,7 +349,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 				applyWireframeConfig();
 				disposables.add(sceneRenderer);
 
-				interfaceRenderer = new InterfaceRenderer(device, sync, renderPass);
+				interfaceRenderer = new InterfaceRenderer(gfx);
 				disposables.add(interfaceRenderer);
 
 				framebuffers = new Framebuffers(device, renderPass, swapchain, depthBuffer, msaaColor);
@@ -452,6 +459,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 				sceneRenderer = null;
 				textureArray = null;
 				interfaceRenderer = null;
+				gfx = null;
 				framebuffers = null;
 				sync = null;
 				renderer = null;
@@ -533,6 +541,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 			sceneRenderer = null;
 			textureArray = null;
 			interfaceRenderer = null;
+			gfx = null;
 			framebuffers = null;
 			sync = null;
 			renderer = null;

@@ -74,10 +74,7 @@ final class MsaaColorBuffer implements AutoCloseable
 				.initialLayout(VK_IMAGE_LAYOUT_UNDEFINED);
 
 			LongBuffer pImage = stack.mallocLong(1);
-			if (vkCreateImage(device.handle(), info, null, pImage) != VK_SUCCESS)
-			{
-				throw new RuntimeException("vkCreateImage (msaa color) failed");
-			}
+			Vk.check("vkCreateImage (msaa color)", vkCreateImage(device.handle(), info, null, pImage));
 			image = pImage.get(0);
 
 			VkMemoryRequirements memReq = VkMemoryRequirements.calloc(stack);
@@ -110,10 +107,7 @@ final class MsaaColorBuffer implements AutoCloseable
 				.baseArrayLayer(0).layerCount(1);
 
 			LongBuffer pView = stack.mallocLong(1);
-			if (vkCreateImageView(device.handle(), viewInfo, null, pView) != VK_SUCCESS)
-			{
-				throw new RuntimeException("vkCreateImageView (msaa color) failed");
-			}
+			Vk.check("vkCreateImageView (msaa color)", vkCreateImageView(device.handle(), viewInfo, null, pView));
 			view = pView.get(0);
 		}
 	}

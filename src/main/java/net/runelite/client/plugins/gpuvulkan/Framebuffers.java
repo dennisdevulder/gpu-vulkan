@@ -78,10 +78,7 @@ final class Framebuffers implements AutoCloseable
 					.height(swapchain.height())
 					.layers(1);
 				LongBuffer p = stack.mallocLong(1);
-				if (vkCreateFramebuffer(device.handle(), info, null, p) != VK_SUCCESS)
-				{
-					throw new RuntimeException("vkCreateFramebuffer failed");
-				}
+				Vk.check("vkCreateFramebuffer", vkCreateFramebuffer(device.handle(), info, null, p));
 				handles[i] = p.get(0);
 			}
 		}

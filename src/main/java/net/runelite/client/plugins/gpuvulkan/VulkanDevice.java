@@ -152,11 +152,7 @@ final class VulkanDevice implements AutoCloseable
 				.pEnabledFeatures(features);
 
 			PointerBuffer pDev = stack.mallocPointer(1);
-			int r = vkCreateDevice(physicalDevice, info, null, pDev);
-			if (r != VK_SUCCESS)
-			{
-				throw new RuntimeException("vkCreateDevice failed: " + r);
-			}
+			Vk.check("vkCreateDevice", vkCreateDevice(physicalDevice, info, null, pDev));
 			this.handle = new VkDevice(pDev.get(0), physicalDevice, info);
 
 			PointerBuffer pQueue = stack.mallocPointer(1);
