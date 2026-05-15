@@ -103,15 +103,26 @@ final class RenderPass implements AutoCloseable
 				.pDepthStencilAttachment(depthRef)
 				.pResolveAttachments(resolveRef);
 
-			// Wait for image acquisition before colour writes; also gate depth
-			// early-fragment-tests on the same fence.
+			// Frame-to-frame sync. The color attachment for swapchain images
+			// is per-image (acquired via the semaphore — UNDEFINED initial
+			// layout absorbs that side). But the depth attachment is a single
+			// image reused across frames, so frame N+1's depth write hazards
+			// against frame N's LATE_FRAGMENT_TESTS write unless we declare
+			// the dependency here. srcAccessMask = 0 (the previous value)
+			// trips validation's WRITE_AFTER_WRITE check on every frame.
+			//
+			// Cover both attachments on the src side so the same dep works
+			// regardless of whether the swapchain image happens to be the
+			// same one we used a few frames ago (UNDEFINED handles the
+			// content-discard half; this handles the write-ordering half).
 			VkSubpassDependency.Buffer dep = VkSubpassDependency.calloc(1, stack);
 			dep.get(0)
 				.srcSubpass(VK_SUBPASS_EXTERNAL)
 				.dstSubpass(0)
 				.srcStageMask(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-					| VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT)
-				.srcAccessMask(0)
+					| VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT)
+				.srcAccessMask(VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+					| VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT)
 				.dstStageMask(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
 					| VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT)
 				.dstAccessMask(VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT

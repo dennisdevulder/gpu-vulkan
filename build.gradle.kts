@@ -34,7 +34,14 @@ java {
 }
 
 val runeLiteVersion = "latest.release"
-val lwjglVersion = "3.3.6"
+// lwjgl-core tracks RuneLite's libs.versions.toml (currently 3.3.2) so the
+// per-platform native classifier matches what the host client loads.
+val lwjglVersion = "3.3.2"
+// lwjgl-vulkan AND lwjgl-jawt are intentionally newer (3.3.6) — vulkan needs
+// the Vulkan Video Encode H.264/H.265 KHR bindings for the encoder zero-copy
+// path, and lwjgl-jawt has to track lwjgl-vulkan's version (NOT lwjgl-core's)
+// or JAWTSurfaceLayers / JAWT native lookup fails at runtime.
+val lwjglVulkanVersion = "3.3.6"
 val lombokVersion = "1.18.34"
 
 dependencies {
@@ -46,8 +53,8 @@ dependencies {
 	// must carry these (or the user must side-load them). lwjgl-vulkan has
 	// no native; the Vulkan loader resolves the platform ICD at runtime.
 	implementation("org.lwjgl:lwjgl:$lwjglVersion")
-	implementation("org.lwjgl:lwjgl-vulkan:$lwjglVersion")
-	implementation("org.lwjgl:lwjgl-jawt:$lwjglVersion")
+	implementation("org.lwjgl:lwjgl-vulkan:$lwjglVulkanVersion")
+	implementation("org.lwjgl:lwjgl-jawt:$lwjglVulkanVersion")
 
 	compileOnly("org.projectlombok:lombok:$lombokVersion")
 	annotationProcessor("org.projectlombok:lombok:$lombokVersion")

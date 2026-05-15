@@ -4,6 +4,7 @@ import net.runelite.client.config.Config;
 import net.runelite.client.config.ConfigGroup;
 import net.runelite.client.config.ConfigItem;
 import net.runelite.client.config.ConfigSection;
+import net.runelite.client.config.Range;
 
 @ConfigGroup(GpuVulkanPluginConfig.GROUP)
 public interface GpuVulkanPluginConfig extends Config
@@ -108,6 +109,28 @@ public interface GpuVulkanPluginConfig extends Config
 		description = "Texture filtering quality (1 = bilinear/off, up to 16). Higher = sharper distant tiles, slightly lower FPS. Stock GPU defaults to 1. Plugin must be re-enabled to take effect."
 	)
 	default int anisotropicFilteringLevel() { return 1; }
+
+	@ConfigItem(
+		keyName = "brightTextures",
+		name = "Bright textures",
+		description = "Use the older texture-lighting mode: textured surfaces are tinted by the per-face vertex color instead of pure lightness. Brighter overall look on water, doors, crystals. Matches stock GPU's 'Bright textures' option."
+	)
+	default boolean brightTextures() { return false; }
+
+	@ConfigItem(
+		keyName = "colorBlindMode",
+		name = "Colour-blind mode",
+		description = "Apply Daltonization for red-deficient (protanope), green-deficient (deuteranope), or blue-deficient (tritanope) viewers. Matches stock GPU's colour-blind option."
+	)
+	default ColorBlindMode colorBlindMode() { return ColorBlindMode.NONE; }
+
+	@Range(min = 0, max = 100)
+	@ConfigItem(
+		keyName = "colorBlindIntensity",
+		name = "Colour-blind intensity",
+		description = "Strength of the colour-blind correction, 0 = no correction, 100 = full correction. Ignored when mode is NONE."
+	)
+	default int colorBlindIntensity() { return 100; }
 
 	@ConfigSection(
 		name = "Wireframe",

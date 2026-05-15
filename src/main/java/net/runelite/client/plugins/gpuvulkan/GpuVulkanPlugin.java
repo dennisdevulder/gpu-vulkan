@@ -27,6 +27,7 @@ import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
+import net.runelite.client.plugins.PluginManager;
 
 @PluginDescriptor(
 	name = "GPU (Vulkan)",
@@ -46,6 +47,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 
 	@Inject
 	private ClientThread clientThread;
+
+	@Inject
+	private PluginManager pluginManager;
 
 	private Disposables disposables;
 	private VulkanInstance instance;
@@ -74,10 +78,44 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 	private volatile boolean startRequested;
 	private static boolean shutdownHookRegistered;
 
+	/** Pointer to the currently-running plugin instance, set when startUp's
+	 *  Vulkan init completes and cleared in shutDown. Read from the JVM
+	 *  shutdown hook to run a best-effort Vulkan teardown when the user
+	 *  hits X on the window (which doesn't trigger {@link #shutDown}). The
+	 *  hook isn't tied to a specific instance because plugin enable/disable
+	 *  cycles can produce multiple instances over the JVM's lifetime — the
+	 *  hook always wants the live one. */
+	private static volatile GpuVulkanPlugin activeInstance;
+
+	/** Set by the JVM shutdown hook at entry. {@link #draw} bails out when
+	 *  this is true so the Client thread stops queueing fresh frames while
+	 *  the hook is running {@code vkDeviceWaitIdle} + {@code disposables.close()}.
+	 *  Volatile = happens-before so {@code drawFrame} stops cleanly. */
+	private static volatile boolean shuttingDown;
+
+	/** Most recent {@code worldProjection} seen on {@code drawDynamic} /
+	 *  {@code drawTemp}. The actor walk in {@link #captureActor} reads this
+	 *  to drive {@code captureModelSorted}; the engine doesn't supply a
+	 *  Projection to {@code drawScene} so we reuse the previous frame's.
+	 *  The camera moves smoothly, so frame-lag is invisible — and on the
+	 *  very first frame after plugin enable this stays null and actors
+	 *  fall back to the unsorted path. */
+	private volatile net.runelite.api.Projection lastWorldProjection;
+
 	@Override
 	protected void startUp()
 	{
 		log.info("Starting GPU (Vulkan)");
+		// Both this plugin and the stock "GPU" plugin install themselves as the
+		// canvas's renderer via rlawt + setDrawCallbacks. Two simultaneous
+		// owners of the AWT/rlawt context corrupt the JAWT/GLX state and
+		// disabling either one then exits the JVM natively (no hs_err). Refuse
+		// to start up while stock GPU is enabled rather than letting both run.
+		if (isStockGpuEnabled())
+		{
+			log.warn("Stock 'GPU' plugin is enabled — GPU (Vulkan) will not start. Disable 'GPU' first.");
+			return;
+		}
 		startRequested = true;
 		// macOS CAMetalLayer.displaySyncEnabled is set from this. VSYNC and
 		// TRIPLE_BUFFER both pin to display refresh (the macOS compositor has
@@ -91,15 +129,70 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 		// itself. Attaching rlawt's CAOpenGLLayer first would also conflict
 		// with our subsequent setLayer: call.
 		final boolean isMac = platform instanceof MacOSPlatformSurface;
-		// One-time JVM-lifetime hook: logs when the JVM is shutting down so
-		// we can distinguish clean exit (System.exit / window close / etc.)
-		// from a hard native crash (no hook fires). Registered once; the
-		// Runtime no-ops on subsequent identical adds via the if-check.
+		// One-time JVM-lifetime hook: runs at process exit (X-close,
+		// System.exit, etc.) when Plugin.shutDown is NOT going to fire.
+		// Without this, our Vulkan objects (device, swapchain, …) outlive
+		// the validation layer's static state, and the loader's atexit
+		// cleanup goes through validation after it's been torn down,
+		// producing "dispatch handle not found" warnings (or crashes in
+		// older validation builds). Doing the teardown here pre-empts that.
+		//
+		// Registered once per JVM via the static flag. Reads `activeInstance`
+		// fresh so it sees the currently-running plugin instance, not a
+		// stale one from before a plugin disable/re-enable cycle.
 		if (!shutdownHookRegistered)
 		{
 			shutdownHookRegistered = true;
 			Runtime.getRuntime().addShutdownHook(new Thread(() ->
-				log.info("JVM shutdown hook fired (clean exit)"), "vkgpu-shutdown-watch"));
+			{
+				log.info("JVM shutdown hook fired (clean exit)");
+				// Stop the Client thread from queueing more frames. draw()
+				// re-checks this flag on every callback.
+				shuttingDown = true;
+				GpuVulkanPlugin self = activeInstance;
+				if (self == null)
+				{
+					// Plugin.shutDown already ran. Nothing to do.
+					return;
+				}
+				// Best-effort teardown. We're on a JVM shutdown thread, not
+				// the Client thread — the Client thread may still be alive
+				// and mid-frame. vkDeviceWaitIdle drains in-flight work
+				// before we destroy resources; if it takes too long the
+				// JVM will halt the process regardless. Wrap every step so
+				// one failure can't skip the rest.
+				try
+				{
+					VulkanDevice dev = self.device;
+					if (dev != null)
+					{
+						try
+						{
+							org.lwjgl.vulkan.VK13.vkDeviceWaitIdle(dev.handle());
+						}
+						catch (Throwable t)
+						{
+							log.warn("vkDeviceWaitIdle in shutdown hook: {}", t.getMessage());
+						}
+					}
+					Disposables dis = self.disposables;
+					if (dis != null)
+					{
+						try
+						{
+							dis.close();
+						}
+						catch (Throwable t)
+						{
+							log.warn("disposables.close in shutdown hook: {}", t.getMessage());
+						}
+					}
+				}
+				catch (Throwable t)
+				{
+					log.error("Shutdown hook teardown failed", t);
+				}
+			}, "vkgpu-shutdown-watch"));
 		}
 		clientThread.invoke(() ->
 		{
@@ -262,6 +355,11 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 				log.info("Vulkan ready: {} ({}x{}, {} swapchain images)",
 					device.deviceName(), swapchain.width(), swapchain.height(), swapchain.imageCount());
 
+				// Publish to the JVM shutdown hook. Must happen AFTER all
+				// Vulkan objects are initialised so the hook can't observe
+				// a half-built instance.
+				activeInstance = this;
+
 				client.setDrawCallbacks(this);
 				// GPU: skip the Java software rasterizer. ZBUF: enable Z-buffer scene
 				// rendering, which is what makes the client traverse zones and call
@@ -369,6 +467,13 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 	{
 		log.info("Stopping GPU (Vulkan)");
 		startRequested = false;
+		// Unpublish from the JVM shutdown hook first. If JVM shutdown begins
+		// while we're partway through shutDown's clientThread.invoke, the
+		// hook seeing activeInstance == null skips its own teardown and we
+		// avoid double-destroy. The Disposables LIFO already guards against
+		// a single thread re-entering close, but the hook is a separate
+		// thread and could overlap with this lambda.
+		activeInstance = null;
 		clientThread.invoke(() ->
 		{
 			// Teardown order mirrors stock GpuPlugin's shutDown. awtContext.destroy()
@@ -447,6 +552,19 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 		}
 	}
 
+	private boolean isStockGpuEnabled()
+	{
+		for (Plugin p : pluginManager.getPlugins())
+		{
+			PluginDescriptor d = p.getClass().getAnnotation(PluginDescriptor.class);
+			if (d != null && "GPU".equals(d.name()))
+			{
+				return pluginManager.isPluginEnabled(p);
+			}
+		}
+		return false;
+	}
+
 	private void applyWireframeConfig()
 	{
 		if (sceneRenderer == null) return;
@@ -463,7 +581,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 	@Override
 	public void draw(int overlayColor)
 	{
-		if (renderer == null || canvas == null)
+		if (renderer == null || canvas == null || shuttingDown)
 		{
 			return;
 		}
@@ -484,6 +602,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 			client.getScale(),
 			client.getSkyboxColor(),
 			(float) client.getTextureProvider().getBrightness(),
+			config.brightTextures() ? 1f : 0f,
+			config.colorBlindMode().ordinal(),
+			Math.max(0, Math.min(100, config.colorBlindIntensity())) / 100f,
 			config.drawDistance(),
 			config.fogDepth(),
 			// Stock vert.glsl uses `tick & 127` — modulo keeps the value
@@ -551,7 +672,16 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 		Model m = actor.getModel();
 		if (m == null) return;
 		int tileH = net.runelite.api.Perspective.getTileHeight(client, loc, client.getPlane());
-		sceneRenderer.captureModel(m, actor.getCurrentOrientation(), loc.getX(), tileH, loc.getY());
+		net.runelite.api.Projection proj = lastWorldProjection;
+		if (proj != null)
+		{
+			sceneRenderer.captureModelSorted(proj, m, actor.getCurrentOrientation(), loc.getX(), tileH, loc.getY());
+		}
+		else
+		{
+			// First frame after enable — no projection cached yet.
+			sceneRenderer.captureModel(m, actor.getCurrentOrientation(), loc.getX(), tileH, loc.getY());
+		}
 	}
 
 	/**
@@ -676,7 +806,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 		// Without these guards the local player rendered twice.
 		if (tileObject == null) return;
 		if (r instanceof net.runelite.api.Actor) return;
-		if (sceneRenderer != null) sceneRenderer.captureModel(m, orient, x, y, z);
+		lastWorldProjection = worldProjection;
+		if (sceneRenderer != null) sceneRenderer.captureModelSorted(worldProjection, m, orient, x, y, z);
 	}
 
 	@Override
@@ -689,7 +820,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 		// a GameObject); captureActors() already drew them, so skipping null
 		// here removes the duplicate copy.
 		if (gameObject == null) return;
-		if (sceneRenderer != null) sceneRenderer.captureModel(m, orient, x, y, z);
+		lastWorldProjection = worldProjection;
+		if (sceneRenderer != null) sceneRenderer.captureModelSorted(worldProjection, m, orient, x, y, z);
 	}
 
 	@Override

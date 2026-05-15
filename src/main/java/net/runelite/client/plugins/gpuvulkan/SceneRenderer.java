@@ -7,6 +7,7 @@ import net.runelite.api.DecorativeObject;
 import net.runelite.api.GameObject;
 import net.runelite.api.GroundObject;
 import net.runelite.api.Model;
+import net.runelite.api.Projection;
 import net.runelite.api.Renderable;
 import net.runelite.api.Scene;
 import net.runelite.api.SceneTileModel;
@@ -101,6 +102,11 @@ final class SceneRenderer implements AutoCloseable
 
 	private int vertexCount;
 	private boolean overflowed;
+
+	/** Scratch sorter for dynamic-model face ordering — ported from stock
+	 *  {@code FacePrioritySorter}. Used by {@link #captureModelSorted}.
+	 *  Single instance is fine: all captures run on the Client thread. */
+	private final ModelSorter sorter = new ModelSorter();
 
 	SceneRenderer(VulkanDevice device, FrameSync sync,
 		RenderPass renderPass, TextureArray textureArray)
@@ -596,6 +602,108 @@ final class SceneRenderer implements AutoCloseable
 		vertexCount += wrote;
 	}
 
+	/**
+	 * Sorted variant of {@link #captureModel} — runs the model through
+	 * {@link ModelSorter} (camera-space depth bucketing + back-face cull +
+	 * near-plane reject), then emits the model's triangles back-to-front.
+	 * Use this from the engine's {@code drawDynamic} / {@code drawTemp}
+	 * callbacks where a {@link Projection} is supplied; the existing
+	 * unsorted {@link #captureModel} stays in place for the actor walk,
+	 * which has no Projection of its own.
+	 *
+	 * <p>Same dedupe behavior as {@code captureModel} (Model identity +
+	 * world XZ).
+	 */
+	void captureModelSorted(Projection proj, Model m, int orient, int worldX, int worldY, int worldZ)
+	{
+		if (m == null || proj == null) return;
+
+		long key = ((long) System.identityHashCode(m) & 0xFFFFFFFFL)
+			| ((long) (worldX & 0xFFFF) << 32)
+			| ((long) (worldZ & 0xFFFF) << 48);
+		if (!seenCaptures.add(key)) return;
+
+		// Project + bin. Returns false on near-plane reject / oversized / null arrays
+		// — in any of those cases stock skips the model entirely, so do we.
+		if (!sorter.sort(proj, m, orient, worldX, worldY, worldZ))
+		{
+			return;
+		}
+
+		int faces = sorter.sortedCount;
+		if (faces == 0) return;
+		if (vertexCount + faces * 3 > MAX_VERTICES) { overflow(); return; }
+
+		float[] vxs = m.getVerticesX();   // unused on emit (we use post-rotate localX)
+		float[] vys = m.getVerticesY();   // ditto
+		float[] vzs = m.getVerticesZ();   // ditto
+		int[] fa = m.getFaceIndices1();
+		int[] fb = m.getFaceIndices2();
+		int[] fc = m.getFaceIndices3();
+
+		int[] c1 = m.getFaceColors1();
+		int[] c2 = m.getFaceColors2();
+		int[] c3 = m.getFaceColors3();
+
+		short[] faceTextures   = m.getFaceTextures();
+		byte[]  textureFaces   = m.getTextureFaces();
+		int[]   texIndicesA    = m.getTexIndices1();
+		int[]   texIndicesB    = m.getTexIndices2();
+		int[]   texIndicesC    = m.getTexIndices3();
+		byte[]  faceTransparencies = m.getFaceTransparencies();
+		byte[]  faceBiasArr = m.getFaceBias();
+
+		float[] uv = uvScratch;
+
+		// localX/Y/Z already have orientation + worldXYZ applied by the sorter.
+		float[] lx = sorter.localX;
+		float[] ly = sorter.localY;
+		float[] lz = sorter.localZ;
+
+		int wrote = 0;
+		for (int i = 0; i < faces; i++)
+		{
+			int f = sorter.sortedFaces[i];
+
+			// Same color resolve as captureModel (sorter has already dropped
+			// c3 == -2 faces, so raw3 here is never the skip sentinel).
+			int col1 = c1 != null ? c1[f] : 0;
+			int col2 = col1, col3 = col1;
+			if (c3 != null)
+			{
+				int raw3 = c3[f];
+				if (raw3 != -1)
+				{
+					col2 = c2[f];
+					col3 = raw3;
+				}
+			}
+
+			int texLayer = 0;
+			float u0 = 0, v0 = 0, u1 = 0, v1 = 0, u2 = 0, v2 = 0;
+			if (faceTextures != null && faceTextures[f] != -1)
+			{
+				texLayer = (faceTextures[f] & 0xFFFF) + 1;
+				computeFaceUvs(uv, vxs, vys, vzs, fa[f], fb[f], fc[f],
+					textureFaces, texIndicesA, texIndicesB, texIndicesC, f);
+				u0 = uv[0]; v0 = uv[1];
+				u1 = uv[2]; v1 = uv[3];
+				u2 = uv[4]; v2 = uv[5];
+			}
+
+			int bias = faceBiasArr != null ? (faceBiasArr[f] & 0xFF) : 0;
+			int trans = faceTransparencies != null ? (faceTransparencies[f] & 0xFF) : 0;
+			int packedTexLayer = texLayer | (bias << 16) | (trans << 24);
+
+			// writeHslVert (no rotation) — sorter's lx/ly/lz are already rotated.
+			writeHslVert(lx[fa[f]], ly[fa[f]], lz[fa[f]], col1, u0, v0, packedTexLayer);
+			writeHslVert(lx[fb[f]], ly[fb[f]], lz[fb[f]], col2, u1, v1, packedTexLayer);
+			writeHslVert(lx[fc[f]], ly[fc[f]], lz[fc[f]], col3, u2, v2, packedTexLayer);
+			wrote += 3;
+		}
+		vertexCount += wrote;
+	}
+
 	/** Reusable scratch for {@link #computeFaceUvs} — six floats: u0, v0, u1, v1, u2, v2. */
 	private final float[] uvScratch = new float[6];
 
@@ -663,7 +771,8 @@ final class SceneRenderer implements AutoCloseable
 	void recordDraw(VkCommandBuffer cmd, float[] mvp, float brightness,
 					float cameraX, float cameraZ, float drawDistanceTiles, float fogDepthTiles,
 					float fogR, float fogG, float fogB,
-					int tick)
+					int tick, float textureLightMode,
+					int colorBlindMode, float colorBlindIntensity)
 	{
 		if (vertexCount == 0) return;
 		// Slot offset folded into firstVertex below. Binding the buffer
@@ -690,9 +799,15 @@ final class SceneRenderer implements AutoCloseable
 			vertPush.putInt(tick).putInt(0).putInt(0).putInt(0);
 			vertPush.flip();
 
-			// Fragment push (16 bytes): vec4(fogR, fogG, fogB, brightness) at offset 96.
-			ByteBuffer fragPush = stack.malloc(16);
+			// Fragment push (32 bytes at offset 96):
+			//   vec4 fogFrag     = (fogR, fogG, fogB, brightness)
+			//   vec4 fragExtras  = (textureLightMode, colorBlindMode, colorBlindIntensity, _)
+			ByteBuffer fragPush = stack.malloc(32);
 			fragPush.putFloat(fogR).putFloat(fogG).putFloat(fogB).putFloat(brightness);
+			fragPush.putFloat(textureLightMode);
+			fragPush.putFloat((float) colorBlindMode);
+			fragPush.putFloat(colorBlindIntensity);
+			fragPush.putFloat(0f);
 			fragPush.flip();
 
 			// Build skip-list for this frame: tile-roof ranges whose roof ID

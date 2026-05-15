@@ -61,6 +61,9 @@ final class VulkanRenderer implements AutoCloseable
 	private int scale = 1;
 	private int skyboxColor = 0x000000;
 	private float brightness = 0.7f;
+	private float textureLightMode;
+	private int colorBlindMode;
+	private float colorBlindIntensity;
 	private int drawDistanceTiles = 90;
 	private int fogDepthTiles = 30;
 	private int gameTick = 0;
@@ -132,7 +135,8 @@ final class VulkanRenderer implements AutoCloseable
 				   int viewportXOffset, int viewportYOffset,
 				   int viewportWidth, int viewportHeight,
 				   int canvasWidth, int canvasHeight, int scale,
-				   int skyboxColor, float brightness,
+				   int skyboxColor, float brightness, float textureLightMode,
+				   int colorBlindMode, float colorBlindIntensity,
 				   int drawDistanceTiles, int fogDepthTiles, int gameTick)
 	{
 		// Lazy rebuild: only rebuild when the swap-chain itself reports it's
@@ -169,6 +173,9 @@ final class VulkanRenderer implements AutoCloseable
 		this.scale = scale;
 		this.skyboxColor = skyboxColor;
 		this.brightness = brightness;
+		this.textureLightMode = textureLightMode;
+		this.colorBlindMode = colorBlindMode;
+		this.colorBlindIntensity = colorBlindIntensity;
 		this.drawDistanceTiles = drawDistanceTiles;
 		this.fogDepthTiles = fogDepthTiles;
 		this.gameTick = gameTick;
@@ -431,7 +438,8 @@ final class VulkanRenderer implements AutoCloseable
 			((skyboxColor >> 16) & 0xFF) / 255f,
 			((skyboxColor >>  8) & 0xFF) / 255f,
 			( skyboxColor        & 0xFF) / 255f,
-			gameTick);
+			gameTick, textureLightMode,
+			colorBlindMode, colorBlindIntensity);
 
 		// Switch viewport back to full canvas for the UI fullscreen quad — the UI
 		// texture covers everything, including the regions outside the scene rect.

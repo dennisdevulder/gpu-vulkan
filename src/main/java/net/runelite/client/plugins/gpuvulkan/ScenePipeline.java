@@ -192,15 +192,16 @@ final class ScenePipeline implements AutoCloseable
 			}
 			descriptorSetLayout = pDsl.get(0);
 
-			// Push constant layout (112 bytes total — within Vulkan's 128-byte
-			// guaranteed minimum):
-			//   Vertex   0..63  : mat4 mvp
-			//   Vertex   64..79 : vec4 (cameraX, cameraZ, drawDistance, fogDepth)
-			//   Vertex   80..95 : ivec4 misc (.x = tick, rest unused/padding for vec4 alignment)
-			//   Fragment 96..111: vec4 (fogR, fogG, fogB, brightness)
+			// Push constant layout (128 bytes total — at Vulkan's guaranteed minimum):
+			//   Vertex   0..63   : mat4 mvp
+			//   Vertex   64..79  : vec4 (cameraX, cameraZ, drawDistance, fogDepth)
+			//   Vertex   80..95  : ivec4 misc (.x = tick, rest unused/padding for vec4 alignment)
+			//   Fragment 96..111 : vec4 (fogR, fogG, fogB, brightness)
+			//   Fragment 112..127: vec4 (textureLightMode, _, _, _) — first slot in use,
+			//                      rest reserved for future scene-frag uniforms.
 			VkPushConstantRange.Buffer pc = VkPushConstantRange.calloc(2, stack);
 			pc.get(0).stageFlags(VK_SHADER_STAGE_VERTEX_BIT)  .offset(0) .size(96);
-			pc.get(1).stageFlags(VK_SHADER_STAGE_FRAGMENT_BIT).offset(96).size(16);
+			pc.get(1).stageFlags(VK_SHADER_STAGE_FRAGMENT_BIT).offset(96).size(32);
 
 			VkPipelineLayoutCreateInfo layoutInfo = VkPipelineLayoutCreateInfo.calloc(stack)
 				.sType$Default()
