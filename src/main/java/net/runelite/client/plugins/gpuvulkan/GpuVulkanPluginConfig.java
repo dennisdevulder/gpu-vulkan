@@ -83,6 +83,13 @@ public interface GpuVulkanPluginConfig extends Config
 	default boolean removeVertexSnapping() { return true; }
 
 	@ConfigItem(
+		keyName = "hideUnrelatedMaps",
+		name = "Hide unrelated maps",
+		description = "Strip scene zones that belong to a different game region than the player's, so neighbouring maps don't bleed into the horizon. No effect inside instances. Matches stock GPU's option."
+	)
+	default boolean hideUnrelatedMaps() { return true; }
+
+	@ConfigItem(
 		keyName = "fogDepth",
 		name = "Fog depth (tiles)",
 		description = "Distance over which the scene fades to the skybox color. 0 disables fog. Stock default is around 30."

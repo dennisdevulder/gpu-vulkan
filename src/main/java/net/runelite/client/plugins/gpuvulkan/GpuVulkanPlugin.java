@@ -60,6 +60,11 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 	private MsaaColorBuffer msaaColor;
 	private RenderPass renderPass;
 	private SceneRenderer sceneRenderer;
+	/** Stock-port region filter. Loads regions.txt once and strips
+	 *  out-of-region zones from each fresh scene before geometry capture
+	 *  — see {@link #prepareScene}. Null only between {@link #shutDown}
+	 *  and the next {@link #startUp}. */
+	private RegionManager regionManager;
 	private TextureArray textureArray;
 	private InterfaceRenderer interfaceRenderer;
 	private net.runelite.client.plugins.gpuvulkan.gfx.Renderer gfx;
@@ -350,6 +355,11 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 				applyWireframeConfig();
 				disposables.add(sceneRenderer);
 
+				// Region manager parses regions.txt once at startup. Cheap (5KB
+				// of regex parsing); cached for the lifetime of the plugin so
+				// each prepareScene call is just a bounded chunk-grid walk.
+				regionManager = new RegionManager();
+
 				interfaceRenderer = new InterfaceRenderer(gfx);
 				disposables.add(interfaceRenderer);
 
@@ -419,6 +429,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 					: client.getTopLevelWorldView().getScene();
 				if (currentScene != null)
 				{
+					prepareScene(currentScene);
 					sceneRenderer.captureScene(currentScene);
 					capturedScene = currentScene;
 				}
@@ -476,6 +487,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 				msaaColor = null;
 				renderPass = null;
 				sceneRenderer = null;
+				regionManager = null;
 				textureArray = null;
 				interfaceRenderer = null;
 				gfx = null;
@@ -757,6 +769,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 		// change so geometry stays fresh after chunk transitions.
 		if (scene != capturedScene && sceneRenderer != null)
 		{
+			prepareScene(scene);
 			capturedScene = scene;
 			sceneRenderer.captureScene(scene);
 		}
@@ -799,8 +812,24 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 		// scene == capturedScene next frame).
 		if (sceneRenderer != null)
 		{
+			prepareScene(scene);
 			capturedScene = scene;
 			sceneRenderer.captureScene(scene);
+		}
+	}
+
+	/**
+	 * Region filter applied before geometry capture. Strips zones outside
+	 * the player's region when {@link GpuVulkanPluginConfig#hideUnrelatedMaps}
+	 * is set; mutating the {@link Scene} directly via {@code removeTile} so
+	 * the subsequent {@code captureScene} walk sees the trimmed tile array.
+	 * Null-safe for startup paths that may run before the manager is built.
+	 */
+	private void prepareScene(Scene scene)
+	{
+		if (regionManager != null)
+		{
+			regionManager.prepare(scene, config.hideUnrelatedMaps());
 		}
 	}
 
