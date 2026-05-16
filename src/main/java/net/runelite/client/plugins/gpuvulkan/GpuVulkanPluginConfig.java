@@ -24,44 +24,16 @@ public interface GpuVulkanPluginConfig extends Config
 		return Boolean.parseBoolean(System.getProperty("vkgpu.validation", "false"));
 	}
 
-	/**
-	 * Visual style — knob for opting in/out of stock-parity rendering.
-	 *
-	 * <p>{@link VisualStyle#PICTURE} is the *curated* look. It is not frozen
-	 * at any point in time; every new visual feature is included here by
-	 * default. The rule is: if a change still looks good (or better), it
-	 * stays in {@code PICTURE}. If it makes the picture worse but matches
-	 * what stock GpuPlugin does, it gets gated behind {@link VisualStyle#ORIGINAL}.
-	 *
-	 * <p>{@link VisualStyle#ORIGINAL} is the opt-in stock-parity look — for
-	 * users who want the exact stock GpuPlugin output (incl. its quirks like
-	 * banded shading at certain face counts, exact alpha sort order, etc.)
-	 * or for visual regression testing against the OpenGL reference. Today
-	 * it renders identically to {@code PICTURE}; divergence is added as
-	 * specific features land that would otherwise degrade the picture.
-	 *
-	 * <p>Discipline for new visual features: don't add an {@code if
-	 * (style == ORIGINAL)} branch unless the new behavior makes the picture
-	 * mode strictly worse. Default to including everything in {@code PICTURE}.
-	 */
-	enum VisualStyle
-	{
-		PICTURE,
-		ORIGINAL,
-	}
-
-	@ConfigItem(
-		keyName = "visualStyle",
-		name = "Visual style",
-		description = "PICTURE: curated look (default; includes whatever currently looks best). ORIGINAL: stock GpuPlugin-parity look for users who want it or for visual regression testing. Plugin must be re-enabled for this to take effect."
-	)
-	default VisualStyle visualStyle() { return VisualStyle.PICTURE; }
-
 	enum FpsMode
 	{
 		/** Vsync — Vulkan FIFO present mode. Caps render at the display
 		 *  refresh rate. Most power-efficient, no tearing. */
 		VSYNC,
+		/** Adaptive vsync — Vulkan FIFO_RELAXED. Like VSYNC, but if a frame
+		 *  misses the refresh deadline it tears that one frame instead of
+		 *  doubling latency. Falls back to FIFO when the device lacks
+		 *  FIFO_RELAXED support. */
+		ADAPTIVE_VSYNC,
 		/** Triple-buffer — Vulkan MAILBOX present mode. GPU can render
 		 *  faster than the refresh rate but only the latest frame is shown.
 		 *  Smooth, no tearing, low input latency. Reported FPS is still
@@ -76,9 +48,17 @@ public interface GpuVulkanPluginConfig extends Config
 	@ConfigItem(
 		keyName = "fpsMode",
 		name = "FPS mode",
-		description = "Vsync = capped to refresh, no tearing. Triple-buffer = decoupled render, no tearing. Uncapped = no vsync, tearing visible, max FPS for benchmarking. Plugin must be re-enabled for this to take effect."
+		description = "Vsync = capped to refresh, no tearing. Adaptive vsync = vsync with single-frame tear when behind. Triple-buffer = decoupled render, no tearing. Uncapped = no vsync, tearing visible, max FPS for benchmarking. Plugin must be re-enabled for this to take effect."
 	)
 	default FpsMode fpsMode() { return FpsMode.TRIPLE_BUFFER; }
+
+	@Range(min = 0, max = 999)
+	@ConfigItem(
+		keyName = "fpsTarget",
+		name = "FPS target",
+		description = "Target engine FPS when the render path is unlocked. 0 = no target (engine default cap, or unbounded if FPS mode is UNCAPPED). Non-zero unlocks the engine and parks at the target rate, regardless of FPS mode."
+	)
+	default int fpsTarget() { return 0; }
 
 	@ConfigItem(
 		keyName = "drawDistance",
@@ -87,6 +67,21 @@ public interface GpuVulkanPluginConfig extends Config
 	)
 	default int drawDistance() { return 90; }
 
+	@Range(min = 0, max = 5)
+	@ConfigItem(
+		keyName = "expandedMapLoadingChunks",
+		name = "Expanded map loading (chunks)",
+		description = "Extra 8-tile chunks of map streamed in beyond the default loaded region. Lets a large draw distance show actual geometry past the default LoD edge. Matches stock GPU's option."
+	)
+	default int expandedMapLoadingChunks() { return 3; }
+
+	@ConfigItem(
+		keyName = "removeVertexSnapping",
+		name = "Remove vertex snapping",
+		description = "Disable the legacy 1/128-tile vertex snap on animated entities. Smooths player/NPC animations. Matches stock GPU's option."
+	)
+	default boolean removeVertexSnapping() { return true; }
+
 	@ConfigItem(
 		keyName = "fogDepth",
 		name = "Fog depth (tiles)",
@@ -94,7 +89,7 @@ public interface GpuVulkanPluginConfig extends Config
 	)
 	default int fogDepth() { return 30; }
 
-	enum AntiAliasingMode { DISABLED, MSAA_2, MSAA_4, MSAA_8 }
+	enum AntiAliasingMode { DISABLED, MSAA_2, MSAA_4, MSAA_8, MSAA_16 }
 
 	@ConfigItem(
 		keyName = "antiAliasingMode",
@@ -116,6 +111,13 @@ public interface GpuVulkanPluginConfig extends Config
 		description = "Use the older texture-lighting mode: textured surfaces are tinted by the per-face vertex color instead of pure lightness. Brighter overall look on water, doors, crystals. Matches stock GPU's 'Bright textures' option."
 	)
 	default boolean brightTextures() { return false; }
+
+	@ConfigItem(
+		keyName = "smoothBanding",
+		name = "Smooth banding",
+		description = "Interpolate vertex colors smoothly across faces (matches stock GPU's default). When disabled the HSL value is re-decoded per fragment, producing the faceted/banded look on terrain and crystals."
+	)
+	default boolean smoothBanding() { return true; }
 
 	@ConfigItem(
 		keyName = "colorBlindMode",

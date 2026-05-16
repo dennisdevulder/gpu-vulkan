@@ -255,12 +255,13 @@ final class Swapchain implements AutoCloseable
 		IntBuffer modes = stack.mallocInt(count.get(0));
 		KHRSurface.vkGetPhysicalDeviceSurfacePresentModesKHR(device.physicalDevice(), surface.handle(), count, modes);
 
-		boolean hasImmediate = false, hasMailbox = false;
+		boolean hasImmediate = false, hasMailbox = false, hasFifoRelaxed = false;
 		for (int i = 0; i < modes.capacity(); i++)
 		{
 			int m = modes.get(i);
 			if (m == KHRSurface.VK_PRESENT_MODE_IMMEDIATE_KHR) hasImmediate = true;
 			else if (m == KHRSurface.VK_PRESENT_MODE_MAILBOX_KHR) hasMailbox = true;
+			else if (m == KHRSurface.VK_PRESENT_MODE_FIFO_RELAXED_KHR) hasFifoRelaxed = true;
 		}
 
 		// FIFO is always supported and is the spec-required fallback.
@@ -285,6 +286,9 @@ final class Swapchain implements AutoCloseable
 				return KHRSurface.VK_PRESENT_MODE_FIFO_KHR;
 			case TRIPLE_BUFFER:
 				if (hasMailbox)   return KHRSurface.VK_PRESENT_MODE_MAILBOX_KHR;
+				return KHRSurface.VK_PRESENT_MODE_FIFO_KHR;
+			case ADAPTIVE_VSYNC:
+				if (hasFifoRelaxed) return KHRSurface.VK_PRESENT_MODE_FIFO_RELAXED_KHR;
 				return KHRSurface.VK_PRESENT_MODE_FIFO_KHR;
 			case VSYNC:
 			default:

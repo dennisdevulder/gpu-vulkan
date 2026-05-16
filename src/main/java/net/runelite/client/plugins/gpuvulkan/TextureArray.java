@@ -7,6 +7,7 @@ import net.runelite.api.TextureProvider;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VkBufferImageCopy;
 import org.lwjgl.vulkan.VkCommandBuffer;
+import org.lwjgl.vulkan.VkImageBlit;
 import org.lwjgl.vulkan.VkCommandBufferAllocateInfo;
 import org.lwjgl.vulkan.VkCommandBufferBeginInfo;
 import org.lwjgl.vulkan.VkCommandPoolCreateInfo;
@@ -37,6 +38,8 @@ final class TextureArray implements AutoCloseable
 {
 	static final int LAYER_SIZE = 128;            // OSRS textures are 128×128
 	private static final int FORMAT = VK_FORMAT_B8G8R8A8_UNORM;
+	// 128 = 2^7, so 8 mip levels including the base (128, 64, 32, 16, 8, 4, 2, 1).
+	private static final int MIP_LEVELS = 8;
 
 	private final VulkanDevice device;
 	private final long image;
@@ -59,16 +62,19 @@ final class TextureArray implements AutoCloseable
 
 		try (MemoryStack stack = stackPush())
 		{
+			// TRANSFER_SRC is required so we can vkCmdBlitImage from level N
+			// to level N+1 to build the mip chain (uploadAllLayers runs the blit
+			// cascade right after copying the base level in from staging).
 			VkImageCreateInfo info = VkImageCreateInfo.calloc(stack)
 				.sType$Default()
 				.imageType(VK_IMAGE_TYPE_2D)
 				.format(FORMAT)
 				.extent(e -> e.width(LAYER_SIZE).height(LAYER_SIZE).depth(1))
-				.mipLevels(1)
+				.mipLevels(MIP_LEVELS)
 				.arrayLayers(layerCount)
 				.samples(VK_SAMPLE_COUNT_1_BIT)
 				.tiling(VK_IMAGE_TILING_OPTIMAL)
-				.usage(VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)
+				.usage(VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)
 				.sharingMode(VK_SHARING_MODE_EXCLUSIVE)
 				.initialLayout(VK_IMAGE_LAYOUT_UNDEFINED);
 
@@ -96,7 +102,7 @@ final class TextureArray implements AutoCloseable
 				.format(FORMAT);
 			viewInfo.subresourceRange()
 				.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
-				.baseMipLevel(0).levelCount(1)
+				.baseMipLevel(0).levelCount(MIP_LEVELS)
 				.baseArrayLayer(0).layerCount(layerCount);
 			LongBuffer pView = stack.mallocLong(1);
 			Vk.check("vkCreateImageView (textureArray)", vkCreateImageView(device.handle(), viewInfo, null, pView));
@@ -106,27 +112,33 @@ final class TextureArray implements AutoCloseable
 			// Caller passes the desired level (1 = off, up to 16). Stock
 			// GpuPlugin exposes the same config; default is 1 (off).
 			float aniso = Math.max(1f, Math.min((float) requestedAnisotropy, device.maxSamplerAnisotropy()));
-			// NEAREST filtering, matching stock GpuPlugin's TextureManager.java:69-70
-			// — "pixel nature of the game means that nearest filtering looks best
-			// for objects up close." With LINEAR, bilinear interpolation between an
-			// opaque texel (alpha=1.0) and an adjacent rgb==0/alpha==0 texel
-			// produces alpha < 1.0; the fragment shader's
-			// `if (texSample.a < 1.0) discard;` then eats the surface. The visible
-			// symptom is solid textured walls vanishing because OSRS textures
-			// commonly have rgb==0 pixels scattered as seam/edge markers, and
-			// linear filtering halos them across the wall. Stock avoids this by
-			// using GL_NEAREST. Anisotropy stays off — it has no effect with
-			// NEAREST filter and the spec disallows the combination on some
-			// implementations.
+			boolean anisoOn = aniso > 1f && device.supportsSamplerAnisotropy();
+			// magFilter stays NEAREST: OSRS encodes texture transparency as
+			// `rgb == 0` mapped to alpha == 0 below. LINEAR magnification
+			// bilinearly blends those zero-alpha edge texels into adjacent
+			// opaque texels, producing intermediate alphas and discarding the
+			// wall once the threshold is exceeded — the documented
+			// "wall vanish" bug. NEAREST mag preserves exact texel alpha so
+			// the discard pass is binary.
+			//
+			// minFilter is LINEAR with a full mip chain. Minification is where
+			// anti-aliasing matters (distant terrain road, far city walls);
+			// LINEAR_MIPMAP_LINEAR (trilinear) eliminates the shimmer that
+			// plagues mip-less rendering at distance. The bilinear-alpha bug
+			// re-appears at minified texel boundaries but the fragment shader
+			// now discards at < 0.5 instead of < 1.0 — partial-alpha mip
+			// texels render normally, only fully-transparent ones get cut.
 			VkSamplerCreateInfo sampInfo = VkSamplerCreateInfo.calloc(stack)
 				.sType$Default()
-				.magFilter(VK_FILTER_NEAREST).minFilter(VK_FILTER_NEAREST)
-				.mipmapMode(VK_SAMPLER_MIPMAP_MODE_NEAREST)
+				.magFilter(VK_FILTER_NEAREST).minFilter(VK_FILTER_LINEAR)
+				.mipmapMode(VK_SAMPLER_MIPMAP_MODE_LINEAR)
 				.addressModeU(VK_SAMPLER_ADDRESS_MODE_REPEAT)
 				.addressModeV(VK_SAMPLER_ADDRESS_MODE_REPEAT)
 				.addressModeW(VK_SAMPLER_ADDRESS_MODE_REPEAT)
-				.anisotropyEnable(false)
-				.maxAnisotropy(1.0f)
+				.anisotropyEnable(anisoOn)
+				.maxAnisotropy(anisoOn ? aniso : 1.0f)
+				.minLod(0f)
+				.maxLod((float) MIP_LEVELS)
 				.unnormalizedCoordinates(false);
 			LongBuffer pSamp = stack.mallocLong(1);
 			Vk.check("vkCreateSampler (textureArray)", vkCreateSampler(device.handle(), sampInfo, null, pSamp));
@@ -305,7 +317,11 @@ final class TextureArray implements AutoCloseable
 					.flags(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
 				vkBeginCommandBuffer(cmd, begin);
 
-				transitionAllLayers(cmd, stack, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+				// Step 1: transition every mip level of every layer from
+				// UNDEFINED to TRANSFER_DST. We only memcpy into mip 0; the
+				// higher mips will be blit destinations from mip N-1 below.
+				transitionAllLayers(cmd, stack, 0, MIP_LEVELS,
+					VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 					VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
 					0, VK_ACCESS_TRANSFER_WRITE_BIT);
 
@@ -326,7 +342,55 @@ final class TextureArray implements AutoCloseable
 				vkCmdCopyBufferToImage(cmd, staging.handle(), image,
 					VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, regions);
 
-				transitionAllLayers(cmd, stack, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+				// Step 2: generate the mip chain by repeated vkCmdBlitImage
+				// from level i-1 → i. Each source level transitions to
+				// TRANSFER_SRC right before the blit and then to
+				// SHADER_READ_ONLY immediately after (we're done with it).
+				int srcW = LAYER_SIZE, srcH = LAYER_SIZE;
+				for (int level = 1; level < MIP_LEVELS; level++)
+				{
+					int dstW = Math.max(1, srcW >> 1);
+					int dstH = Math.max(1, srcH >> 1);
+
+					transitionAllLayers(cmd, stack, level - 1, 1,
+						VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+						VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+						VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+
+					VkImageBlit.Buffer blits = VkImageBlit.calloc(layerCount, stack);
+					for (int layer = 0; layer < layerCount; layer++)
+					{
+						VkImageBlit b = blits.get(layer);
+						b.srcOffsets(0).set(0, 0, 0);
+						b.srcOffsets(1).set(srcW, srcH, 1);
+						b.srcSubresource()
+							.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
+							.mipLevel(level - 1)
+							.baseArrayLayer(layer).layerCount(1);
+						b.dstOffsets(0).set(0, 0, 0);
+						b.dstOffsets(1).set(dstW, dstH, 1);
+						b.dstSubresource()
+							.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
+							.mipLevel(level)
+							.baseArrayLayer(layer).layerCount(1);
+					}
+					vkCmdBlitImage(cmd,
+						image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+						image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+						blits, VK_FILTER_LINEAR);
+
+					transitionAllLayers(cmd, stack, level - 1, 1,
+						VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+						VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+						VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT);
+
+					srcW = dstW;
+					srcH = dstH;
+				}
+
+				// Step 3: the last mip is still TRANSFER_DST_OPTIMAL.
+				transitionAllLayers(cmd, stack, MIP_LEVELS - 1, 1,
+					VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 					VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
 					VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
 
@@ -348,6 +412,7 @@ final class TextureArray implements AutoCloseable
 	}
 
 	private void transitionAllLayers(VkCommandBuffer cmd, MemoryStack stack,
+									 int baseMip, int levelCount,
 									 int oldLayout, int newLayout,
 									 int srcStage, int dstStage,
 									 int srcAccess, int dstAccess)
@@ -362,8 +427,8 @@ final class TextureArray implements AutoCloseable
 			.image(image)
 			.subresourceRange(r -> r
 				.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
-				.baseMipLevel(0).levelCount(1)
-				.baseArrayLayer(0).layerCount(layerCount));
+				.baseMipLevel(baseMip).levelCount(levelCount)
+				.baseArrayLayer(0).layerCount(this.layerCount));
 		vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, null, null, barrier);
 	}
 

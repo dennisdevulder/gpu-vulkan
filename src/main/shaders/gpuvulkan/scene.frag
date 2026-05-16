@@ -39,10 +39,10 @@ layout(push_constant) uniform Push {
     layout(offset = 112) vec4 fragExtras;  // .x = textureLightMode (0 = light-only, 1 = full HSL tint)
                                            // .y = colorBlindMode (0 NONE, 1 PROTAN, 2 DEUTERAN, 3 TRITAN)
                                            // .z = colorBlindIntensity (0..1)
-                                           // .w = reserved
+                                           // .w = smoothBanding (0 = per-fragment HSL decode, 1 = per-vertex RGB interp)
 } push;
 
-layout(location = 0) in vec3 vColor;       // CPU-decoded RGB (legacy, unused)
+layout(location = 0) in vec3 vColor;       // CPU-decoded per-vertex RGB; used as the smooth-banding term
 layout(location = 1) in float vHslPacked;  // packed HSL int as float (0..65535)
 layout(location = 2) in vec2 vUv;
 layout(location = 3) flat in uint vTexLayer;
@@ -132,16 +132,25 @@ void main() {
 
     vec3 rgb;
     if (vTexLayer == 0u) {
-        // Per-pixel HSL→RGB decode. Matches stock's `smoothBanding = false`
-        // (default) behavior: vHslPacked is interpolated linearly as a float
-        // across the face, then bit-decoded into HSL components per fragment.
-        // Produces the distinctive faceted-banded shading on multi-face
-        // models like crystals — pre-decoding RGB on CPU blurs it away.
-        rgb = hslToRgb(hue, sat, lum);
+        // Two paths for untextured faces, mixed by push.fragExtras.w (smoothBanding):
+        //   0 → per-fragment HSL decode: vHslPacked interpolates linearly across
+        //       the face and is bit-extracted to HSL each fragment. Produces the
+        //       faceted-banded look (stock GPU's `smoothBanding = false`).
+        //   1 → per-vertex pre-decoded RGB: vColor is the CPU-decoded hslToRgb
+        //       of each vertex's color, rasterizer-interpolated to fragments.
+        //       Produces smooth gradients across multi-face surfaces (stock GPU's
+        //       `smoothBanding = true` default).
+        vec3 perFragment = hslToRgb(hue, sat, lum);
+        rgb = mix(perFragment, vColor, push.fragExtras.w);
     } else {
-        vec4 texSample = textureLod(uTextureArray, vec3(vUv, float(vTexLayer)), 0.0);
-        if (texSample.a < 1.0) discard;
-        vec3 tex = texture(uTextureArray, vec3(vUv, float(vTexLayer))).rgb;
+        // Sample with the standard filtering pipeline so mipmaps + anisotropy
+        // apply on minified textures. Discard threshold is 0.5 — partial-alpha
+        // texels at mip boundaries (3 opaque + 1 transparent downsampling to
+        // alpha 0.75) render normally, only fully-transparent texels get cut.
+        // Stays binary at level 0 because magFilter is NEAREST.
+        vec4 texSample = texture(uTextureArray, vec3(vUv, float(vTexLayer)));
+        if (texSample.a < 0.5) discard;
+        vec3 tex = texSample.rgb;
         // Stock textureLightMode blends between two ways of modulating the
         // texture by the engine's per-face shading:
         //   0 → multiply by lightness (low 7 bits / 127)  ← stock default

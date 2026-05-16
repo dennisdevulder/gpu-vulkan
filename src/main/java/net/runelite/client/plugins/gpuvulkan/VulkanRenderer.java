@@ -67,6 +67,8 @@ final class VulkanRenderer implements AutoCloseable
 	private int drawDistanceTiles = 90;
 	private int fogDepthTiles = 30;
 	private int gameTick = 0;
+	private float smoothBanding = 1f;
+	private int overlayColor = 0;
 
 	VulkanRenderer(VulkanDevice device, RenderPass renderPass,
 				   SceneRenderer sceneRenderer, InterfaceRenderer interfaceRenderer,
@@ -131,7 +133,8 @@ final class VulkanRenderer implements AutoCloseable
 				   int canvasWidth, int canvasHeight, int scale,
 				   int skyboxColor, float brightness, float textureLightMode,
 				   int colorBlindMode, float colorBlindIntensity,
-				   int drawDistanceTiles, int fogDepthTiles, int gameTick)
+				   int drawDistanceTiles, int fogDepthTiles, int gameTick,
+				   float smoothBanding, int overlayColor)
 	{
 		// Lazy rebuild: only rebuild when the swap-chain itself reports it's
 		// out-of-date (via SUBOPTIMAL/OUT_OF_DATE from acquire or present).
@@ -173,6 +176,8 @@ final class VulkanRenderer implements AutoCloseable
 		this.drawDistanceTiles = drawDistanceTiles;
 		this.fogDepthTiles = fogDepthTiles;
 		this.gameTick = gameTick;
+		this.smoothBanding = smoothBanding;
+		this.overlayColor = overlayColor;
 
 		try (MemoryStack stack = stackPush())
 		{
@@ -430,7 +435,8 @@ final class VulkanRenderer implements AutoCloseable
 			((skyboxColor >>  8) & 0xFF) / 255f,
 			( skyboxColor        & 0xFF) / 255f,
 			gameTick, textureLightMode,
-			colorBlindMode, colorBlindIntensity);
+			colorBlindMode, colorBlindIntensity,
+			smoothBanding);
 
 		// Switch viewport back to full canvas for the UI fullscreen quad — the UI
 		// texture covers everything, including the regions outside the scene rect.
@@ -448,8 +454,10 @@ final class VulkanRenderer implements AutoCloseable
 		vkCmdSetScissor(cmd, 0, uiScissor);
 
 		// UI on top — fullscreen quad sampling the just-uploaded texture, alpha-blended,
-		// depth disabled in the pipeline so it always wins.
-		interfaceRenderer.recordDraw(cmd);
+		// depth disabled in the pipeline so it always wins. overlayColor is the engine's
+		// per-frame fade/tint (login screen fade, etc.) — passed all the way through
+		// from DrawCallbacks.draw(int) to the ui.frag push constant.
+		interfaceRenderer.recordDraw(cmd, overlayColor);
 
 		vkCmdEndRenderPass(cmd);
 

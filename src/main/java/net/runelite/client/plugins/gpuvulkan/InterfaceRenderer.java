@@ -2,6 +2,8 @@ package net.runelite.client.plugins.gpuvulkan;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.ByteBuffer;
+import org.lwjgl.system.MemoryStack;
 import net.runelite.client.plugins.gpuvulkan.gfx.BindGroup;
 import net.runelite.client.plugins.gpuvulkan.gfx.BindGroupDesc;
 import net.runelite.client.plugins.gpuvulkan.gfx.BindGroupLayout;
@@ -58,6 +60,7 @@ final class InterfaceRenderer implements AutoCloseable
 			.blendMode(RenderPipelineDesc.BlendMode.PREMUL_ALPHA)
 			.depthTest(RenderPipelineDesc.DepthTest.OFF)
 			.addBindGroupLayout(bgl)
+			.addPushConstantRange(ShaderStage.FRAGMENT, 0, 16)
 			.build());
 	}
 
@@ -75,13 +78,28 @@ final class InterfaceRenderer implements AutoCloseable
 		}
 	}
 
-	void recordDraw(VkCommandBuffer cmd)
+	void recordDraw(VkCommandBuffer cmd, int overlayColor)
 	{
 		if (bindGroup == null) return;
-		renderer.encodeInto(cmd)
-			.bindPipeline(pipeline)
-			.bindBindGroup(0, bindGroup)
-			.draw(3, 1, 0, 0);
+		try (MemoryStack stack = MemoryStack.stackPush())
+		{
+			// overlayColor is ARGB packed (engine convention from
+			// DrawCallbacks.draw(int)). Unpack into the shader's vec4
+			// (rgb tint, a blend factor). When the engine passes 0
+			// the resulting vec4 is all zero and the shader's mix() is a no-op.
+			float a = ((overlayColor >>> 24) & 0xFF) / 255f;
+			float r = ((overlayColor >>> 16) & 0xFF) / 255f;
+			float g = ((overlayColor >>>  8) & 0xFF) / 255f;
+			float b = ( overlayColor         & 0xFF) / 255f;
+			ByteBuffer push = stack.malloc(16);
+			push.putFloat(r).putFloat(g).putFloat(b).putFloat(a);
+			push.flip();
+			renderer.encodeInto(cmd)
+				.bindPipeline(pipeline)
+				.bindBindGroup(0, bindGroup)
+				.pushConstants(ShaderStage.FRAGMENT, 0, push)
+				.draw(3, 1, 0, 0);
+		}
 	}
 
 	@Override

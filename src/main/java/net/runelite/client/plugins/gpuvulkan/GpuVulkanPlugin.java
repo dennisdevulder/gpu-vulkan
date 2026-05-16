@@ -310,11 +310,12 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 				int desiredSamples;
 				switch (config.antiAliasingMode())
 				{
-					case MSAA_8: desiredSamples = 8; break;
-					case MSAA_4: desiredSamples = 4; break;
-					case MSAA_2: desiredSamples = 2; break;
+					case MSAA_16: desiredSamples = 16; break;
+					case MSAA_8:  desiredSamples = 8;  break;
+					case MSAA_4:  desiredSamples = 4;  break;
+					case MSAA_2:  desiredSamples = 2;  break;
 					case DISABLED:
-					default:     desiredSamples = 1; break;
+					default:      desiredSamples = 1;  break;
 				}
 				int samples = device.pickSampleCount(desiredSamples);
 
@@ -372,24 +373,42 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 				// rendering, which is what makes the client traverse zones and call
 				// drawZoneOpaque / drawDynamic / etc. Without ZBUF we only get the
 				// drawScene / postDrawScene boundary markers — no geometry callbacks.
-				client.setGpuFlags(DrawCallbacks.GPU | DrawCallbacks.ZBUF);
+				// NO_VERTEX_SNAPPING: optional — disables the legacy 1/128-tile snap
+				// on animated entities so player/NPC motion is smooth.
+				int gpuFlags = DrawCallbacks.GPU | DrawCallbacks.ZBUF;
+				if (config.removeVertexSnapping()) gpuFlags |= DrawCallbacks.NO_VERTEX_SNAPPING;
+				client.setGpuFlags(gpuFlags);
+				// Tell the engine to stream extra map chunks past the default
+				// LoD edge. Required for large draw distances to actually show
+				// geometry beyond the default loaded region (otherwise tiles
+				// past the edge are unloaded and culled regardless of our
+				// drawDistance config).
+				client.setExpandedMapLoading(config.expandedMapLoadingChunks());
 				// Force the buffer-provider rebuild so the canvas gets an alpha channel
 				// for compositing. Stock GpuPlugin does this; without it AWT paints
 				// opaque over our Vulkan output.
 				client.resizeCanvas();
 
-				// FPS mode: VSYNC/TRIPLE_BUFFER keep the engine FPS at its
-				// default cap (~50 game ticks). UNCAPPED tells the engine to
-				// run as fast as possible alongside our IMMEDIATE present
-				// mode, so the reported FPS reflects raw renderer capacity.
-				// Only touch state when entering UNCAPPED — never call
+				// Engine FPS unlock + target. Two independent signals fold into
+				// one decision:
+				//   - fpsMode == UNCAPPED: render as fast as possible (paired
+				//     with the IMMEDIATE present mode the swapchain selects).
+				//   - fpsTarget > 0: park the render loop at that rate
+				//     regardless of fpsMode. Works with vsync (limit < refresh
+				//     rate caps below vsync) and with UNCAPPED (limit > vsync
+				//     overrides the engine's default ~50 cap).
+				// Only touch state if we're opting in to either — never call
 				// setUnlockedFps(false) preemptively, since that overrides a
-				// user-driven unlock from elsewhere (other GPU plugin, dev
-				// console). fpsTouched gates the matching shutdown call.
-				if (config.fpsMode() == GpuVulkanPluginConfig.FpsMode.UNCAPPED)
+				// user-driven unlock from elsewhere. fpsTouched gates the
+				// matching shutdown call.
+				int fpsTarget = Math.max(0, config.fpsTarget());
+				boolean unlockEngine =
+					config.fpsMode() == GpuVulkanPluginConfig.FpsMode.UNCAPPED
+					|| fpsTarget > 0;
+				if (unlockEngine)
 				{
 					client.setUnlockedFps(true);
-					client.setUnlockedFpsTarget(0); // 0 = no cap
+					client.setUnlockedFpsTarget(fpsTarget); // 0 = no cap
 					fpsTouched = true;
 				}
 
@@ -561,6 +580,25 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 		}
 	}
 
+	@Subscribe
+	public void onGameStateChanged(net.runelite.api.events.GameStateChanged ev)
+	{
+		// Logout / hop / connection-lost: drop the captured scene so the
+		// login screen doesn't render with the previous world's terrain
+		// bleeding through the edges. Mirrors stock GpuPlugin's
+		// `sceneFboValid = false` on this same threshold (GpuPlugin.java:1583).
+		// Anything below LOADING means the engine no longer has a scene
+		// to drive — keep our captured geometry around through LOADING so
+		// the world stays drawn while the next region streams in.
+		if (sceneRenderer == null) return;
+		net.runelite.api.GameState state = ev.getGameState();
+		if (state.getState() < net.runelite.api.GameState.LOADING.getState())
+		{
+			sceneRenderer.invalidateCapturedScene();
+			capturedScene = null;
+		}
+	}
+
 	private boolean isStockGpuEnabled()
 	{
 		for (Plugin p : pluginManager.getPlugins())
@@ -619,7 +657,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 			// Stock vert.glsl uses `tick & 127` — modulo keeps the value
 			// small so `tick * anim * (1/128)` doesn't accumulate float
 			// precision drift while still cycling through every UV offset.
-			client.getGameCycle() & 127);
+			client.getGameCycle() & 127,
+			config.smoothBanding() ? 1f : 0f,
+			overlayColor);
 		stats.maybeLog();
 	}
 

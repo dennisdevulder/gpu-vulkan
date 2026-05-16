@@ -108,12 +108,11 @@ final class SceneRenderer implements AutoCloseable
 
 	private final int[] regionEnds = new int[LAYER_COUNT];
 	/** Per-static-layer, per-plane: vertex count after that plane's tiles were emitted.
-	 *  Used to clip TERRAIN at {@code planeEnds[TERRAIN][visiblePlane]} — upper-plane
-	 *  terrain gets blanket-culled so the player can see down into rooms when
-	 *  they're on a lower plane. Walls / decoratives / ground / gameobjects
-	 *  render across all planes; fine-grained roof tile hiding (the engine's
-	 *  hideRoofIds semantics) belongs on tile geometry and isn't wired yet —
-	 *  see {@link #setHideRoofIds}. */
+	 *  Used to clip each layer at {@code planeEnds[layer][maxPlane]} — geometry on
+	 *  planes outside [minPlane, maxPlane] is blanket-culled so the player can see
+	 *  down into rooms when on a lower plane. Fine-grained roof tile hiding (the
+	 *  engine's hideRoofIds semantics) is a separate mechanism that fragments the
+	 *  per-layer draw at {@link #drawWithSkips} — see {@link #setHideRoofIds}. */
 	private final int[][] planeEnds = new int[LAYER_COUNT][MAX_PLANES];
 
 	/** Per (layer, plane, zone) starting vertex offset and count within the
@@ -158,6 +157,25 @@ final class SceneRenderer implements AutoCloseable
 	private int vertexCount;
 	private boolean overflowed;
 
+	/**
+	 * Drops the captured scene so {@link #recordDraw} skips its work on the
+	 * next frame. Called when {@code GameState} drops below {@code LOADING}
+	 * (logout, world hop, connection lost): without this the previously
+	 * captured terrain / walls / objects keep rendering behind the login
+	 * screen, leaking the prior world's view through the new state. Mirrors
+	 * stock GpuPlugin's {@code sceneFboValid = false} on the same event.
+	 */
+	void invalidateCapturedScene()
+	{
+		vertexCount = 0;
+		tileRoofCount = 0;
+		for (int i = 0; i < LAYER_COUNT; i++)
+		{
+			regionEnds[i] = 0;
+			for (int p = 0; p < MAX_PLANES; p++) planeEnds[i][p] = 0;
+		}
+	}
+
 	/** Scratch sorter for dynamic-model face ordering — ported from stock
 	 *  {@code FacePrioritySorter}. Used by {@link #captureModelSorted}.
 	 *  Single instance is fine: all captures run on the Client thread. */
@@ -200,11 +218,12 @@ final class SceneRenderer implements AutoCloseable
 
 	/** Store the engine's per-frame hideRoofIds set. These are roof IDs
 	 *  (values from {@link net.runelite.api.Scene#getRoofs()}, NOT GameObject
-	 *  IDs) that should be hidden above the player. Currently a no-op holder:
-	 *  proper application requires tagging tile geometry with its roof ID at
-	 *  capture time and filtering ranges at draw — wiring that up is the next
-	 *  step. Until then, this method exists so {@code preSceneDraw} can keep
-	 *  calling it without churn. */
+	 *  IDs) that should be hidden above the player. {@link #recordDraw} reads
+	 *  this in combination with {@link #tileRoofIds}/{@link #tileRoofStarts}/
+	 *  {@link #tileRoofCounts} (populated during {@link #captureScene}) to
+	 *  build a per-frame sorted skip-range list, then dispatches each layer's
+	 *  draw via {@link #drawWithSkips} so vertex sub-ranges covering hidden
+	 *  roofs are jumped over. Empty set = no skipping. */
 	void setHideRoofIds(java.util.Set<Integer> ids)
 	{
 		hideRoofIds = ids != null ? ids : java.util.Collections.emptySet();
@@ -614,6 +633,16 @@ final class SceneRenderer implements AutoCloseable
 		byte[]  faceTransparencies = m.getFaceTransparencies();
 		byte[]  faceBias = m.getFaceBias();
 
+		// Model-level HSL override — engine uses it for NPC/object color
+		// variants (different-coloured wolves, dyed crates) and gameplay-state
+		// flashes (Ice Barrage tint, Vengeance white, hit-flash). Only applied
+		// to untextured faces, mirroring stock SceneUploader.uploadTempModel.
+		final byte overrideAmount = m.getOverrideAmount();
+		final byte overrideHue    = m.getOverrideHue();
+		final byte overrideSat    = m.getOverrideSaturation();
+		final byte overrideLum    = m.getOverrideLuminance();
+		final boolean hasOverride = (overrideAmount & 0xFF) != 0;
+
 		double theta = (orient & 0x7FF) * (Math.PI * 2.0 / 2048.0);
 		float cos = (float) Math.cos(theta);
 		float sin = (float) Math.sin(theta);
@@ -679,6 +708,17 @@ final class SceneRenderer implements AutoCloseable
 				u0 = uv[0]; v0 = uv[1];
 				u1 = uv[2]; v1 = uv[3];
 				u2 = uv[4]; v2 = uv[5];
+			}
+
+			// HSL override blend (untextured faces only — stock SceneUploader
+			// scoping). Per-vertex so smooth-banding interpolation gets the
+			// tinted color across the face. Tint applies whenever amount != 0;
+			// the engine sets that on entity hit-flash, freeze, vengeance, etc.
+			if (hasOverride && texLayer == 0)
+			{
+				col1 = applyHslOverride(col1, overrideHue, overrideSat, overrideLum, overrideAmount);
+				col2 = applyHslOverride(col2, overrideHue, overrideSat, overrideLum, overrideAmount);
+				col3 = applyHslOverride(col3, overrideHue, overrideSat, overrideLum, overrideAmount);
 			}
 
 			// Pack into one uint (matches stock's `alphaBias` int):
@@ -751,6 +791,12 @@ final class SceneRenderer implements AutoCloseable
 		byte[]  faceTransparencies = m.getFaceTransparencies();
 		byte[]  faceBiasArr = m.getFaceBias();
 
+		final byte overrideAmount = m.getOverrideAmount();
+		final byte overrideHue    = m.getOverrideHue();
+		final byte overrideSat    = m.getOverrideSaturation();
+		final byte overrideLum    = m.getOverrideLuminance();
+		final boolean hasOverride = (overrideAmount & 0xFF) != 0;
+
 		float[] uv = uvScratch;
 
 		// localX/Y/Z already have orientation + worldXYZ applied by the sorter.
@@ -787,6 +833,13 @@ final class SceneRenderer implements AutoCloseable
 				u0 = uv[0]; v0 = uv[1];
 				u1 = uv[2]; v1 = uv[3];
 				u2 = uv[4]; v2 = uv[5];
+			}
+
+			if (hasOverride && texLayer == 0)
+			{
+				col1 = applyHslOverride(col1, overrideHue, overrideSat, overrideLum, overrideAmount);
+				col2 = applyHslOverride(col2, overrideHue, overrideSat, overrideLum, overrideAmount);
+				col3 = applyHslOverride(col3, overrideHue, overrideSat, overrideLum, overrideAmount);
 			}
 
 			int bias = faceBiasArr != null ? (faceBiasArr[f] & 0xFF) : 0;
@@ -870,7 +923,8 @@ final class SceneRenderer implements AutoCloseable
 					float cameraX, float cameraZ, float drawDistanceTiles, float fogDepthTiles,
 					float fogR, float fogG, float fogB,
 					int tick, float textureLightMode,
-					int colorBlindMode, float colorBlindIntensity)
+					int colorBlindMode, float colorBlindIntensity,
+					float smoothBanding)
 	{
 		if (vertexCount == 0) return;
 		// Slot offset folded into firstVertex below. Binding the buffer
@@ -899,13 +953,13 @@ final class SceneRenderer implements AutoCloseable
 
 			// Fragment push (32 bytes at offset 96):
 			//   vec4 fogFrag     = (fogR, fogG, fogB, brightness)
-			//   vec4 fragExtras  = (textureLightMode, colorBlindMode, colorBlindIntensity, _)
+			//   vec4 fragExtras  = (textureLightMode, colorBlindMode, colorBlindIntensity, smoothBanding)
 			ByteBuffer fragPush = stack.malloc(32);
 			fragPush.putFloat(fogR).putFloat(fogG).putFloat(fogB).putFloat(brightness);
 			fragPush.putFloat(textureLightMode);
 			fragPush.putFloat((float) colorBlindMode);
 			fragPush.putFloat(colorBlindIntensity);
-			fragPush.putFloat(0f);
+			fragPush.putFloat(smoothBanding);
 			fragPush.flip();
 
 			// Build skip-list for this frame: tile-roof ranges whose roof ID
@@ -1120,6 +1174,38 @@ final class SceneRenderer implements AutoCloseable
 		mapped.putFloat(u);
 		mapped.putFloat(v);
 		mapped.putInt(texLayer);
+	}
+
+	/**
+	 * Per-component HSL lerp toward an override target. Mirrors stock
+	 * {@code SceneUploader.interpolateHSL}:
+	 * {@code new = old + ((amount & 0xff) * (override - old)) >> 7}. Override
+	 * byte == -1 keeps the original component (e.g. tint hue only without
+	 * touching saturation/luminance). Result is clamped to each component's
+	 * bit width.
+	 */
+	private static int applyHslOverride(int hsl16, byte oH, byte oS, byte oL, byte oA)
+	{
+		int amount = oA & 0xFF;
+		int h = (hsl16 >> 10) & 0x3F;
+		int s = (hsl16 >>  7) & 0x07;
+		int l =  hsl16        & 0x7F;
+		if (oH != -1)
+		{
+			int blended = h + ((amount * ((oH & 0xFF) - h)) >> 7);
+			h = blended < 0 ? 0 : (blended > 0x3F ? 0x3F : blended);
+		}
+		if (oS != -1)
+		{
+			int blended = s + ((amount * ((oS & 0xFF) - s)) >> 7);
+			s = blended < 0 ? 0 : (blended > 0x07 ? 0x07 : blended);
+		}
+		if (oL != -1)
+		{
+			int blended = l + ((amount * ((oL & 0xFF) - l)) >> 7);
+			l = blended < 0 ? 0 : (blended > 0x7F ? 0x7F : blended);
+		}
+		return (h << 10) | (s << 7) | l;
 	}
 
 	private static float[] hslToRgb(int hsl16)
