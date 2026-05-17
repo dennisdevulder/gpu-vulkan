@@ -429,8 +429,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 					: client.getTopLevelWorldView().getScene();
 				if (currentScene != null)
 				{
-					prepareScene(currentScene);
-					sceneRenderer.captureScene(currentScene);
+					captureSceneNow(currentScene);
 					capturedScene = currentScene;
 				}
 			}
@@ -693,6 +692,13 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 		{
 			sceneRenderer.beginFrame();
 			captureActors();
+			// Re-try any renderables whose Model was null at scene-capture
+			// time. The engine streams object models asynchronously after a
+			// region load — by the time we reach drawScene again, models
+			// that weren't ready during captureScene have usually arrived.
+			// They emit into the dynamic suffix (same budget actors use),
+			// no GPU drain, no frame hitch.
+			sceneRenderer.captureDynamicPending();
 		}
 	}
 
@@ -769,9 +775,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 		// change so geometry stays fresh after chunk transitions.
 		if (scene != capturedScene && sceneRenderer != null)
 		{
-			prepareScene(scene);
 			capturedScene = scene;
-			sceneRenderer.captureScene(scene);
+			captureSceneNow(scene);
 		}
 		// Plane bounds — matches Zone.renderOpaque(..., minLevel, level,
 		// maxLevel, ...) in stock GpuPlugin (GpuPlugin.java:1062). Stock
@@ -812,9 +817,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 		// scene == capturedScene next frame).
 		if (sceneRenderer != null)
 		{
-			prepareScene(scene);
 			capturedScene = scene;
-			sceneRenderer.captureScene(scene);
+			captureSceneNow(scene);
 		}
 	}
 
@@ -831,6 +835,21 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 		{
 			regionManager.prepare(scene, config.hideUnrelatedMaps());
 		}
+	}
+
+	/**
+	 * Single chokepoint for {@code prepareScene} + {@code captureScene}.
+	 * Any Renderable whose Model returned null during the walk gets
+	 * queued in {@link SceneRenderer}'s pending list; the engine's
+	 * async model streaming finishes them in subsequent ticks and the
+	 * per-frame {@code captureDynamicPending} pass picks them up without
+	 * needing another full capture (or a GPU drain).
+	 */
+	private void captureSceneNow(Scene scene)
+	{
+		if (sceneRenderer == null) return;
+		prepareScene(scene);
+		sceneRenderer.captureScene(scene);
 	}
 
 	@Override

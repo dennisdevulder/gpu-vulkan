@@ -157,6 +157,38 @@ final class SceneRenderer implements AutoCloseable
 	private int vertexCount;
 	private boolean overflowed;
 
+	/** Renderables whose Model came back null during {@link #captureScene}
+	 *  — almost always because the engine hasn't finished streaming the
+	 *  model yet on a freshly-loaded region. Without re-checking, the
+	 *  renderable stays invisible until the next scene-reference change
+	 *  (chest at login → invisible until player teleports away and back).
+	 *  {@link #captureDynamicPending} retries each entry every frame: any
+	 *  whose model has since loaded gets emitted into the dynamic suffix
+	 *  for that frame, so it pops in as soon as the engine delivers the
+	 *  data. They remain in the list until the next {@code captureScene}
+	 *  clears it, at which point they're re-evaluated for the static
+	 *  buffer along with everything else. This is the
+	 *  no-GPU-drain alternative to "re-capture the whole scene" — keeps
+	 *  frame times steady while still self-healing late model arrivals. */
+	private static final class PendingRenderable
+	{
+		final Renderable r;
+		final int orient, x, y, z;
+		PendingRenderable(Renderable r, int orient, int x, int y, int z)
+		{
+			this.r = r;
+			this.orient = orient;
+			this.x = x;
+			this.y = y;
+			this.z = z;
+		}
+	}
+	private final java.util.ArrayList<PendingRenderable> pendingRenderables = new java.util.ArrayList<>();
+	/** Soft cap on the pending list. Cosmetic late-loaders typically number in
+	 *  the dozens after a login; 4096 leaves plenty of head-room without
+	 *  letting a pathological scene blow CPU per-frame. */
+	private static final int MAX_PENDING = 4096;
+
 	/**
 	 * Drops the captured scene so {@link #recordDraw} skips its work on the
 	 * next frame. Called when {@code GameState} drops below {@code LOADING}
@@ -169,6 +201,7 @@ final class SceneRenderer implements AutoCloseable
 	{
 		vertexCount = 0;
 		tileRoofCount = 0;
+		pendingRenderables.clear();
 		for (int i = 0; i < LAYER_COUNT; i++)
 		{
 			regionEnds[i] = 0;
@@ -296,6 +329,7 @@ final class SceneRenderer implements AutoCloseable
 		mapped.position(0);
 		overflowed = false;
 		tileRoofCount = 0;
+		pendingRenderables.clear();
 
 		Tile[][][] tiles = scene.getTiles();
 		if (tiles == null) return;
@@ -516,8 +550,53 @@ final class SceneRenderer implements AutoCloseable
 		{
 			m = r.getModel();
 		}
-		if (m == null) return;
+		if (m == null)
+		{
+			// Engine hasn't finished streaming the model yet. Queue for
+			// per-frame retry in the dynamic suffix; once the model lands
+			// it will be emitted from there each frame without us having
+			// to re-capture the static buffer (no GPU drain, no hitch).
+			if (pendingRenderables.size() < MAX_PENDING)
+			{
+				pendingRenderables.add(new PendingRenderable(r, orient, x, y, z));
+			}
+			return;
+		}
 		captureModel(m, orient, x, y, z);
+	}
+
+	/**
+	 * Retry queue for renderables whose Model was null at
+	 * {@link #captureScene} time. Called once per frame from the plugin's
+	 * {@code drawScene} after {@code beginFrame} and {@code captureActors}
+	 * so it pumps into the same dynamic-suffix budget. Any entry whose
+	 * Model is now non-null emits this frame; entries still null roll
+	 * forward unchanged. The list is reset on each {@code captureScene}
+	 * (whole new region) and on {@code invalidateCapturedScene} (logout /
+	 * world hop).
+	 */
+	void captureDynamicPending()
+	{
+		if (pendingRenderables.isEmpty()) return;
+		for (int i = 0, n = pendingRenderables.size(); i < n; i++)
+		{
+			PendingRenderable pr = pendingRenderables.get(i);
+			Model m;
+			if (pr.r instanceof Model)
+			{
+				m = (Model) pr.r;
+			}
+			else if (pr.r instanceof net.runelite.api.DynamicObject)
+			{
+				m = ((net.runelite.api.DynamicObject) pr.r).getModelZbuf();
+			}
+			else
+			{
+				m = pr.r.getModel();
+			}
+			if (m == null) continue;
+			captureModel(m, pr.orient, pr.x, pr.y, pr.z);
+		}
 	}
 
 	private void captureTilePaint(Scene scene, SceneTilePaint paint, int plane, int sx, int sy)
