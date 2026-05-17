@@ -24,21 +24,17 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK13.*;
 
 /**
- * Static 2D-array texture for the OSRS texture set. Layer N holds texture
- * with internal ID N. The shader uses the (per-vertex) {@code textureId}
- * attribute as the array layer to sample. Layer 0 is reserved as a
- * "no-texture" white tile so faces with {@code textureId == 0} get a 1×
- * tint of their HSL colour.
- *
- * <p>Built once on plugin start and never resized — OSRS texture pixels can
- * change (e.g. animated water) but their slots are stable.
+ * Static 2D-array texture for the OSRS texture set. Layer 0 is a white
+ * "no-texture" tile; OSRS texture id N goes into layer N+1. Built once
+ * at startup; OSRS pixels may change (animated water) but slots are
+ * stable.
  */
 @lombok.extern.slf4j.Slf4j
 final class TextureArray implements AutoCloseable
 {
-	static final int LAYER_SIZE = 128;            // OSRS textures are 128×128
+	static final int LAYER_SIZE = 128;
 	private static final int FORMAT = VK_FORMAT_B8G8R8A8_UNORM;
-	// 128 = 2^7, so 8 mip levels including the base (128, 64, 32, 16, 8, 4, 2, 1).
+	/** 128 = 2^7, so 8 mip levels including base (128 → 1). */
 	private static final int MIP_LEVELS = 8;
 
 	private final VulkanDevice device;
@@ -47,24 +43,19 @@ final class TextureArray implements AutoCloseable
 	private final long view;
 	private final long sampler;
 	private final int layerCount;
-	/** Per-texture-layer scroll vector (units = texels-per-tick). One vec2 per
-	 *  layer, std140-padded to vec4 (so 16 bytes per layer = layerCount*16
-	 *  total). Bound as set 0 binding 1 by SceneRenderer. */
+	/** Per-layer UV-scroll vector (texels-per-tick), std140-padded to
+	 *  vec4. Bound as set 0 binding 1 by SceneRenderer. */
 	private final Buffer animationUbo;
 
 	TextureArray(VulkanDevice device, TextureProvider tp, int requestedAnisotropy)
 	{
 		this.device = device;
 		Texture[] osrsTextures = tp == null ? new Texture[0] : tp.getTextures();
-		// Reserve layer 0 for the white "no-texture" tile so 0 means "no texture".
-		// OSRS texture id N goes into layer N+1.
 		this.layerCount = osrsTextures.length + 1;
 
 		try (MemoryStack stack = stackPush())
 		{
-			// TRANSFER_SRC is required so we can vkCmdBlitImage from level N
-			// to level N+1 to build the mip chain (uploadAllLayers runs the blit
-			// cascade right after copying the base level in from staging).
+			// TRANSFER_SRC required for the mip-chain vkCmdBlitImage cascade.
 			VkImageCreateInfo info = VkImageCreateInfo.calloc(stack)
 				.sType$Default()
 				.imageType(VK_IMAGE_TYPE_2D)
@@ -108,26 +99,14 @@ final class TextureArray implements AutoCloseable
 			Vk.check("vkCreateImageView (textureArray)", vkCreateImageView(device.handle(), viewInfo, null, pView));
 			view = pView.get(0);
 
-			// Anisotropic filtering — clamped to whatever the GPU allows.
-			// Caller passes the desired level (1 = off, up to 16). Stock
-			// GpuPlugin exposes the same config; default is 1 (off).
 			float aniso = Math.max(1f, Math.min((float) requestedAnisotropy, device.maxSamplerAnisotropy()));
 			boolean anisoOn = aniso > 1f && device.supportsSamplerAnisotropy();
-			// magFilter stays NEAREST: OSRS encodes texture transparency as
-			// `rgb == 0` mapped to alpha == 0 below. LINEAR magnification
-			// bilinearly blends those zero-alpha edge texels into adjacent
-			// opaque texels, producing intermediate alphas and discarding the
-			// wall once the threshold is exceeded — the documented
-			// "wall vanish" bug. NEAREST mag preserves exact texel alpha so
-			// the discard pass is binary.
-			//
-			// minFilter is LINEAR with a full mip chain. Minification is where
-			// anti-aliasing matters (distant terrain road, far city walls);
-			// LINEAR_MIPMAP_LINEAR (trilinear) eliminates the shimmer that
-			// plagues mip-less rendering at distance. The bilinear-alpha bug
-			// re-appears at minified texel boundaries but the fragment shader
-			// now discards at < 0.5 instead of < 1.0 — partial-alpha mip
-			// texels render normally, only fully-transparent ones get cut.
+			// LANDMINE: magFilter must stay NEAREST. OSRS encodes texture
+			// transparency as rgb==0 → alpha==0; LINEAR mag bilinear-blends
+			// that into adjacent opaque texels and the wall vanishes on
+			// the alpha-discard test. NEAREST mag keeps the alpha binary.
+			// LINEAR minFilter is safe — scene.frag discards at < 0.5 so
+			// partial-alpha mip texels still render.
 			VkSamplerCreateInfo sampInfo = VkSamplerCreateInfo.calloc(stack)
 				.sType$Default()
 				.magFilter(VK_FILTER_NEAREST).minFilter(VK_FILTER_LINEAR)
@@ -145,8 +124,7 @@ final class TextureArray implements AutoCloseable
 			sampler = pSamp.get(0);
 		}
 
-		// Self-allocated transient command pool — keeps the texture upload
-		// decoupled from VulkanRenderer's main rendering pool.
+		// Transient command pool decouples upload from the main pool.
 		long localPool;
 		try (MemoryStack stack = stackPush())
 		{
@@ -160,12 +138,9 @@ final class TextureArray implements AutoCloseable
 		}
 		try
 		{
-			// Match stock GpuPlugin's TextureManager.uploadTextures: load at
-			// brightness=1.0 so we get unmodified RGB. The user's brightness
-			// slider would otherwise darken texture pixels and clamp the
-			// dark ones to 0x000000, which the alpha-from-zero encoding
-			// below would then mark as transparent. Brightness is re-applied
-			// per-fragment in scene.frag via the brightness push constant.
+			// Load at brightness=1.0 so dark pixels don't clamp to 0x000000,
+			// which the alpha-from-zero encoding below would mark transparent.
+			// scene.frag re-applies brightness via push constant.
 			double savedBrightness = tp.getBrightness();
 			tp.setBrightness(1.0);
 			try
@@ -182,15 +157,12 @@ final class TextureArray implements AutoCloseable
 			vkDestroyCommandPool(device.handle(), localPool, null);
 		}
 
-		// Animation UBO: vec2 per layer, std140-padded to vec4 (16 B each).
-		// Vert shader uses these to scroll UV by tick * anim * (1/128) per
-		// frame, matching stock GpuPlugin's textureAnimations uniform.
 		animationUbo = buildAnimationUbo(osrsTextures);
 	}
 
-	/** Shader declares {@code vec4 anim[ANIM_UBO_COUNT]}; the bound UBO must
-	 *  be at least this large or some drivers (RADV in particular) hang the
-	 *  GPU on out-of-range accesses even when the shader has a runtime guard. */
+	/** LANDMINE: shader declares {@code vec4 anim[ANIM_UBO_COUNT]}; the
+	 *  bound UBO must be at least this large or RADV hangs the GPU on
+	 *  out-of-range accesses, even with a runtime shader guard. */
 	private static final int ANIM_UBO_COUNT = 256;
 
 	private Buffer buildAnimationUbo(Texture[] osrsTextures)
@@ -202,8 +174,7 @@ final class TextureArray implements AutoCloseable
 			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 		ubo.mapPersistent();
 		ByteBuffer mapped = ubo.mappedByteBuffer().order(java.nio.ByteOrder.nativeOrder());
-		// Zero-fill the whole buffer first so any layer beyond the actual
-		// OSRS texture count reads (0,0,0,0).
+		// Zero-fill so unused layers read (0,0,0,0).
 		for (int i = 0; i < ANIM_UBO_COUNT; i++)
 		{
 			mapped.putFloat(0).putFloat(0).putFloat(0).putFloat(0);
@@ -216,8 +187,7 @@ final class TextureArray implements AutoCloseable
 			float u = 0f, v = 0f;
 			if (t != null)
 			{
-				// Stock TextureManager.computeTextureAnimations:
-				//   1 = north (-V), 2 = west (-U), 3 = south (+V), 4 = east (+U).
+				// OSRS animation directions: 1=N(-V), 2=W(-U), 3=S(+V), 4=E(+U).
 				switch (t.getAnimationDirection())
 				{
 					case 1: v = -1f; break;
@@ -246,8 +216,8 @@ final class TextureArray implements AutoCloseable
 		final int bytesPerLayer = LAYER_SIZE * LAYER_SIZE * 4;
 		final long totalBytes = (long) bytesPerLayer * layerCount;
 
-		// Single staging buffer for all layers; copy each layer's pixels into a
-		// distinct offset and one vkCmdCopyBufferToImage per layer.
+		// Single staging buffer covers all layers; one vkCmdCopyBufferToImage
+		// region per layer.
 		Buffer staging = new Buffer(device, totalBytes,
 			VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
 			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
@@ -256,8 +226,7 @@ final class TextureArray implements AutoCloseable
 			staging.mapPersistent();
 			ByteBuffer mapped = staging.mappedByteBuffer();
 
-			// Layer 0: solid white (1.0, 1.0, 1.0, 1.0) — applied to faces that
-			// don't reference a texture so the HSL colour shows through unchanged.
+			// Layer 0: solid white so untextured faces multiply through to HSL.
 			for (int i = 0; i < bytesPerLayer / 4; i++)
 			{
 				mapped.put((byte) 0xFF).put((byte) 0xFF).put((byte) 0xFF).put((byte) 0xFF);
@@ -268,8 +237,8 @@ final class TextureArray implements AutoCloseable
 				int[] argb = osrsTextures[t] == null ? null : tp.load(t);
 				if (argb == null || argb.length < LAYER_SIZE * LAYER_SIZE)
 				{
-					// Texture not yet loaded by the engine; fill with grey so faces
-					// referring to it don't render black holes.
+					// Engine hasn't loaded this texture — grey fallback so the
+					// face doesn't render as a black hole.
 					for (int p = 0; p < LAYER_SIZE * LAYER_SIZE; p++)
 					{
 						mapped.put((byte) 0x80).put((byte) 0x80).put((byte) 0x80).put((byte) 0xFF);
@@ -277,10 +246,8 @@ final class TextureArray implements AutoCloseable
 				}
 				if (argb != null && argb.length >= LAYER_SIZE * LAYER_SIZE)
 				{
-					// OSRS encodes texture transparency as `rgb == 0`. Stock's
-					// TextureManager.convertPixels writes 0,0,0,0 for those
-					// pixels and 0xFF alpha otherwise; the fragment shader's
-					// `if (textureColor.a < 1.0) discard;` then drops them.
+					// OSRS encodes transparency as rgb==0 → alpha 0; opaque
+					// otherwise. scene.frag uses an alpha-threshold discard.
 					for (int p = 0; p < LAYER_SIZE * LAYER_SIZE; p++)
 					{
 						int rgb = argb[p];
@@ -290,10 +257,10 @@ final class TextureArray implements AutoCloseable
 						}
 						else
 						{
-							mapped.put((byte) (rgb         & 0xFF))   // B
-								  .put((byte) ((rgb >>  8) & 0xFF))   // G
-								  .put((byte) ((rgb >> 16) & 0xFF))   // R
-								  .put((byte) 0xFF);                  // A
+							mapped.put((byte) (rgb         & 0xFF))
+								  .put((byte) ((rgb >>  8) & 0xFF))
+								  .put((byte) ((rgb >> 16) & 0xFF))
+								  .put((byte) 0xFF);
 						}
 					}
 				}
@@ -317,9 +284,8 @@ final class TextureArray implements AutoCloseable
 					.flags(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
 				vkBeginCommandBuffer(cmd, begin);
 
-				// Step 1: transition every mip level of every layer from
-				// UNDEFINED to TRANSFER_DST. We only memcpy into mip 0; the
-				// higher mips will be blit destinations from mip N-1 below.
+				// All mips → TRANSFER_DST. Base level gets memcpy'd; higher
+				// levels are blit destinations in the mip cascade below.
 				transitionAllLayers(cmd, stack, 0, MIP_LEVELS,
 					VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 					VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -342,10 +308,8 @@ final class TextureArray implements AutoCloseable
 				vkCmdCopyBufferToImage(cmd, staging.handle(), image,
 					VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, regions);
 
-				// Step 2: generate the mip chain by repeated vkCmdBlitImage
-				// from level i-1 → i. Each source level transitions to
-				// TRANSFER_SRC right before the blit and then to
-				// SHADER_READ_ONLY immediately after (we're done with it).
+				// Mip cascade: blit i-1 → i, transitioning the source to
+				// SHADER_READ_ONLY once we're done reading it.
 				int srcW = LAYER_SIZE, srcH = LAYER_SIZE;
 				for (int level = 1; level < MIP_LEVELS; level++)
 				{
@@ -388,7 +352,7 @@ final class TextureArray implements AutoCloseable
 					srcH = dstH;
 				}
 
-				// Step 3: the last mip is still TRANSFER_DST_OPTIMAL.
+				// Last mip is still TRANSFER_DST.
 				transitionAllLayers(cmd, stack, MIP_LEVELS - 1, 1,
 					VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 					VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
@@ -435,11 +399,8 @@ final class TextureArray implements AutoCloseable
 	@Override
 	public void close()
 	{
-		// Make sure no in-flight command buffer references our image/sampler/UBO.
-		// The Disposables LIFO closes VulkanRenderer + InterfaceRenderer +
-		// SceneRenderer first (each does its own vkDeviceWaitIdle), but be
-		// defensive — if anything reorders, this prevents native crashes from
-		// destroy-while-in-use.
+		// Defensive drain in case Disposables ordering changes — without
+		// it a reorder can crash on destroy-while-in-use.
 		vkDeviceWaitIdle(device.handle());
 		if (animationUbo != null) animationUbo.close();
 		vkDestroySampler(device.handle(), sampler, null);

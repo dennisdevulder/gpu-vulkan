@@ -76,38 +76,26 @@ final class Swapchain implements AutoCloseable
 
 	void recreate(int desiredWidth, int desiredHeight)
 	{
-		// Drain queue submits before tearing down the old per-image views.
-		// Note: this does NOT drain the WSI presentation engine — that's why
-		// we pass the old VkSwapchainKHR handle to the new create() call as
-		// oldSwapchain (per VkSwapchainCreateInfoKHR spec): the driver
-		// performs a smooth handover, retiring the old swapchain (releasing
-		// its WSI references) and letting us destroy the old handle cleanly.
+		// vkDeviceWaitIdle drains queue submits but NOT the WSI present
+		// engine — so we pass the old VkSwapchainKHR via oldSwapchain
+		// (spec-clean handover, driver retires + releases WSI refs).
 		vkDeviceWaitIdle(device.handle());
 		long retiringHandle = handle;
 		long[] retiringViews = imageViews;
-		// Clear our state so create() doesn't try to destroy what it's about
-		// to inherit-from. We keep retiringHandle in scope to pass as
-		// oldSwapchain and to destroy after the new chain is built.
 		handle = VK_NULL_HANDLE;
 		imageViews = new long[0];
 		images = new long[0];
 		create(desiredWidth, desiredHeight, retiringHandle);
-		// Now destroy the retired swapchain + its old views. Per spec the
-		// retired swapchain is in a state where it can no longer be acquired
-		// from but is still safe to destroy.
 		for (long view : retiringViews)
 		{
 			if (view != VK_NULL_HANDLE) vkDestroyImageView(device.handle(), view, null);
 		}
 		if (retiringHandle != VK_NULL_HANDLE)
 		{
-			// Second drain immediately before the old VkSwapchainKHR goes
-			// away. MoltenVK#2609 reports artifacts on Apple Silicon when
-			// the old swapchain's Metal resources are still being touched
-			// by the just-created new swapchain at destroy time. The
-			// vkDeviceWaitIdle at the top of recreate() drains submits BEFORE
-			// the new swapchain is built; this one drains anything the
-			// build path itself queued, eliminating the window.
+			// LANDMINE (MoltenVK #2609): second drain before destroying the
+			// retired handle. Without it Apple Silicon shows artifacts when
+			// the new swapchain still touches the old chain's Metal
+			// resources at destroy time.
 			vkDeviceWaitIdle(device.handle());
 			KHRSwapchain.vkDestroySwapchainKHR(device.handle(), retiringHandle, null);
 		}
@@ -145,13 +133,9 @@ final class Swapchain implements AutoCloseable
 
 			int presentMode = pickPresentMode(stack);
 
-			// MoltenVK Runtime Guide explicitly recommends 3 swapchain
-			// images (triple-buffering) on Apple Silicon: "particularly
-			// important when rendering to a full-screen surface, because
-			// in that situation, Metal uses its Direct to Display feature".
-			// On other platforms minImageCount + 1 happens to land on 3 by
-			// chance; pin it explicitly so we don't drop to 2 if a driver
-			// advertises minImageCount = 1.
+			// Triple-buffer pinned: MoltenVK's Runtime Guide recommends 3
+			// on Apple Silicon for Direct-to-Display; other platforms
+			// happen to land on 3 anyway via minImageCount+1.
 			int imageCount = Math.max(3, caps.minImageCount());
 			if (caps.maxImageCount() > 0 && imageCount > caps.maxImageCount())
 			{
@@ -217,14 +201,9 @@ final class Swapchain implements AutoCloseable
 		VkSurfaceFormatKHR.Buffer formats = VkSurfaceFormatKHR.calloc(count.get(0), stack);
 		KHRSurface.vkGetPhysicalDeviceSurfaceFormatsKHR(device.physicalDevice(), surface.handle(), count, formats);
 
-		// Prefer UNORM over SRGB so the framebuffer does NOT apply implicit
-		// linear→sRGB conversion on shader output. OSRS art (HSL-decoded RGB,
-		// UI BufferProvider pixels) is already in display-sRGB space — if we
-		// hand sRGB-intended values to an SRGB framebuffer, Vulkan treats
-		// them as linear and re-encodes, ~2x-brightening everything. Stock
-		// GpuPlugin uses a linear GL framebuffer (no auto-conversion) — UNORM
-		// matches that behavior exactly: shader output bytes land on the
-		// monitor unchanged.
+		// LANDMINE: prefer UNORM. OSRS art is already in display-sRGB; an
+		// SRGB framebuffer would re-encode it as linear→sRGB and
+		// ~2x-brighten everything.
 		for (int i = 0; i < formats.capacity(); i++)
 		{
 			VkSurfaceFormatKHR f = formats.get(i);
@@ -234,7 +213,7 @@ final class Swapchain implements AutoCloseable
 				return VkSurfaceFormatKHR.create(f.address());
 			}
 		}
-		// Fall back to SRGB if UNORM isn't offered (rare).
+		// Fallback: SRGB, then whatever the driver listed first.
 		for (int i = 0; i < formats.capacity(); i++)
 		{
 			VkSurfaceFormatKHR f = formats.get(i);
@@ -244,7 +223,6 @@ final class Swapchain implements AutoCloseable
 				return VkSurfaceFormatKHR.create(f.address());
 			}
 		}
-		// Last resort: whatever the driver listed first — guaranteed to exist.
 		return VkSurfaceFormatKHR.create(formats.get(0).address());
 	}
 
@@ -264,15 +242,9 @@ final class Swapchain implements AutoCloseable
 			else if (m == KHRSurface.VK_PRESENT_MODE_FIFO_RELAXED_KHR) hasFifoRelaxed = true;
 		}
 
-		// FIFO is always supported and is the spec-required fallback.
-		// On macOS (MoltenVK), MAILBOX is layered over CAMetalLayer's
-		// drawable pool and lets newer drawables replace older ones in
-		// the queue. Combined with AppKit's CAMetalLayer compositing
-		// (no synchronous render callback like CAOpenGLLayer), this
-		// causes older drawables to occasionally present out of order
-		// for one refresh — the user sees the previous frame's average
-		// color flickering through. Force FIFO on macOS to guarantee
-		// strict drawable ordering regardless of fpsMode preference.
+		// LANDMINE: force FIFO on macOS. MoltenVK's MAILBOX over
+		// CAMetalLayer can present drawables out of order for one refresh,
+		// flickering the previous frame's average colour through.
 		boolean isMac = System.getProperty("os.name", "").toLowerCase().contains("mac");
 		if (isMac)
 		{
@@ -303,13 +275,9 @@ final class Swapchain implements AutoCloseable
 
 	private void destroy()
 	{
-		// Drain GPU work right here, even though shutDown already called
-		// vkDeviceWaitIdle. Confirmed via breadcrumbs: on AMD/RADV the JVM
-		// silently exits inside vkDestroySwapchainKHR without this — the
-		// outer queue-idle isn't sufficient by the time several disposes
-		// (VulkanRenderer/Framebuffers/DepthBuffer) have run between it
-		// and this call. Cheap belt-and-braces against WSI lifetime
-		// state we can't otherwise drain through the public API.
+		// LANDMINE: drain again here. AMD/RADV silently exits the JVM
+		// from inside vkDestroySwapchainKHR if the outer queue-idle gets
+		// stale across intervening dispose calls.
 		vkDeviceWaitIdle(device.handle());
 
 		for (long view : imageViews)

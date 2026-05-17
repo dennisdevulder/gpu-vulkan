@@ -60,10 +60,6 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 	private MsaaColorBuffer msaaColor;
 	private RenderPass renderPass;
 	private SceneRenderer sceneRenderer;
-	/** Stock-port region filter. Loads regions.txt once and strips
-	 *  out-of-region zones from each fresh scene before geometry capture
-	 *  — see {@link #prepareScene}. Null only between {@link #shutDown}
-	 *  and the next {@link #startUp}. */
 	private RegionManager regionManager;
 	private TextureArray textureArray;
 	private InterfaceRenderer interfaceRenderer;
@@ -74,9 +70,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 	private VulkanRenderer renderer;
 	private Canvas canvas;
 	private PlatformSurface platform;
-	/** True once startup successfully flipped {@code client.setUnlockedFps(true)};
-	 *  shutdown only undoes it when this is set, so we don't clobber a user's
-	 *  unlocked-FPS state if we never opted in to UNCAPPED. */
+	/** Tracks whether startup actually flipped {@code setUnlockedFps(true)},
+	 *  so shutdown doesn't clobber a user-driven unlock. */
 	private boolean fpsTouched;
 	private final DrawCallbackStats stats = new DrawCallbackStats();
 	private volatile double lastCamX, lastCamY, lastCamZ;
@@ -84,68 +79,37 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 	private volatile boolean startRequested;
 	private static boolean shutdownHookRegistered;
 
-	/** Pointer to the currently-running plugin instance, set when startUp's
-	 *  Vulkan init completes and cleared in shutDown. Read from the JVM
-	 *  shutdown hook to run a best-effort Vulkan teardown when the user
-	 *  hits X on the window (which doesn't trigger {@link #shutDown}). The
-	 *  hook isn't tied to a specific instance because plugin enable/disable
-	 *  cycles can produce multiple instances over the JVM's lifetime — the
-	 *  hook always wants the live one. */
+	/** Read by the JVM shutdown hook to find the live instance — must be
+	 *  static because the hook outlives any single plugin instance. */
 	private static volatile GpuVulkanPlugin activeInstance;
-
-	/** Set by the JVM shutdown hook at entry. {@link #draw} bails out when
-	 *  this is true so the Client thread stops queueing fresh frames while
-	 *  the hook is running {@code vkDeviceWaitIdle} + {@code disposables.close()}.
-	 *  Volatile = happens-before so {@code drawFrame} stops cleanly. */
+	/** Set by the JVM shutdown hook so in-flight callbacks bail out before
+	 *  the disposables stack tears down Vulkan objects. */
 	private static volatile boolean shuttingDown;
 
-	/** Most recent {@code worldProjection} seen on {@code drawDynamic} /
-	 *  {@code drawTemp}. The actor walk in {@link #captureActor} reads this
-	 *  to drive {@code captureModelSorted}; the engine doesn't supply a
-	 *  Projection to {@code drawScene} so we reuse the previous frame's.
-	 *  The camera moves smoothly, so frame-lag is invisible — and on the
-	 *  very first frame after plugin enable this stays null and actors
-	 *  fall back to the unsorted path. */
+	/** Cached from {@code drawDynamic}/{@code drawTemp}. {@code drawScene}
+	 *  doesn't pass a Projection, so {@link #captureActor} reuses the
+	 *  previous one; null on the first frame after plugin enable. */
 	private volatile net.runelite.api.Projection lastWorldProjection;
 
 	@Override
 	protected void startUp()
 	{
 		log.info("Starting GPU (Vulkan)");
-		// Both this plugin and the stock "GPU" plugin install themselves as the
-		// canvas's renderer via rlawt + setDrawCallbacks. Two simultaneous
-		// owners of the AWT/rlawt context corrupt the JAWT/GLX state and
-		// disabling either one then exits the JVM natively (no hs_err). Refuse
-		// to start up while stock GPU is enabled rather than letting both run.
+		// Refuse to coexist with stock GPU — two owners of the rlawt context
+		// corrupt JAWT state and crash the JVM on disable.
 		if (isStockGpuEnabled())
 		{
 			log.warn("Stock 'GPU' plugin is enabled — GPU (Vulkan) will not start. Disable 'GPU' first.");
 			return;
 		}
 		startRequested = true;
-		// macOS CAMetalLayer.displaySyncEnabled is set from this. VSYNC and
-		// TRIPLE_BUFFER both pin to display refresh (the macOS compositor has
-		// only one knob — vsync on/off); UNCAPPED releases it. Linux/Windows
-		// path picks Vulkan present mode separately based on the same config.
 		boolean wantVsync = config.fpsMode() != GpuVulkanPluginConfig.FpsMode.UNCAPPED;
 		platform = PlatformSurface.current(wantVsync);
-		// macOS doesn't need (and shouldn't run) the rlawt/X11 canvas-attach
-		// dance below — Cocoa's AWT layer model is JAWT_SurfaceLayers-based
-		// and MacOSPlatformSurface does the JAWT lock + CAMetalLayer attach
-		// itself. Attaching rlawt's CAOpenGLLayer first would also conflict
-		// with our subsequent setLayer: call.
+		// macOS owns its CAMetalLayer attach via JAWT_SurfaceLayers in
+		// MacOSPlatformSurface, and rlawt's CAOpenGLLayer would conflict.
 		final boolean isMac = platform instanceof MacOSPlatformSurface;
-		// One-time JVM-lifetime hook: runs at process exit (X-close,
-		// System.exit, etc.) when Plugin.shutDown is NOT going to fire.
-		// Without this, our Vulkan objects (device, swapchain, …) outlive
-		// the validation layer's static state, and the loader's atexit
-		// cleanup goes through validation after it's been torn down,
-		// producing "dispatch handle not found" warnings (or crashes in
-		// older validation builds). Doing the teardown here pre-empts that.
-		//
-		// Registered once per JVM via the static flag. Reads `activeInstance`
-		// fresh so it sees the currently-running plugin instance, not a
-		// stale one from before a plugin disable/re-enable cycle.
+		// JVM-lifetime hook: tear Vulkan down before the loader's atexit
+		// runs through the validation layer's torn-down state.
 		if (!shutdownHookRegistered)
 		{
 			shutdownHookRegistered = true;
@@ -161,12 +125,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 					// Plugin.shutDown already ran. Nothing to do.
 					return;
 				}
-				// Best-effort teardown. We're on a JVM shutdown thread, not
-				// the Client thread — the Client thread may still be alive
-				// and mid-frame. vkDeviceWaitIdle drains in-flight work
-				// before we destroy resources; if it takes too long the
-				// JVM will halt the process regardless. Wrap every step so
-				// one failure can't skip the rest.
+				// Best-effort teardown — Client thread may still be running.
+				// Wrap each step so one failure can't skip the rest.
 				try
 				{
 					VulkanDevice dev = self.device;
@@ -214,12 +174,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 					log.debug("Deferring GPU (Vulkan) startup until the texture provider is available");
 					return false;
 				}
-				/* Defer until the user is actually in the world. Attaching on
-				 * the login screen attaches over a canvas that the OSRS client
-				 * isn't yet pushing scene data to, which on macOS makes
-				 * debugging the surface/compositing path harder (empty layer
-				 * = "broken" even when everything works). Wait for LOGGED_IN
-				 * so the first attach happens with a real scene rendering. */
+				// Defer attach until LOGGED_IN — attaching on the login screen
+				// leaves a blank canvas that's hard to distinguish from a
+				// broken surface, especially on macOS.
 				if (client.getGameState() != GameState.LOGGED_IN)
 				{
 					log.debug("Deferring GPU (Vulkan) startup until game state is LOGGED_IN (currently {})",
@@ -227,31 +184,13 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 					return false;
 				}
 				canvas = client.getCanvas();
-				// X11 specifically requires that the canvas have a live GL
-				// context bound for AWT's resize handling to remain coherent;
-				// see the long comment below. macOS doesn't share this quirk
-				// (Cocoa's layer-backed AWT canvas doesn't depend on a GL
-				// context for peer state) — and on macOS we attach a Metal
-				// layer ourselves in MacOSPlatformSurface, so an rlawt GL
-				// layer here would conflict. Skip on Mac.
+				// X11: AWT's libawt_xawt resize path expects a live GLX
+				// context on the canvas's owning thread; without it, sidebar
+				// collapse exit_group(1)s the EDT mid-rebuild. We don't use
+				// the GL context for rendering, just keep it bound.
+				// Skipped on macOS — we attach our own Metal layer there.
 				if (!isMac)
 				{
-					// Mirror stock GpuPlugin's full canvas-attachment dance.
-					// We render via Vulkan, NOT GL — but the GLX context AWT thinks
-					// the canvas has is what keeps libawt_xawt.so's native state
-					// consistent across canvas peer manipulations (sidebar collapse
-					// fires Component resize events with no hierarchy change, but
-					// the underlying X11 backing buffer/pixmap still gets rebuilt
-					// by AWT). Without a GL context bound, AWT's resize-handler
-					// hits a dangling pointer mid-rebuild and exit_group(1)s the
-					// EDT (verified via strace).
-					//
-					// detachCurrent() right after creation: rlawt's createGLContext
-					// makes the new context current on the calling thread by
-					// default. We don't render through GL, so we unbind it
-					// immediately. The context still exists and AWT's native state
-					// is well-formed; we just don't hold it as the active GL
-					// context on the Client thread.
 					net.runelite.rlawt.AWTContext.loadNatives();
 					synchronized (canvas.getTreeLock())
 					{
@@ -263,23 +202,14 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 						awtContext.configurePixelFormat(0, 0, 0);
 					}
 					awtContext.createGLContext();
-					// NOT calling detachCurrent — stock leaves the GL context
-					// current on the Client thread for the lifetime of its rendering.
-					// AWT's native code may expect the canvas's GLX context to be
-					// "owned" by a thread for canvas state operations to be coherent
-					// (resize/peer manipulation walks the context's binding). We
-					// don't actually USE the GL context for rendering; we just keep
-					// it bound so AWT's tracking stays consistent.
 				}
 				canvas.setIgnoreRepaint(true);
 				canvas.setFocusable(true);
 				canvas.requestFocusInWindow();
 
 				disposables = new Disposables();
-				// System property wins over stored config: `-Dvkgpu.validation=true`
-				// always forces validation on, regardless of whether the user ever
-				// toggled the config option in the UI (which would otherwise
-				// persist `false` and shadow the property via the config proxy).
+				// -Dvkgpu.validation=true overrides the stored config so devs
+				// don't have to toggle the UI to enable validation.
 				boolean validationOn = Boolean.parseBoolean(System.getProperty("vkgpu.validation", "false"))
 					|| config.validation();
 				instance = new VulkanInstance(validationOn, platform);
@@ -291,18 +221,11 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 				device = new VulkanDevice(instance, surface);
 				disposables.add(device);
 
-				// FrameSync is registered BEFORE Swapchain on purpose. Disposables
-				// is a LIFO close-stack; whatever is added LAST is destroyed FIRST.
-				// We need vkDestroySwapchainKHR to run BEFORE vkDestroySemaphore on
-				// the renderFinished[] semaphores, because the WSI presentation
-				// engine still references renderFinished[lastPresentedImage] until
-				// the swapchain is destroyed. Destroying those semaphores while WSI
-				// holds references hangs AMD/RADV (and some Mesa releases) — pure
-				// hang, no SIGSEGV — because vkDestroySemaphore blocks waiting for
-				// the present to complete. vkDeviceWaitIdle does NOT drain the WSI
-				// presentation engine (per its man page: equivalent to
-				// vkQueueWaitIdle on all queues only), so the swapchain destroy is
-				// the only spec-clean release of those WSI references.
+				// LANDMINE: register FrameSync BEFORE Swapchain. Disposables
+				// is LIFO so swapchain destroys first, releasing WSI refs to
+				// renderFinished[] semaphores; destroying those semaphores
+				// while WSI still holds them hangs AMD/RADV. vkDeviceWaitIdle
+				// does not drain the WSI presentation engine.
 				sync = new FrameSync(device);
 				disposables.add(sync);
 
@@ -310,8 +233,6 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 				disposables.add(swapchain);
 				sync.recreateRenderFinished(swapchain.imageCount());
 
-				// MSAA from config. Pick the highest the device actually
-				// supports up to the requested level (clamped by hardware).
 				int desiredSamples;
 				switch (config.antiAliasingMode())
 				{
@@ -338,15 +259,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 				renderPass = new RenderPass(device, swapchain.imageFormat(), samples);
 				disposables.add(renderPass);
 
-				// Gfx layer adopts the device/sync/renderPass we just built.
-				// Currently only InterfaceRenderer consumes the layer; other
-				// renderers stay on raw Vulkan until they're migrated.
 				gfx = Gfx.wrap(device, sync, renderPass);
 				disposables.add(gfx);
 
-				// Texture array gets populated from the OSRS texture provider
-				// once at startup. Layer 0 is the white "no-texture" tile;
-				// layer N+1 holds OSRS texture id N.
 				textureArray = new TextureArray(device, textureProvider,
 					config.anisotropicFilteringLevel());
 				disposables.add(textureArray);
@@ -355,9 +270,6 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 				applyWireframeConfig();
 				disposables.add(sceneRenderer);
 
-				// Region manager parses regions.txt once at startup. Cheap (5KB
-				// of regex parsing); cached for the lifetime of the plugin so
-				// each prepareScene call is just a bounded chunk-grid walk.
 				regionManager = new RegionManager();
 
 				interfaceRenderer = new InterfaceRenderer(gfx);
@@ -373,44 +285,25 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 				log.info("Vulkan ready: {} ({}x{}, {} swapchain images)",
 					device.deviceName(), swapchain.width(), swapchain.height(), swapchain.imageCount());
 
-				// Publish to the JVM shutdown hook. Must happen AFTER all
-				// Vulkan objects are initialised so the hook can't observe
+				// Publish AFTER full init so the shutdown hook can't observe
 				// a half-built instance.
 				activeInstance = this;
 
 				client.setDrawCallbacks(this);
-				// GPU: skip the Java software rasterizer. ZBUF: enable Z-buffer scene
-				// rendering, which is what makes the client traverse zones and call
-				// drawZoneOpaque / drawDynamic / etc. Without ZBUF we only get the
-				// drawScene / postDrawScene boundary markers — no geometry callbacks.
-				// NO_VERTEX_SNAPPING: optional — disables the legacy 1/128-tile snap
-				// on animated entities so player/NPC motion is smooth.
+				// ZBUF is what makes the engine traverse zones and fire
+				// drawZoneOpaque / drawDynamic; without it we only get
+				// drawScene / postDrawScene boundary markers.
 				int gpuFlags = DrawCallbacks.GPU | DrawCallbacks.ZBUF;
 				if (config.removeVertexSnapping()) gpuFlags |= DrawCallbacks.NO_VERTEX_SNAPPING;
 				client.setGpuFlags(gpuFlags);
-				// Tell the engine to stream extra map chunks past the default
-				// LoD edge. Required for large draw distances to actually show
-				// geometry beyond the default loaded region (otherwise tiles
-				// past the edge are unloaded and culled regardless of our
-				// drawDistance config).
 				client.setExpandedMapLoading(config.expandedMapLoadingChunks());
-				// Force the buffer-provider rebuild so the canvas gets an alpha channel
-				// for compositing. Stock GpuPlugin does this; without it AWT paints
-				// opaque over our Vulkan output.
+				// Re-trigger BufferProvider so the canvas picks up an alpha
+				// channel; without it AWT paints opaque over our output.
 				client.resizeCanvas();
 
-				// Engine FPS unlock + target. Two independent signals fold into
-				// one decision:
-				//   - fpsMode == UNCAPPED: render as fast as possible (paired
-				//     with the IMMEDIATE present mode the swapchain selects).
-				//   - fpsTarget > 0: park the render loop at that rate
-				//     regardless of fpsMode. Works with vsync (limit < refresh
-				//     rate caps below vsync) and with UNCAPPED (limit > vsync
-				//     overrides the engine's default ~50 cap).
-				// Only touch state if we're opting in to either — never call
-				// setUnlockedFps(false) preemptively, since that overrides a
-				// user-driven unlock from elsewhere. fpsTouched gates the
-				// matching shutdown call.
+				// Only call setUnlockedFps when we're actually opting in —
+				// never preemptively false, since that overrides a user-driven
+				// unlock from elsewhere. fpsTouched gates the shutdown undo.
 				int fpsTarget = Math.max(0, config.fpsTarget());
 				boolean unlockEngine =
 					config.fpsMode() == GpuVulkanPluginConfig.FpsMode.UNCAPPED
@@ -418,13 +311,13 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 				if (unlockEngine)
 				{
 					client.setUnlockedFps(true);
-					client.setUnlockedFpsTarget(fpsTarget); // 0 = no cap
+					client.setUnlockedFpsTarget(fpsTarget);
 					fpsTouched = true;
 				}
 
-				// Plugin enable mid-session: the scene's already loaded, but loadScene
-				// won't fire again until the player crosses a chunk boundary. Capture
-				// terrain right away so M11 doesn't have to wait for that.
+				// Plugin enable mid-session: capture the already-loaded
+				// scene right away rather than waiting for the next chunk
+				// crossing.
 				Scene currentScene = client.getTopLevelWorldView() == null ? null
 					: client.getTopLevelWorldView().getScene();
 				if (currentScene != null)
@@ -505,21 +398,15 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 	{
 		log.info("Stopping GPU (Vulkan)");
 		startRequested = false;
-		// Unpublish from the JVM shutdown hook first. If JVM shutdown begins
-		// while we're partway through shutDown's clientThread.invoke, the
-		// hook seeing activeInstance == null skips its own teardown and we
-		// avoid double-destroy. The Disposables LIFO already guards against
-		// a single thread re-entering close, but the hook is a separate
-		// thread and could overlap with this lambda.
+		// Unpublish first so a concurrent shutdown hook sees null and bails,
+		// avoiding double-destroy from two threads.
 		activeInstance = null;
 		clientThread.invoke(() ->
 		{
-			// Teardown order mirrors stock GpuPlugin's shutDown. awtContext.destroy()
-			// must run before client.resizeCanvas(): resizeCanvas rebuilds the canvas
-			// buffer provider, and an attached AWTContext at that point leaves JAWT
-			// state stale so the next plugin enable fails JAWT_DrawingSurface_Lock.
-			// Drain the GPU first so no Vulkan work is in flight when the engine
-			// switches its render path back.
+			// Teardown order: drain GPU → drop callbacks → close Disposables
+			// → destroy AWTContext → resizeCanvas. resizeCanvas with an
+			// attached AWTContext leaves JAWT state stale and the next
+			// plugin enable fails JAWT_DrawingSurface_Lock.
 			if (device != null)
 			{
 				try
@@ -594,13 +481,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 	@Subscribe
 	public void onGameStateChanged(net.runelite.api.events.GameStateChanged ev)
 	{
-		// Logout / hop / connection-lost: drop the captured scene so the
-		// login screen doesn't render with the previous world's terrain
-		// bleeding through the edges. Mirrors stock GpuPlugin's
-		// `sceneFboValid = false` on this same threshold (GpuPlugin.java:1583).
-		// Anything below LOADING means the engine no longer has a scene
-		// to drive — keep our captured geometry around through LOADING so
-		// the world stays drawn while the next region streams in.
+		// Drop captured scene on logout / hop / connection-lost so the
+		// login screen doesn't render with the previous world bleeding
+		// through. LOADING is kept (next region is streaming in).
 		if (sceneRenderer == null) return;
 		net.runelite.api.GameState state = ev.getGameState();
 		if (state.getState() < net.runelite.api.GameState.LOADING.getState())
@@ -643,8 +526,6 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 		{
 			return;
 		}
-		// Detect resize between frames; the swapchain rebuild itself happens
-		// inside drawFrame on OUT_OF_DATE_KHR or when the size changes.
 		int w = canvas.getWidth();
 		int h = canvas.getHeight();
 		if (w != swapchain.width() || h != swapchain.height())
@@ -665,9 +546,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 			Math.max(0, Math.min(100, config.colorBlindIntensity())) / 100f,
 			config.drawDistance(),
 			config.fogDepth(),
-			// Stock vert.glsl uses `tick & 127` — modulo keeps the value
-			// small so `tick * anim * (1/128)` doesn't accumulate float
-			// precision drift while still cycling through every UV offset.
+			// Modulo prevents tick * anim_speed * (1/128) from accumulating
+			// float drift over a long session.
 			client.getGameCycle() & 127,
 			config.smoothBanding() ? 1f : 0f,
 			overlayColor);
@@ -682,41 +562,28 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 		stats.lastCamY = cameraY;
 		stats.lastCamZ = cameraZ;
 		stats.lastCamPlane = plane;
-		// We don't write to lastCamX/Y/Z/Pitch/Yaw here — those come exclusively
-		// from preSceneDraw to match what GpuPlugin's projection uses. drawScene
-		// fires after preSceneDraw and would overwrite the good values with
-		// doubles from a different reference frame.
-		// Start a fresh capture window — the upcoming drawDynamic / drawTemp / etc.
-		// callbacks will pump geometry into sceneRenderer.
+		// Camera doubles here come from a different reference frame than
+		// preSceneDraw's floats — we use preSceneDraw's exclusively for the
+		// projection MVP, so don't overwrite them here.
 		if (sceneRenderer != null)
 		{
 			sceneRenderer.beginFrame();
 			captureActors();
-			// Re-try any renderables whose Model was null at scene-capture
-			// time. The engine streams object models asynchronously after a
-			// region load — by the time we reach drawScene again, models
-			// that weren't ready during captureScene have usually arrived.
-			// They emit into the dynamic suffix (same budget actors use),
-			// no GPU drain, no frame hitch.
 			sceneRenderer.captureDynamicPending();
 		}
 	}
 
-	/**
-	 * Walks every NPC and player every frame and captures their current
-	 * animated model. drawTemp / drawDynamic from the OSRS engine are
-	 * unreliable for live actors — its frustum culling skips them for whole
-	 * frames as the camera pans, leaving the player flickering. Iterating
-	 * Client.getNpcs() / getPlayers() ourselves bypasses that culling.
-	 */
-	/** Reusable per-frame dedupe set for actor capture — avoids re-rendering
-	 *  an actor when (a) the engine returns the local player at multiple slots
-	 *  in `getPlayers()` during worldview transitions, or (b) the same actor
-	 *  surfaces via both NPC and Player lists momentarily. The "two heads on
-	 *  the player" symptom is exactly this case for the local player. */
+	/** Per-frame dedupe — engine occasionally surfaces the local player
+	 *  via both getNpcs() and getPlayers() during worldview transitions. */
 	private final java.util.IdentityHashMap<net.runelite.api.Actor, Boolean> seenActors
 		= new java.util.IdentityHashMap<>();
 
+	/**
+	 * Walks NPCs + Players every frame. The engine's frustum culling drops
+	 * actors for whole frames as the camera pans, which would otherwise
+	 * leave the player flickering — iterating the lists ourselves bypasses
+	 * that.
+	 */
 	private void captureActors()
 	{
 		seenActors.clear();
@@ -746,20 +613,13 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 		}
 		else
 		{
-			// First frame after enable — no projection cached yet.
 			sceneRenderer.captureModel(m, actor.getCurrentOrientation(), loc.getX(), tileH, loc.getY());
 		}
 	}
 
-	/**
-	 * Called once per frame just before the scene is rendered. The float values
-	 * here are exactly what GpuPlugin uses for its projection matrix, so we use
-	 * the entire camera tuple from this callback (not drawScene's doubles) to
-	 * stay in lockstep with what the OSRS scene compute expects.
-	 */
-	/** Identity of the scene captured into sceneRenderer. swapScene/loadScene
-	 *  callbacks don't fire reliably in this engine version, so we detect
-	 *  scene transitions ourselves by comparing references each frame. */
+	/** Identity of the scene captured into sceneRenderer. swapScene /
+	 *  loadScene callbacks are unreliable in this engine version, so we
+	 *  detect scene transitions by reference comparison instead. */
 	private Scene capturedScene;
 
 	@Override
@@ -778,9 +638,6 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 			capturedScene = scene;
 			captureSceneNow(scene);
 		}
-		// Plane bounds — matches Zone.renderOpaque(..., minLevel, level,
-		// maxLevel, ...) in stock GpuPlugin (GpuPlugin.java:1062). Stock
-		// skips geometry outside [minLevel..maxLevel]; we mirror it.
 		if (sceneRenderer != null)
 		{
 			sceneRenderer.setLevelRange(minLevel, maxLevel);
@@ -790,13 +647,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 		lastCamZ = cameraZ;
 		lastCamPitch = cameraPitch;
 		lastCamYaw = cameraYaw;
-		// Tell the engine how far to walk the scene for entity processing.
-		// Drives the engine's internal `ep.qq/du/fi` loops that register
-		// per-entity clickboxes — without this, only tiles within the
-		// engine's tiny default range get clickable.
+		// Drives the engine's per-entity clickbox loops; without it only
+		// tiles within the engine's tiny default range register clicks.
 		scene.setDrawDistance(config.drawDistance());
-		// Hand the per-frame roof-id set to the renderer so it can punch
-		// holes in the GAME_OBJECTS draw for objects whose IDs are in here.
 		if (sceneRenderer != null) sceneRenderer.setHideRoofIds(hideRoofIds);
 	}
 
@@ -810,11 +663,10 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 	public void swapScene(Scene scene)
 	{
 		stats.swapScene.incrementAndGet();
-		// Belt-and-braces: also re-capture here. The primary trigger is the
-		// scene-reference check in preSceneDraw (engine doesn't reliably
-		// call swapScene), but if a future engine version does, we still
-		// honor it without double-capturing (preSceneDraw's check will see
-		// scene == capturedScene next frame).
+		// Belt-and-braces. The primary trigger is the reference check in
+		// preSceneDraw (engine doesn't reliably call swapScene), but if it
+		// does, preSceneDraw's check will see scene == capturedScene and
+		// won't double-capture.
 		if (sceneRenderer != null)
 		{
 			capturedScene = scene;
@@ -822,13 +674,6 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 		}
 	}
 
-	/**
-	 * Region filter applied before geometry capture. Strips zones outside
-	 * the player's region when {@link GpuVulkanPluginConfig#hideUnrelatedMaps}
-	 * is set; mutating the {@link Scene} directly via {@code removeTile} so
-	 * the subsequent {@code captureScene} walk sees the trimmed tile array.
-	 * Null-safe for startup paths that may run before the manager is built.
-	 */
 	private void prepareScene(Scene scene)
 	{
 		if (regionManager != null)
@@ -837,14 +682,6 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 		}
 	}
 
-	/**
-	 * Single chokepoint for {@code prepareScene} + {@code captureScene}.
-	 * Any Renderable whose Model returned null during the walk gets
-	 * queued in {@link SceneRenderer}'s pending list; the engine's
-	 * async model streaming finishes them in subsequent ticks and the
-	 * per-frame {@code captureDynamicPending} pass picks them up without
-	 * needing another full capture (or a GPU drain).
-	 */
 	private void captureSceneNow(Scene scene)
 	{
 		if (sceneRenderer == null) return;
@@ -858,10 +695,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 		stats.loadScene.incrementAndGet();
 	}
 
-	// Modern 2-arg variant. Engine doesn't currently call either loadScene
-	// overload for us (confirmed: load=0 in stats), so we rely on the
-	// scene-reference check in preSceneDraw instead — these are wired up
-	// for completeness in case engine behavior changes.
+	// Wired up but unused — engine doesn't fire either loadScene overload
+	// in this version; preSceneDraw's reference check is the live signal.
 	@Override
 	public void loadScene(net.runelite.api.WorldView worldView, Scene scene)
 	{
@@ -897,10 +732,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 	{
 		stats.drawDynamic.incrementAndGet();
 		stats.recordModel(m);
-		// Skip when the engine fires drawDynamic without a real TileObject
-		// (it does this for actor pipeline emissions in GPU mode) OR when
-		// the renderable is itself an Actor — captureActors() handles those.
-		// Without these guards the local player rendered twice.
+		// Null tileObject + Actor renderable = the engine's actor pipeline
+		// emission; captureActors() handles those. Without the skip the
+		// local player renders twice.
 		if (tileObject == null) return;
 		if (r instanceof net.runelite.api.Actor) return;
 		lastWorldProjection = worldProjection;
@@ -912,10 +746,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 	{
 		stats.drawTemp.incrementAndGet();
 		stats.recordModel(m);
-		// Same skip rule. Engine fires drawTemp with gameObject == null when
-		// emitting actors through the temp-render pipeline (since Actor isn't
-		// a GameObject); captureActors() already drew them, so skipping null
-		// here removes the duplicate copy.
+		// Null gameObject = engine emitting an actor via the temp pipeline;
+		// captureActors() already drew it.
 		if (gameObject == null) return;
 		lastWorldProjection = worldProjection;
 		if (sceneRenderer != null) sceneRenderer.captureModelSorted(worldProjection, m, orient, x, y, z);

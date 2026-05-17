@@ -17,18 +17,11 @@ import net.runelite.client.plugins.gpuvulkan.gfx.StreamingImage;
 import org.lwjgl.vulkan.VkCommandBuffer;
 
 /**
- * UI overlay renderer, expressed against the {@link Renderer} (gfx) layer.
- *
- * <p>Pre-migration this class hand-built two {@code Texture}+{@code Buffer}
- * pairs, owned a hardcoded {@code Descriptors}/{@code UiPipeline} pair,
- * and managed the FRAMES_IN_FLIGHT slot routing itself. After migration it
- * holds a {@link StreamingImage} (which rings the textures internally),
- * one {@link BindGroup} pointed at it, one {@link RenderPipeline}, and
- * lets the layer route per-slot bindings via the bind group.
- *
- * <p>The two external entry points used by {@link VulkanRenderer}
- * ({@code recordCopyToImage}, {@code recordDraw}) keep their signatures —
- * the gfx layer is internal to this class for now.
+ * UI overlay renderer. Owns a {@link StreamingImage} that rings textures
+ * across FRAMES_IN_FLIGHT slots, one bind group pointed at it, and a
+ * single pipeline. Entry points: {@code uploadPixels} (host-side memcpy),
+ * {@code recordCopyToImage} (transfer), {@code recordDraw} (fullscreen
+ * quad).
  */
 final class InterfaceRenderer implements AutoCloseable
 {
@@ -51,9 +44,8 @@ final class InterfaceRenderer implements AutoCloseable
 			.build());
 		this.vertex = renderer.createShaderModule(loadResource("ui.vert.spv"));
 		this.fragment = renderer.createShaderModule(loadResource("ui.frag.spv"));
-		// UI quad: premultiplied alpha (alpha-aware over-blend), no depth
-		// test, single triangle covering the screen via gl_VertexIndex in
-		// ui.vert. Same configuration the old UiPipeline produced.
+		// Premultiplied alpha over-blend, no depth test; gl_VertexIndex
+		// drives a single fullscreen triangle from ui.vert.
 		this.pipeline = renderer.createRenderPipeline(RenderPipelineDesc.builder()
 			.vertex(vertex)
 			.fragment(fragment)
@@ -83,10 +75,8 @@ final class InterfaceRenderer implements AutoCloseable
 		if (bindGroup == null) return;
 		try (MemoryStack stack = MemoryStack.stackPush())
 		{
-			// overlayColor is ARGB packed (engine convention from
-			// DrawCallbacks.draw(int)). Unpack into the shader's vec4
-			// (rgb tint, a blend factor). When the engine passes 0
-			// the resulting vec4 is all zero and the shader's mix() is a no-op.
+			// Engine ARGB → shader vec4 (rgb tint, a blend factor).
+			// overlayColor == 0 → all-zero push → ui.frag mix is a no-op.
 			float a = ((overlayColor >>> 24) & 0xFF) / 255f;
 			float r = ((overlayColor >>> 16) & 0xFF) / 255f;
 			float g = ((overlayColor >>>  8) & 0xFF) / 255f;
@@ -119,9 +109,8 @@ final class InterfaceRenderer implements AutoCloseable
 		{
 			return;
 		}
-		// Resize: drop bind group + streaming image, recreate at the new
-		// size. The bind group has the texture handles baked in, so it
-		// can't survive the streaming image teardown.
+		// Bind group has the texture handles baked in, so it can't survive
+		// streaming-image teardown — recreate both on resize.
 		if (bindGroup != null)
 		{
 			bindGroup.close();

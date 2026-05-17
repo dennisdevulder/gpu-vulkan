@@ -96,80 +96,52 @@ final class SceneRenderer implements AutoCloseable
 
 	private static final int MAX_PLANES = 4;
 
-	/** Tiles per side in a zone. Matches the OSRS engine's
-	 *  {@code invalidateZone(scene, zx, zz)} convention — the zone grid is
-	 *  {@code SCENE_SIZE / ZONE_SIZE = 13} zones per side. Per-zone vertex
-	 *  range tracking (see {@link #zoneVertexStart}) uses this layout so we
-	 *  can re-emit a single zone's geometry when {@code invalidateZone}
-	 *  fires (gap #8). */
+	/** OSRS engine convention: SCENE_SIZE / ZONE_SIZE = 13 zones per side. */
 	static final int ZONE_SIZE = 8;
 	static final int ZONES_PER_SIDE = Constants.SCENE_SIZE / ZONE_SIZE;
 	static final int ZONE_COUNT = ZONES_PER_SIDE * ZONES_PER_SIDE;
 
 	private final int[] regionEnds = new int[LAYER_COUNT];
-	/** Per-static-layer, per-plane: vertex count after that plane's tiles were emitted.
-	 *  Used to clip each layer at {@code planeEnds[layer][maxPlane]} — geometry on
-	 *  planes outside [minPlane, maxPlane] is blanket-culled so the player can see
-	 *  down into rooms when on a lower plane. Fine-grained roof tile hiding (the
-	 *  engine's hideRoofIds semantics) is a separate mechanism that fragments the
-	 *  per-layer draw at {@link #drawWithSkips} — see {@link #setHideRoofIds}. */
+	/** Per-layer, per-plane: vertex count after that plane's tiles emitted.
+	 *  Used to clip at {@code planeEnds[layer][maxPlane]} so upper-plane
+	 *  geometry is culled when the player is below. */
 	private final int[][] planeEnds = new int[LAYER_COUNT][MAX_PLANES];
 
-	/** Per (layer, plane, zone) starting vertex offset and count within the
-	 *  static region. Filled by {@link #captureScene} as it walks each
-	 *  (layer, plane) zone-by-zone. Reads enable per-zone re-upload on
-	 *  {@code invalidateZone} (gap #8); step 1 just records the ranges,
-	 *  step 2 will wire up the actual re-emit + skip-list. Index =
-	 *  {@code zx * ZONES_PER_SIDE + zy}. */
+	/** Per (layer, plane, zone) vertex ranges within the static region.
+	 *  Populated by {@link #captureScene}; currently unused but reserved
+	 *  for future per-zone re-emission. */
 	private final int[][][] zoneVertexStart = new int[LAYER_COUNT][MAX_PLANES][ZONE_COUNT];
 	private final int[][][] zoneVertexCount = new int[LAYER_COUNT][MAX_PLANES][ZONE_COUNT];
 
 	private final boolean[] wireframe = new boolean[LAYER_COUNT];
-	/** Plane range to render this frame. Set per-frame from preSceneDraw's
-	 *  (minLevel, maxLevel). Stock GpuPlugin uses these exact bounds in
-	 *  {@code Zone.renderOpaque(..., minLevel, level, maxLevel, ...)} —
-	 *  geometry on planes outside this range is skipped. This is how the
-	 *  engine hides upper-floor structures (the Wintertodt lean-to's roof
-	 *  faces sit on plane &gt; 0 and stock skips them because maxLevel=0). */
+	/** Plane range to render this frame, forwarded from preSceneDraw's
+	 *  (minLevel, maxLevel). */
 	private volatile int minPlane = 0;
 	private volatile int maxPlane = MAX_PLANES - 1;
 
-	/** Per-frame from {@code preSceneDraw}: the set of roof IDs that the engine
-	 *  wants hidden above the player. Values are tile-roof IDs from
-	 *  {@link net.runelite.api.Scene#getRoofs()}, NOT GameObject IDs. */
+	/** Engine-supplied per-frame set of tile-roof IDs (NOT GameObject IDs,
+	 *  values come from {@link net.runelite.api.Scene#getRoofs()}) to hide
+	 *  above the player. */
 	private volatile java.util.Set<Integer> hideRoofIds = java.util.Collections.emptySet();
 
-	/** Per-tile-range roof tag, recorded at {@link #captureScene} time for every
-	 *  {@code SceneTilePaint} / {@code SceneTileModel} whose
-	 *  {@code Scene.getRoofs()[plane][tx][tz]} is non-zero. At draw the TERRAIN
-	 *  layer is split into "render" and "skip" sub-ranges based on which
-	 *  roof IDs land in the current frame's {@link #hideRoofIds}. Stock
-	 *  GpuPlugin offloads this filter to the engine's {@code Zone.renderOpaque};
-	 *  we capture up front, so we apply it ourselves. */
+	/** Per-tile-range roof tags recorded during {@link #captureScene}.
+	 *  At draw time the layer is split into render/skip sub-ranges based
+	 *  on the current frame's {@link #hideRoofIds}. */
 	private int[] tileRoofIds      = new int[2048];
 	private int[] tileRoofStarts   = new int[2048];
 	private int[] tileRoofCounts   = new int[2048];
 	private int   tileRoofCount;
-	/** Sorted [start, end) pairs of vertex sub-ranges to skip in the current
-	 *  frame's draw. Grown on demand. */
+	/** Sorted [start, end) pairs of vertex sub-ranges to skip this frame. */
 	private int[] skipScratch = new int[256];
 
 	private int vertexCount;
 	private boolean overflowed;
 
 	/** Renderables whose Model came back null during {@link #captureScene}
-	 *  — almost always because the engine hasn't finished streaming the
-	 *  model yet on a freshly-loaded region. Without re-checking, the
-	 *  renderable stays invisible until the next scene-reference change
-	 *  (chest at login → invisible until player teleports away and back).
-	 *  {@link #captureDynamicPending} retries each entry every frame: any
-	 *  whose model has since loaded gets emitted into the dynamic suffix
-	 *  for that frame, so it pops in as soon as the engine delivers the
-	 *  data. They remain in the list until the next {@code captureScene}
-	 *  clears it, at which point they're re-evaluated for the static
-	 *  buffer along with everything else. This is the
-	 *  no-GPU-drain alternative to "re-capture the whole scene" — keeps
-	 *  frame times steady while still self-healing late model arrivals. */
+	 *  — usually because the engine hasn't finished streaming the model
+	 *  yet on a freshly-loaded region. {@link #captureDynamicPending}
+	 *  retries each entry every frame and emits the loaded ones into the
+	 *  dynamic suffix; no GPU drain or static-buffer rewrite needed. */
 	private static final class PendingRenderable
 	{
 		final Renderable r;
@@ -184,9 +156,6 @@ final class SceneRenderer implements AutoCloseable
 		}
 	}
 	private final java.util.ArrayList<PendingRenderable> pendingRenderables = new java.util.ArrayList<>();
-	/** Soft cap on the pending list. Cosmetic late-loaders typically number in
-	 *  the dozens after a login; 4096 leaves plenty of head-room without
-	 *  letting a pathological scene blow CPU per-frame. */
 	private static final int MAX_PENDING = 4096;
 
 	/**
@@ -209,9 +178,8 @@ final class SceneRenderer implements AutoCloseable
 		}
 	}
 
-	/** Scratch sorter for dynamic-model face ordering — ported from stock
-	 *  {@code FacePrioritySorter}. Used by {@link #captureModelSorted}.
-	 *  Single instance is fine: all captures run on the Client thread. */
+	/** Single instance reused across captures — all captures run on the
+	 *  Client thread. */
 	private final ModelSorter sorter = new ModelSorter();
 
 	SceneRenderer(VulkanDevice device, FrameSync sync,
@@ -220,9 +188,8 @@ final class SceneRenderer implements AutoCloseable
 		this.device = device;
 		this.sync = sync;
 		this.fillPipeline = new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL, true, renderPass.samples());
-		// linePipeline needs the fillModeNonSolid feature. On devices that
-		// don't support it (rare: llvmpipe, a few embedded SoCs) we fall back
-		// to null — wireframe toggles then collapse to FILL silently.
+		// fillModeNonSolid is required for VK_POLYGON_MODE_LINE; without it
+		// (llvmpipe, some embedded SoCs) wireframe collapses to FILL.
 		this.linePipeline = device.supportsFillModeNonSolid()
 			? new ScenePipeline(device, renderPass, VK_POLYGON_MODE_LINE, true, renderPass.samples())
 			: null;
@@ -238,49 +205,28 @@ final class SceneRenderer implements AutoCloseable
 		wireframe[layer.ordinal()] = on;
 	}
 
-	/** Set the [minPlane, maxPlane] inclusive render range for this frame,
-	 *  forwarded from {@code preSceneDraw}'s (minLevel, maxLevel). Stock
-	 *  GpuPlugin uses these as bounds in {@code Zone.renderOpaque}; planes
-	 *  outside the range are skipped by the engine. We mirror it across
-	 *  every layer. */
 	void setLevelRange(int minLevel, int maxLevel)
 	{
 		minPlane = Math.max(0, Math.min(MAX_PLANES - 1, minLevel));
 		maxPlane = Math.max(minPlane, Math.min(MAX_PLANES - 1, maxLevel));
 	}
 
-	/** Store the engine's per-frame hideRoofIds set. These are roof IDs
-	 *  (values from {@link net.runelite.api.Scene#getRoofs()}, NOT GameObject
-	 *  IDs) that should be hidden above the player. {@link #recordDraw} reads
-	 *  this in combination with {@link #tileRoofIds}/{@link #tileRoofStarts}/
-	 *  {@link #tileRoofCounts} (populated during {@link #captureScene}) to
-	 *  build a per-frame sorted skip-range list, then dispatches each layer's
-	 *  draw via {@link #drawWithSkips} so vertex sub-ranges covering hidden
-	 *  roofs are jumped over. Empty set = no skipping. */
 	void setHideRoofIds(java.util.Set<Integer> ids)
 	{
 		hideRoofIds = ids != null ? ids : java.util.Collections.emptySet();
 	}
 
-	/** Per-frame dedupe set: keys (Model identity, worldX, worldZ). If the
-	 *  same model is captured at the same world-XZ twice in one frame, the
-	 *  second is dropped. Catches the "two heads on the player" symptom no
-	 *  matter which path is doing the duplicate capture (captureActors,
-	 *  drawDynamic, drawTemp, …). Cleared on beginFrame. */
+	/** Per-frame (Model identity, worldX, worldZ) dedupe — collapses the
+	 *  "two heads on the player" case where multiple capture paths emit
+	 *  the same actor model at the same position. */
 	private final java.util.HashSet<Long> seenCaptures = new java.util.HashSet<>();
 
 	/**
-	 * Drops the dynamic suffix; static layers are preserved. Position the write
-	 * cursor at the dynamic-region start of this frame's slot — the static
-	 * prefix is already mirrored across all slots by {@link #captureScene}.
-	 *
-	 * <p>Waits on this slot's in-flight fence before any CPU write. The OSRS
-	 * engine calls drawScene → drawDynamic → drawTemp → draw, so the CPU writes
-	 * happen before renderer.drawFrame and its own vkWaitForFences. Without
-	 * this wait, the CPU overwrites slot[currentFrame] while the GPU is still
-	 * reading the same slot's vertices from FRAMES_IN_FLIGHT frames ago —
-	 * producing torn-vertex flicker that is wider on macOS because Metal's
-	 * deferred submission keeps frames in flight longer.
+	 * Drops the dynamic suffix; static layers preserved. Waits on this
+	 * slot's in-flight fence first — without it, CPU writes race the GPU
+	 * read from FRAMES_IN_FLIGHT frames ago, producing torn-vertex
+	 * flicker (especially on macOS where Metal keeps frames in flight
+	 * longer).
 	 */
 	void beginFrame()
 	{
@@ -336,11 +282,9 @@ final class SceneRenderer implements AutoCloseable
 		final int planes = Math.min(tiles.length, MAX_PLANES);
 		final int sceneSize = Constants.SCENE_SIZE;
 
-		// Scene.getRoofs() is [level][extended_tile_x][extended_tile_z] — its
-		// X/Z dimensions are EXTENDED_SCENE_SIZE (184) for top-level scenes,
-		// not SCENE_SIZE (104) like scene.getTiles(). Add SCENE_OFFSET (40)
-		// to scene-coord (sx, sy) for top-level worlds; instances aren't
-		// extended so the offset is 0.
+		// Scene.getRoofs() dims are EXTENDED_SCENE_SIZE (184) on toplevel,
+		// not SCENE_SIZE (104) like scene.getTiles(). Instances aren't
+		// extended, so the offset is 0 there.
 		final int[][][] roofs = scene.getRoofs();
 		final int roofOffset = scene.getWorldViewId() == net.runelite.api.WorldView.TOPLEVEL
 			? (Constants.EXTENDED_SCENE_SIZE - Constants.SCENE_SIZE) / 2 : 0;
@@ -387,9 +331,8 @@ final class SceneRenderer implements AutoCloseable
 
 		captureGameObjectsLayer(tiles, planes, sceneSize, roofs, roofOffset);
 
-		// Tile arrays only had `planes` valid entries; pad the rest of
-		// planeEnds with the layer's final size so later max-plane lookups
-		// still draw everything if requested.
+		// Pad planeEnds past `planes` so max-plane lookups still draw
+		// everything if requested.
 		for (int i = 0; i < LAYER_COUNT; i++)
 			for (int p = planes; p < MAX_PLANES; p++)
 				planeEnds[i][p] = regionEnds[i];
@@ -399,11 +342,8 @@ final class SceneRenderer implements AutoCloseable
 		log.debug("captureScene: {} vertices, {} roof tiles", vertexCount, tileRoofCount);
 	}
 
-	/**
-	 * After writing the static layers into slot 0, mirror that prefix into
-	 * every other slot so all FRAMES_IN_FLIGHT bindings see identical static
-	 * geometry. Only the dynamic suffix differs per frame.
-	 */
+	/** Mirror static prefix from slot 0 into every other slot so all
+	 *  FRAMES_IN_FLIGHT bindings see identical static geometry. */
 	private void copyStaticPrefixToAllSlots(int staticBytes)
 	{
 		if (staticBytes <= 0) return;
@@ -415,13 +355,11 @@ final class SceneRenderer implements AutoCloseable
 	}
 
 	/**
-	 * Iterates every tile of {@code layer} plane-by-plane, invoking {@code body}
-	 * once per tile (and once per bridge tile). Each call's vertex production is
-	 * tracked so that any geometry emitted onto a roof tile is recorded into the
-	 * roof-skip table — see {@link #recordRoofRange}. Stock recurses into
-	 * {@code Tile.getBridge()} in SceneUploader.java:366 so we do too; bridge
-	 * tiles hold geometry for stacked structures (arches, decks) that would
-	 * otherwise be missed.
+	 * Walks every tile of {@code layer} plane-by-plane (zone-major,
+	 * tile-minor within a zone), invoking {@code body} once per tile and
+	 * once per bridge tile underneath. Vertex deltas are recorded into
+	 * the roof-skip table via {@link #recordRoofRange}. Bridge recursion
+	 * picks up stacked structures (arches, decks).
 	 */
 	private void captureLayer(Layer layer,
 		Tile[][][] tiles, int planes, int sceneSize,
@@ -431,10 +369,6 @@ final class SceneRenderer implements AutoCloseable
 		final int L = layer.ordinal();
 		for (int p = 0; p < planes; p++)
 		{
-			// Zone-major walk: each zone's tiles are contiguous in the vertex
-			// buffer so we can re-emit a single zone (gap #8) without
-			// disturbing the others. Within a zone we still walk tile-by-tile
-			// in scene-coord order, matching stock's tile traversal.
 			for (int zx = 0; zx < ZONES_PER_SIDE; zx++)
 			{
 				for (int zy = 0; zy < ZONES_PER_SIDE; zy++)
@@ -470,19 +404,15 @@ final class SceneRenderer implements AutoCloseable
 		regionEnds[L] = vertexCount;
 	}
 
-	/**
-	 * GameObject capture differs from the other layers: stock emits each object
-	 * exactly once on its south-west sceneMinLocation tile (multi-tile objects
-	 * naturally dedupe across the tiles they cover), and each object gets its
-	 * own roof-range entry rather than one merged range per tile.
-	 */
+	/** GameObjects emit only on the sceneMinLocation tile (multi-tile
+	 *  objects naturally dedupe), and each gets its own roof-range entry
+	 *  instead of a merged-per-tile range. */
 	private void captureGameObjectsLayer(Tile[][][] tiles, int planes, int sceneSize,
 		int[][][] roofs, int roofOffset)
 	{
 		final int L = Layer.GAME_OBJECTS.ordinal();
 		for (int p = 0; p < planes; p++)
 		{
-			// Zone-major walk (see captureLayer).
 			for (int zx = 0; zx < ZONES_PER_SIDE; zx++)
 			{
 				for (int zy = 0; zy < ZONES_PER_SIDE; zy++)
@@ -533,29 +463,11 @@ final class SceneRenderer implements AutoCloseable
 	private void captureRenderable(Renderable r, int orient, int x, int y, int z)
 	{
 		if (r == null) return;
-		// Mirror stock GpuPlugin's uploadZoneRenderable (SceneUploader.java:412):
-		// for DynamicObject, use getModelZbuf() (thread-safe, no animation)
-		// rather than the generic getModel() which can return a half-animated
-		// model or null while the animation thread is updating.
-		Model m;
-		if (r instanceof Model)
-		{
-			m = (Model) r;
-		}
-		else if (r instanceof net.runelite.api.DynamicObject)
-		{
-			m = ((net.runelite.api.DynamicObject) r).getModelZbuf();
-		}
-		else
-		{
-			m = r.getModel();
-		}
+		Model m = resolveModel(r);
 		if (m == null)
 		{
-			// Engine hasn't finished streaming the model yet. Queue for
-			// per-frame retry in the dynamic suffix; once the model lands
-			// it will be emitted from there each frame without us having
-			// to re-capture the static buffer (no GPU drain, no hitch).
+			// Model not streamed yet — queue for per-frame retry in
+			// captureDynamicPending, no static-buffer rewrite needed.
 			if (pendingRenderables.size() < MAX_PENDING)
 			{
 				pendingRenderables.add(new PendingRenderable(r, orient, x, y, z));
@@ -565,15 +477,22 @@ final class SceneRenderer implements AutoCloseable
 		captureModel(m, orient, x, y, z);
 	}
 
+	/** DynamicObject.getModelZbuf is thread-safe and returns the
+	 *  non-animated baseline; plain getModel() can return a half-animated
+	 *  model or null mid-update. */
+	private static Model resolveModel(Renderable r)
+	{
+		if (r instanceof Model) return (Model) r;
+		if (r instanceof net.runelite.api.DynamicObject) return ((net.runelite.api.DynamicObject) r).getModelZbuf();
+		return r.getModel();
+	}
+
 	/**
-	 * Retry queue for renderables whose Model was null at
-	 * {@link #captureScene} time. Called once per frame from the plugin's
-	 * {@code drawScene} after {@code beginFrame} and {@code captureActors}
-	 * so it pumps into the same dynamic-suffix budget. Any entry whose
-	 * Model is now non-null emits this frame; entries still null roll
-	 * forward unchanged. The list is reset on each {@code captureScene}
-	 * (whole new region) and on {@code invalidateCapturedScene} (logout /
-	 * world hop).
+	 * Per-frame retry for renderables whose Model was null at capture
+	 * time. Emits any whose model has since loaded into the dynamic
+	 * suffix (same budget actors use); entries that are still null roll
+	 * forward unchanged. Reset on each {@link #captureScene} or
+	 * {@link #invalidateCapturedScene}.
 	 */
 	void captureDynamicPending()
 	{
@@ -581,19 +500,7 @@ final class SceneRenderer implements AutoCloseable
 		for (int i = 0, n = pendingRenderables.size(); i < n; i++)
 		{
 			PendingRenderable pr = pendingRenderables.get(i);
-			Model m;
-			if (pr.r instanceof Model)
-			{
-				m = (Model) pr.r;
-			}
-			else if (pr.r instanceof net.runelite.api.DynamicObject)
-			{
-				m = ((net.runelite.api.DynamicObject) pr.r).getModelZbuf();
-			}
-			else
-			{
-				m = pr.r.getModel();
-			}
+			Model m = resolveModel(pr.r);
 			if (m == null) continue;
 			captureModel(m, pr.orient, pr.x, pr.y, pr.z);
 		}
@@ -619,8 +526,8 @@ final class SceneRenderer implements AutoCloseable
 		int x0 = sx << 7, x1 = x0 + 128;
 		int z0 = sy << 7, z1 = z0 + 128;
 
-		// paint.getTexture() returns -1 for no-texture, otherwise the OSRS
-		// texture id. Layer 0 is reserved white so +1 maps cleanly.
+		// paint.getTexture() = -1 for no-texture, otherwise OSRS texture
+		// id. Texture array layer 0 is white, so +1 maps cleanly.
 		int texLayer = paint.getTexture() + 1;
 
 		if (vertexCount + 6 > MAX_VERTICES) { overflow(); return; }
@@ -651,8 +558,7 @@ final class SceneRenderer implements AutoCloseable
 		int[] colorC = model.getTriangleColorC();
 		int[] triangleTextures = model.getTriangleTextureId();
 
-		// Tile origin used to derive UVs from vertex positions (each tile is
-		// 128 OSRS units across; UV = local_offset / 128).
+		// UV = local_offset / 128 (one tile = 128 OSRS units).
 		float lx = sx << 7;
 		float lz = sy << 7;
 
@@ -681,12 +587,6 @@ final class SceneRenderer implements AutoCloseable
 	{
 		if (m == null) return;
 
-		// Dedupe by (Model identity, world XZ). The engine emits the local
-		// player through both captureActors() AND drawTemp (with a non-null
-		// synthetic GameObject wrapper, so the gameObject != null guard
-		// doesn't catch it). Same model at same position twice in one frame
-		// = drop the second. Verified visually: cures "two heads on the
-		// player". Trees/NPCs unaffected since they're at distinct positions.
 		long key = ((long) System.identityHashCode(m) & 0xFFFFFFFFL)
 			| ((long) (worldX & 0xFFFF) << 32)
 			| ((long) (worldZ & 0xFFFF) << 48);
@@ -712,10 +612,6 @@ final class SceneRenderer implements AutoCloseable
 		byte[]  faceTransparencies = m.getFaceTransparencies();
 		byte[]  faceBias = m.getFaceBias();
 
-		// Model-level HSL override — engine uses it for NPC/object color
-		// variants (different-coloured wolves, dyed crates) and gameplay-state
-		// flashes (Ice Barrage tint, Vengeance white, hit-flash). Only applied
-		// to untextured faces, mirroring stock SceneUploader.uploadTempModel.
 		final byte overrideAmount = m.getOverrideAmount();
 		final byte overrideHue    = m.getOverrideHue();
 		final byte overrideSat    = m.getOverrideSaturation();
@@ -726,24 +622,13 @@ final class SceneRenderer implements AutoCloseable
 		float cos = (float) Math.cos(theta);
 		float sin = (float) Math.sin(theta);
 
-		// Use Mesh.getFaceCount() — NOT fa.length. The engine over-allocates
+		// LANDMINE: Mesh.getFaceCount(), NOT fa.length. Engine over-allocates
 		// face index arrays for assembled actor models (player composition,
-		// reused NPC bodies) so the array can hold worst-case-equipped data,
-		// then sets getFaceCount() to the actual face count for the current
-		// composition. Reading fa.length renders the trailing stale data on
-		// top of the live mesh — that's how we ended up with the player
-		// rendering twice ("two heads") even when wearing no equipment: the
-		// trailing slots still held the previous tick's helmet/body faces.
+		// reused NPC bodies); fa.length reads stale trailing data.
 		int faces = m.getFaceCount();
 		if (vertexCount + faces * 3 > MAX_VERTICES) { overflow(); return; }
 
 		float[] uv = uvScratch;
-
-		// Track actual writes — skipped faces (c3 == -2 or transparent) don't
-		// produce vertices. Previously this used `faces * 3` regardless, which
-		// over-incremented vertexCount by skipped*3 every model. The next
-		// captureModel then started writing past the actual data, leaving a
-		// gap of stale (previous-frame) bytes that the renderer still drew.
 		int wrote = 0;
 		for (int f = 0; f < faces; f++)
 		{
@@ -760,22 +645,9 @@ final class SceneRenderer implements AutoCloseable
 				}
 			}
 
-			// DO NOT skip on transparency at CPU level. Stock GpuPlugin doesn't
-			// — it routes transparency!=0 faces to its alpha pass instead. OSRS
-			// uses faceTransparencies for cloth drapes, glass, water, banners,
-			// and other very-visible-but-translucent geometry. Skipping at e.g.
-			// `>= 252` drops tent drape faces, banner cloth, tarp folds, etc.,
-			// leaving only the solid scaffolding — which then hides everything
-			// the drapes used to "open" onto (interior chests, beds, shelving).
-			// We render these as opaque here (no alpha blending yet) which is
-			// not perfect but at least the geometry is present.
-			//
-			// The only thing we DO want to drop is the engine's
-			// "essentially invisible" sentinel (transparency == 0xFF), which is
-			// used for door cutout fills, portal plug faces, etc. — those would
-			// otherwise render as opaque black rectangles. We push that decision
-			// to the fragment shader via the packed transparency byte below
-			// (frag discards when trans == 255), preserving everything else.
+			// Don't skip on transparency here — cloth drapes / glass /
+			// water need to render even without a real alpha pass. The
+			// engine's invisible sentinel (255) is handled in scene.frag.
 
 			int texLayer = 0;
 			float u0 = 0, v0 = 0, u1 = 0, v1 = 0, u2 = 0, v2 = 0;
@@ -789,10 +661,9 @@ final class SceneRenderer implements AutoCloseable
 				u2 = uv[4]; v2 = uv[5];
 			}
 
-			// HSL override blend (untextured faces only — stock SceneUploader
-			// scoping). Per-vertex so smooth-banding interpolation gets the
-			// tinted color across the face. Tint applies whenever amount != 0;
-			// the engine sets that on entity hit-flash, freeze, vengeance, etc.
+			// HSL override: per-vertex so smooth-banding interpolation
+			// picks up the tint across the face. Untextured only —
+			// mirrors stock SceneUploader.uploadTempModel scoping.
 			if (hasOverride && texLayer == 0)
 			{
 				col1 = applyHslOverride(col1, overrideHue, overrideSat, overrideLum, overrideAmount);
@@ -800,13 +671,7 @@ final class SceneRenderer implements AutoCloseable
 				col3 = applyHslOverride(col3, overrideHue, overrideSat, overrideLum, overrideAmount);
 			}
 
-			// Pack into one uint (matches stock's `alphaBias` int):
-			//   bits  0..15 : texture layer index (0 = no texture)
-			//   bits 16..23 : per-face depth bias (used by vert.glsl to nudge
-			//                 clip-Z and break coplanar z-fighting; stock does
-			//                 the same via `(abhsl >> 16) & 0xff` + `bias/128`)
-			//   bits 24..31 : face transparency (0 = opaque, 255 = sentinel
-			//                 "invisible"; frag discards on 255)
+			// Pack [texLayer:16 | bias:8 | trans:8] = stock's alphaBias.
 			int bias = faceBias != null ? (faceBias[f] & 0xFF) : 0;
 			int trans = faceTransparencies != null ? (faceTransparencies[f] & 0xFF) : 0;
 			int packedTexLayer = texLayer | (bias << 16) | (trans << 24);
@@ -840,10 +705,9 @@ final class SceneRenderer implements AutoCloseable
 			| ((long) (worldZ & 0xFFFF) << 48);
 		if (!seenCaptures.add(key)) return;
 
-		// Project + bin. Returns false on near-plane reject / oversized / null arrays
-		// — in any of those cases stock skips the model entirely, so do we.
 		if (!sorter.sort(proj, m, orient, worldX, worldY, worldZ))
 		{
+			// Near-plane reject / oversized / null arrays.
 			return;
 		}
 
@@ -851,9 +715,11 @@ final class SceneRenderer implements AutoCloseable
 		if (faces == 0) return;
 		if (vertexCount + faces * 3 > MAX_VERTICES) { overflow(); return; }
 
-		float[] vxs = m.getVerticesX();   // unused on emit (we use post-rotate localX)
-		float[] vys = m.getVerticesY();   // ditto
-		float[] vzs = m.getVerticesZ();   // ditto
+		// Vertex positions are read by computeFaceUvs only; emit uses the
+		// sorter's already-rotated localX/Y/Z.
+		float[] vxs = m.getVerticesX();
+		float[] vys = m.getVerticesY();
+		float[] vzs = m.getVerticesZ();
 		int[] fa = m.getFaceIndices1();
 		int[] fb = m.getFaceIndices2();
 		int[] fc = m.getFaceIndices3();
@@ -878,7 +744,7 @@ final class SceneRenderer implements AutoCloseable
 
 		float[] uv = uvScratch;
 
-		// localX/Y/Z already have orientation + worldXYZ applied by the sorter.
+		// Sorter applies orientation + worldXYZ; positions are world-space.
 		float[] lx = sorter.localX;
 		float[] ly = sorter.localY;
 		float[] lz = sorter.localZ;
@@ -888,8 +754,8 @@ final class SceneRenderer implements AutoCloseable
 		{
 			int f = sorter.sortedFaces[i];
 
-			// Same color resolve as captureModel (sorter has already dropped
-			// c3 == -2 faces, so raw3 here is never the skip sentinel).
+			// Sorter has already dropped c3 == -2 faces, so raw3 is
+			// never the skip sentinel here.
 			int col1 = c1 != null ? c1[f] : 0;
 			int col2 = col1, col3 = col1;
 			if (c3 != null)
@@ -925,7 +791,7 @@ final class SceneRenderer implements AutoCloseable
 			int trans = faceTransparencies != null ? (faceTransparencies[f] & 0xFF) : 0;
 			int packedTexLayer = texLayer | (bias << 16) | (trans << 24);
 
-			// writeHslVert (no rotation) — sorter's lx/ly/lz are already rotated.
+			// writeHslVert (no rotation) — positions already world-space.
 			writeHslVert(lx[fa[f]], ly[fa[f]], lz[fa[f]], col1, u0, v0, packedTexLayer);
 			writeHslVert(lx[fb[f]], ly[fb[f]], lz[fb[f]], col2, u1, v1, packedTexLayer);
 			writeHslVert(lx[fc[f]], ly[fc[f]], lz[fc[f]], col3, u2, v2, packedTexLayer);
@@ -934,17 +800,13 @@ final class SceneRenderer implements AutoCloseable
 		vertexCount += wrote;
 	}
 
-	/** Reusable scratch for {@link #computeFaceUvs} — six floats: u0, v0, u1, v1, u2, v2. */
 	private final float[] uvScratch = new float[6];
 
 	/**
-	 * Port of stock {@code SceneUploader.computeFaceUvs}. Given a face's three
-	 * vertex indices and the optional per-face texture-face mapping, computes
-	 * per-vertex UVs in [0, 1] and writes them into {@code out} as
-	 * {@code [u0, v0, u1, v1, u2, v2]}.
-	 *
-	 * <p>If {@code textureFaces[face]} is -1 (or {@code textureFaces} is null)
-	 * the face is mapped trivially: vertex A → (0,0), B → (1,0), C → (0,1).
+	 * Port of stock {@code SceneUploader.computeFaceUvs}. Writes
+	 * {@code [u0, v0, u1, v1, u2, v2]} into {@code out}. Falls back to a
+	 * trivial mapping (0,0)/(1,0)/(0,1) when the face has no texture-face
+	 * mapping.
 	 */
 	private static void computeFaceUvs(float[] out,
 									   float[] vx, float[] vy, float[] vz,
@@ -1006,12 +868,9 @@ final class SceneRenderer implements AutoCloseable
 					float smoothBanding)
 	{
 		if (vertexCount == 0) return;
-		// Slot offset folded into firstVertex below. Binding the buffer
-		// at offset 0 and shifting via firstVertex is mathematically
-		// equivalent to binding with the slot's byte-offset, but avoids
-		// MoltenVK's vertex-buffer-offset translation path which appears
-		// to produce no visible geometry for offsets in the hundreds of
-		// megabytes on Apple Silicon.
+		// LANDMINE: bind at offset 0 and shift via firstVertex rather than
+		// byte-offset binding — MoltenVK's offset translation produces no
+		// visible geometry at hundreds-of-MB offsets on Apple Silicon.
 		final int slotFirstVertex = sync.currentFrame() * MAX_VERTICES;
 		try (MemoryStack stack = stackPush())
 		{
@@ -1041,11 +900,9 @@ final class SceneRenderer implements AutoCloseable
 			fragPush.putFloat(smoothBanding);
 			fragPush.flip();
 
-			// Build skip-list for this frame: tile-roof ranges whose roof ID
-			// the engine wants hidden. Empty when RoofRemovalPlugin isn't
-			// active (engine passes hideRoofIds={}); kept correct for when
-			// it is. recordRoofRange is called in captureScene order, so
-			// tileRoofStarts is already sorted by start — no extra sort.
+			// Skip-list of tile-roof ranges the engine wants hidden.
+			// recordRoofRange is called in captureScene order, so
+			// tileRoofStarts is already sorted by start.
 			int skipPairs = 0;
 			java.util.Set<Integer> hr = hideRoofIds;
 			if (!hr.isEmpty() && tileRoofCount > 0)
@@ -1072,10 +929,9 @@ final class SceneRenderer implements AutoCloseable
 			for (int i = 0; i < LAYER_COUNT; i++)
 			{
 				int regionEnd = i == LAYER_COUNT - 1 ? vertexCount : regionEnds[i];
-				// All static layers were emitted plane-by-plane, so
-				// [planeEnds[i][loMin-1], planeEnds[i][loMax]) is exactly the
-				// run of vertices for planes [loMin..loMax]. DYNAMIC (last
-				// layer) renders whole — actors/temps aren't plane-tagged.
+				// Static layers emit plane-major, so
+				// [planeEnds[i][loMin-1], planeEnds[i][loMax]) is the run for
+				// planes [loMin..loMax]. DYNAMIC renders whole.
 				int drawStart, drawEnd;
 				if (LAYERS[i] == Layer.DYNAMIC)
 				{
@@ -1100,11 +956,9 @@ final class SceneRenderer implements AutoCloseable
 							want.layout(), 0, stack.longs(descriptorSet), null);
 						boundPipeline = want;
 					}
-					// Re-push every draw. MoltenVK #2483: push constant values
-					// can become undefined across consecutive vkCmdDraw* on the
-					// same command buffer when not re-pushed per draw. Cheap on
-					// the CPU side; eliminates an entire class of macOS-only
-					// glitches where some draws read stale MVP/fog values.
+					// LANDMINE (MoltenVK #2483): re-push every draw. Push
+					// constants can go undefined across consecutive draws
+					// without it, producing macOS-only stale MVP glitches.
 					vkCmdPushConstants(cmd, want.layout(), VK_SHADER_STAGE_VERTEX_BIT,   0,  vertPush);
 					vkCmdPushConstants(cmd, want.layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
 					if (skipPairs > 0)
@@ -1199,27 +1053,19 @@ final class SceneRenderer implements AutoCloseable
 		float rx = lx * cos + lz * sin;
 		float rz = -lx * sin + lz * cos;
 		float[] rgb = hslToRgb(hsl16);
-		// Pass the packed HSL int as a float (raw bits — value 0..65535).
-		// Interpolated linearly across the face by the rasterizer; the frag
-		// shader does `int(vLight)` and bit-extracts h/s/l from the result,
-		// then either decodes hslToRgb (untextured faces) or uses the
-		// lightness alone (textured faces). This matches stock's
-		// `smoothBanding = false` default — the "broken-but-banded"
-		// interpolation that produces stock's distinctive faceted shading.
-		// Pre-decoding HSL→RGB on CPU and letting the GPU linearly
-		// interpolate RGB blurs everything into uniform color.
+		// Raw HSL int as float: the frag shader re-decodes per-pixel for
+		// the banded look (smoothBanding=0); vColor is the pre-decoded
+		// RGB for the smooth look (smoothBanding=1). Vertex layout is
+		// padded to vec4 alignment for MoltenVK — see ScenePipeline.VERTEX_STRIDE.
 		float light = (float) (hsl16 & 0xFFFF);
-		// 12 floats per vertex; vec3 position and vec3 color each padded
-		// to vec4 (trailing 0f) to satisfy Metal's 16-byte attribute
-		// alignment via MoltenVK. See ScenePipeline.VERTEX_STRIDE comment.
 		mapped.putFloat(rx + wx);
 		mapped.putFloat(ly + wy);
 		mapped.putFloat(rz + wz);
-		mapped.putFloat(0f);            // pad
+		mapped.putFloat(0f);
 		mapped.putFloat(rgb[0]);
 		mapped.putFloat(rgb[1]);
 		mapped.putFloat(rgb[2]);
-		mapped.putFloat(0f);            // pad
+		mapped.putFloat(0f);
 		mapped.putFloat(light);
 		mapped.putFloat(u);
 		mapped.putFloat(v);
@@ -1229,26 +1075,15 @@ final class SceneRenderer implements AutoCloseable
 	private void writeHslVert(float x, float y, float z, int hsl16, float u, float v, int texLayer)
 	{
 		float[] rgb = hslToRgb(hsl16);
-		// Pass the packed HSL int as a float (raw bits — value 0..65535).
-		// Interpolated linearly across the face by the rasterizer; the frag
-		// shader does `int(vLight)` and bit-extracts h/s/l from the result,
-		// then either decodes hslToRgb (untextured faces) or uses the
-		// lightness alone (textured faces). This matches stock's
-		// `smoothBanding = false` default — the "broken-but-banded"
-		// interpolation that produces stock's distinctive faceted shading.
-		// Pre-decoding HSL→RGB on CPU and letting the GPU linearly
-		// interpolate RGB blurs everything into uniform color.
 		float light = (float) (hsl16 & 0xFFFF);
-		// 12 floats per vertex; vec3 position and vec3 color each padded
-		// to vec4 (trailing 0f) — see ScenePipeline.VERTEX_STRIDE comment.
 		mapped.putFloat(x);
 		mapped.putFloat(y);
 		mapped.putFloat(z);
-		mapped.putFloat(0f);            // pad
+		mapped.putFloat(0f);
 		mapped.putFloat(rgb[0]);
 		mapped.putFloat(rgb[1]);
 		mapped.putFloat(rgb[2]);
-		mapped.putFloat(0f);            // pad
+		mapped.putFloat(0f);
 		mapped.putFloat(light);
 		mapped.putFloat(u);
 		mapped.putFloat(v);
@@ -1257,11 +1092,8 @@ final class SceneRenderer implements AutoCloseable
 
 	/**
 	 * Per-component HSL lerp toward an override target. Mirrors stock
-	 * {@code SceneUploader.interpolateHSL}:
-	 * {@code new = old + ((amount & 0xff) * (override - old)) >> 7}. Override
-	 * byte == -1 keeps the original component (e.g. tint hue only without
-	 * touching saturation/luminance). Result is clamped to each component's
-	 * bit width.
+	 * {@code SceneUploader.interpolateHSL}. Override byte -1 keeps that
+	 * component unchanged. Result clamped to each component's bit width.
 	 */
 	private static int applyHslOverride(int hsl16, byte oH, byte oS, byte oL, byte oA)
 	{

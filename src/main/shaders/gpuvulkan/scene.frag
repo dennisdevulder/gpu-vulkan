@@ -1,13 +1,7 @@
 #version 450
 
-// The hslToRgb function is ported verbatim from RuneLite's
-// net.runelite.client.plugins.gpu.hsl_to_rgb.glsl (BSD-2-Clause).
-// The applyColorBlind function is ported from RuneLite's colorblind.glsl
-// (BSD-2-Clause), implementing the Daltonization algorithm published in
-// "Analysis of Color Blindness" by Onur Fidaner, Poliang Lin, and Nevran
-// Ozguven (Stanford PSYCH 221, 2005). Stock's preprocessor #if branches
-// for the mode are replaced with a runtime `if` so one shader handles
-// all four modes. Original copyright + license for both ports:
+// hslToRgb ported verbatim from RuneLite's hsl_to_rgb.glsl;
+// applyColorBlind ported from colorblind.glsl. Both BSD-2-Clause:
 //
 //   Copyright (c) 2018, Adam <Adam@sigterm.info>
 //   All rights reserved.
@@ -31,6 +25,10 @@
 //   ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 //   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 //   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+//
+// applyColorBlind implements Daltonization (Fidaner, Lin, Ozguven,
+// Stanford PSYCH 221, 2005); branched at runtime so one shader covers
+// all modes.
 
 layout(set = 0, binding = 0) uniform sampler2DArray uTextureArray;
 
@@ -42,29 +40,19 @@ layout(push_constant) uniform Push {
                                            // .w = smoothBanding (0 = per-fragment HSL decode, 1 = per-vertex RGB interp)
 } push;
 
-layout(location = 0) in vec3 vColor;       // CPU-decoded per-vertex RGB; used as the smooth-banding term
+layout(location = 0) in vec3 vColor;       // CPU-decoded per-vertex RGB; smooth-banding term
 layout(location = 1) in float vHslPacked;  // packed HSL int as float (0..65535)
 layout(location = 2) in vec2 vUv;
 layout(location = 3) flat in uint vTexLayer;
 layout(location = 4) in float vFogAmount;
-// Face transparency from the CPU side. 0 = opaque; higher = more transparent.
-// We output (1 - vTrans/255) as the fragment alpha and rely on the pipeline's
-// alphaToCoverageEnable + MSAA: the GPU emits subsamples in proportion to
-// alpha. Tent drapes (transparency ~200) write ~22% of samples and look
-// translucent. Fire glow tips (transparency 252+) write ~1% and effectively
-// disappear. Stock GpuPlugin sorts these into a separate alpha-blend pass;
-// alpha-to-coverage is the order-independent approximation that doesn't
-// require us to add a sort + second pass.
+// Face transparency (0 = opaque, 255 = engine "invisible" sentinel). The
+// pipeline's alphaToCoverageEnable + MSAA turns the output alpha into
+// per-sample coverage — approximates alpha blending without a separate
+// sorted pass.
 layout(location = 5) flat in uint vTrans;
 
 layout(location = 0) out vec4 outColor;
 
-// Daltonization for red/green/blue-deficient viewers. Ported verbatim from
-// stock's colorblind.glsl. Stock #ifdefs on the mode at compile time; we
-// branch at runtime so a single shader handles all four modes (NONE +
-// protan/deuteran/tritan) and the user can toggle without recompiling.
-//
-// Reference: "Analysis of Color Blindness" — Fidaner, Lin, Ozguven (2005).
 vec3 applyColorBlind(vec3 color, int mode, float intensity)
 {
     if (mode == 0) return color;
@@ -103,7 +91,6 @@ vec3 applyColorBlind(vec3 color, int mode, float intensity)
     return color + correction;
 }
 
-// Stock GpuPlugin's hsl_to_rgb.glsl ported.
 vec3 hslToRgb(int hue, int sat, int lum) {
     float h = float(hue) / 64.0 + 0.0078125;
     float s = float(sat) / 8.0  + 0.0625;
@@ -120,10 +107,8 @@ vec3 hslToRgb(int hue, int sat, int lum) {
 }
 
 void main() {
-    // Hard-discard on the engine's "fully invisible" sentinel. Alpha-to-
-    // coverage would write zero samples here anyway, but discard is faster
-    // and bypasses the depth write so distant cutout faces don't punch
-    // visible holes in the depth buffer for things behind them.
+    // Engine invisibility sentinel — discard rather than letting
+    // alpha-to-coverage write zero samples (cheaper, skips depth write).
     if (vTrans == 255u) discard;
     int hsl = int(vHslPacked);
     int hue = (hsl >> 10) & 0x3F;
@@ -132,50 +117,34 @@ void main() {
 
     vec3 rgb;
     if (vTexLayer == 0u) {
-        // Two paths for untextured faces, mixed by push.fragExtras.w (smoothBanding):
-        //   0 → per-fragment HSL decode: vHslPacked interpolates linearly across
-        //       the face and is bit-extracted to HSL each fragment. Produces the
-        //       faceted-banded look (stock GPU's `smoothBanding = false`).
-        //   1 → per-vertex pre-decoded RGB: vColor is the CPU-decoded hslToRgb
-        //       of each vertex's color, rasterizer-interpolated to fragments.
-        //       Produces smooth gradients across multi-face surfaces (stock GPU's
-        //       `smoothBanding = true` default).
+        // smoothBanding mixes per-fragment HSL decode (faceted, stock's
+        // default-off look) with rasterizer-interpolated per-vertex RGB
+        // (smooth gradients, stock's default-on look).
         vec3 perFragment = hslToRgb(hue, sat, lum);
         rgb = mix(perFragment, vColor, push.fragExtras.w);
     } else {
-        // Sample with the standard filtering pipeline so mipmaps + anisotropy
-        // apply on minified textures. Discard threshold is 0.5 — partial-alpha
-        // texels at mip boundaries (3 opaque + 1 transparent downsampling to
-        // alpha 0.75) render normally, only fully-transparent texels get cut.
-        // Stays binary at level 0 because magFilter is NEAREST.
+        // Sampler is NEAREST-mag / LINEAR-min with mipmaps + anisotropy.
+        // Threshold 0.5 lets partial-alpha mip texels render; level 0
+        // stays binary thanks to NEAREST mag.
         vec4 texSample = texture(uTextureArray, vec3(vUv, float(vTexLayer)));
         if (texSample.a < 0.5) discard;
         vec3 tex = texSample.rgb;
-        // Stock textureLightMode blends between two ways of modulating the
-        // texture by the engine's per-face shading:
-        //   0 → multiply by lightness (low 7 bits / 127)  ← stock default
-        //   1 → multiply by the full HSL→RGB vertex color ← "Bright textures"
-        // Stock's frag.glsl:81 does the same `mix` on a per-fragment basis.
+        // textureLightMode: 0 = lightness-only tint (stock default),
+        // 1 = full HSL→RGB tint (stock's "Bright textures").
         float light = float(lum) / 127.0;
         vec3 fullColor = hslToRgb(hue, sat, lum);
         vec3 mulRgb = mix(vec3(light), fullColor, push.fragExtras.x);
         rgb = tex * mulRgb;
     }
-    // Brightness gamma — stock applies this to ALL fragment output
-    // (vert.glsl per-vertex). We do it per-pixel here so untextured terrain,
-    // walls, and crystals respond to the brightness slider too. Previously
-    // it lived inside the textured branch only, leaving HSL geometry stuck
-    // at full brightness regardless of the slider.
+    // Brightness gamma applies to both branches so untextured terrain
+    // responds to the brightness slider too.
     rgb = pow(rgb, vec3(push.fogFrag.a));
     rgb = mix(rgb, push.fogFrag.rgb, vFogAmount);
-    // Stock applies the colour-blind correction AFTER fog (`frag.glsl:91-93`)
-    // so the fog tint goes through Daltonization too. Mirror that ordering.
+    // Colour-blind correction runs after fog so the fog tint is also
+    // Daltonized (matches stock ordering).
     rgb = applyColorBlind(rgb, int(push.fragExtras.y), push.fragExtras.z);
-    // Output alpha = 1 - faceTransparency/255. Pipeline has
-    // alphaToCoverageEnable, so this drives MSAA per-sample coverage:
-    // - vTrans = 0   → alpha = 1.00 → all samples (opaque)
-    // - vTrans = 200 → alpha = 0.22 → ~22% samples (drape, banner)
-    // - vTrans = 252 → alpha = 0.012 → ~1% samples (fire glow tip, near-invisible)
+    // alpha = 1 - vTrans/255; drives MSAA coverage via the pipeline's
+    // alphaToCoverageEnable.
     float alpha = 1.0 - float(vTrans) / 255.0;
     outColor = vec4(rgb, alpha);
 }

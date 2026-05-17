@@ -41,10 +41,8 @@ layout(location = 1) out float vLight;
 layout(location = 2) out vec2 vUv;
 layout(location = 3) flat out uint vTexLayer;
 layout(location = 4) out float vFogAmount;
-// Face transparency byte (0 = opaque, 255 = engine "invisible" sentinel).
-// Flat-interpolated because it's the same for all 3 vertices of a face.
-// Frag uses it only to discard fully-invisible faces; we render the rest
-// opaque since we don't have an alpha-blended pass yet.
+// Face transparency byte (0 = opaque, 255 = engine invisibility sentinel).
+// flat — same value at all 3 vertices.
 layout(location = 5) flat out uint vTrans;
 
 const float TILE_SIZE = 128.0;
