@@ -64,6 +64,34 @@ runelite-plugin.properties   plugin-hub-style descriptor
 KNOWN_ISSUES.md        engineering notes; read before opening a PR
 ```
 
+## Contributing
+
+PRs welcome. Two ground rules:
+
+1. **Match upstream RuneLite's API surface.** This plugin runs inside an
+   unmodified RuneLite client; anything that requires patching the host
+   won't merge. If you find something the public API doesn't expose,
+   open an issue before working around it.
+2. **Be upfront about LLM use.** Using an assistant is fine and
+   encouraged for boilerplate, refactors, and porting — but reviewers
+   need to know where to look more carefully. Follow the Linux kernel
+   convention and add an `Assisted-by:` trailer to commits where the
+   assistant materially shaped the code (new files, multi-file
+   refactors, design decisions). Example:
+
+   ```
+   feat(scene): implement per-zone vertex cache
+
+   <body>
+
+   Signed-off-by: Your Name
+   Assisted-by: Claude Opus 4.7
+   ```
+
+   Trivial autocomplete doesn't need the trailer. Don't use
+   `Co-Authored-By:` — that implies joint authorship, which an LLM
+   can't have.
+
 ## License
 
 BSD-2-Clause, matching upstream RuneLite.

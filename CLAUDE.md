@@ -68,7 +68,7 @@ Maintained across sessions. Append, don't rewrite.
 ## Constraints (already established by the user, do not re-litigate)
 
 - Conventional commit style for commit messages
-- Never add AI attribution / Co-Authored-By
+- LLM attribution: follow the Linux kernel convention. For commits where an assistant materially shaped the code (new files, multi-file refactors, design decisions), add an `Assisted-by:` trailer below the human `Signed-off-by:` line — e.g. `Assisted-by: Claude Opus 4.7`. Trivial autocomplete doesn't need a trailer. Never use `Co-Authored-By:` — that implies joint authorship, which an LLM cannot be.
 - "we depend on runelite we can't just add random shit and hope they're okay with it" — no upstream-incompatible patches
 - CPU readback is unacceptable on 1 thread available
 - Stop trying to fool around and engineer a proper solution
