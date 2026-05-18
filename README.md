@@ -46,12 +46,31 @@ The first launch will dial out for the published RuneLite client artifact
 from `repo.runelite.net`. Then it boots like a normal RuneLite session
 with **GPU (Vulkan)** in the plugin list.
 
+## Standalone runnable jar
+
+`./gradlew shadowJar` produces a self-contained jar at
+`build/libs/gpu-vulkan-<version>-all.jar` that bundles a full RuneLite
+client + this plugin + LWJGL natives for Linux/Windows/macOS (incl.
+MoltenVK). Run it with:
+
+```
+java -ea -jar build/libs/gpu-vulkan-<version>-all.jar
+```
+
+It boots like a normal RuneLite session — character configuration,
+account state, plugin settings all come from your existing
+`~/.runelite/` directory, so it won't disturb the setup of someone
+who already has RuneLite installed.
+
+The `-ea` (assertions) flag matches what the plugin-hub template does
+and helps surface plugin bugs.
+
 ## Side-loading into an installed RuneLite
 
-`./gradlew jar` produces `build/libs/gpu-vulkan-*.jar`. Drop into
-RuneLite's external plugins directory. Note this jar will NOT bring its
-LWJGL Vulkan dependency along — for a self-contained build you'd need to
-add a shadowJar task.
+`./gradlew jar` produces a slim `build/libs/gpu-vulkan-<version>.jar`
+(plugin classes + shaders only, no bundled deps). Drop into RuneLite's
+external plugins directory. This jar does NOT bring its LWJGL Vulkan
+dependency along — for a self-contained build use `shadowJar` above.
 
 ## Repo layout
 

@@ -34,6 +34,7 @@ java {
 }
 
 val runeLiteVersion = "latest.release"
+val pluginMainClass = "net.runelite.client.plugins.gpuvulkan.GpuVulkanPluginTest"
 // lwjgl-core tracks RuneLite's libs.versions.toml (currently 3.3.2) so the
 // per-platform native classifier matches what the host client loads.
 val lwjglVersion = "3.3.2"
@@ -65,20 +66,18 @@ dependencies {
 	testImplementation("net.runelite:jshell:$runeLiteVersion")
 	testImplementation("junit:junit:4.13.2")
 
-	// LWJGL natives for development on each host platform. lwjgl-vulkan
-	// itself has no native; only lwjgl-core needs per-OS natives. Add the
-	// classifier matching whatever machine you're running tests from.
-	val osName = System.getProperty("os.name").lowercase()
-	val osArch = System.getProperty("os.arch").lowercase()
-	val nativesClassifier = when {
-		osName.contains("mac") || osName.contains("darwin") ->
-			if (osArch.contains("aarch64") || osArch.contains("arm")) "natives-macos-arm64"
-			else "natives-macos"
-		osName.contains("win") -> "natives-windows"
-		osArch.contains("aarch64") || osArch.contains("arm") -> "natives-linux-arm64"
-		else -> "natives-linux"
-	}
-	testRuntimeOnly("org.lwjgl:lwjgl:$lwjglVersion:$nativesClassifier")
+	// LWJGL natives. lwjgl-core natives for all four target platforms so
+	// `./gradlew shadowJar` produces a jar runnable anywhere. lwjgl-vulkan
+	// has no native on Linux/Windows (Vulkan loader is system-installed)
+	// but bundles MoltenVK on macOS — add both classifiers so a jar built
+	// on Linux can still run on a Mac.
+	testRuntimeOnly("org.lwjgl:lwjgl:$lwjglVersion:natives-linux")
+	testRuntimeOnly("org.lwjgl:lwjgl:$lwjglVersion:natives-linux-arm64")
+	testRuntimeOnly("org.lwjgl:lwjgl:$lwjglVersion:natives-windows")
+	testRuntimeOnly("org.lwjgl:lwjgl:$lwjglVersion:natives-macos")
+	testRuntimeOnly("org.lwjgl:lwjgl:$lwjglVersion:natives-macos-arm64")
+	testRuntimeOnly("org.lwjgl:lwjgl-vulkan:$lwjglVulkanVersion:natives-macos")
+	testRuntimeOnly("org.lwjgl:lwjgl-vulkan:$lwjglVulkanVersion:natives-macos-arm64")
 }
 
 // glsl → SPIR-V compile. Ported verbatim from runelite-vkport's
@@ -130,4 +129,45 @@ tasks.withType<JavaCompile> {
 
 tasks.withType<Test> {
 	useJUnit()
+}
+
+// `./gradlew run` boots a real RuneLite client with this plugin loaded
+// via ExternalPluginManager.loadBuiltin. Same entry point IDEs use.
+tasks.register<JavaExec>("run") {
+	classpath = sourceSets["test"].runtimeClasspath
+	mainClass.set(pluginMainClass)
+	jvmArgs("-ea")
+	args("--developer-mode", "--debug")
+}
+
+// `./gradlew shadowJar` produces build/libs/gpu-vulkan-VERSION-all.jar,
+// runnable with `java -ea -jar path/to/gpu-vulkan-VERSION-all.jar`.
+// Bundles RuneLite client + plugin + LWJGL natives for the build host.
+// Modelled on runelite/example-plugin's template — vanilla Jar task,
+// no shadow-plugin dependency.
+tasks.register<Jar>("shadowJar") {
+	dependsOn(configurations["testRuntimeClasspath"], "classes", "testClasses")
+	manifest {
+		attributes(
+			"Main-Class" to pluginMainClass,
+			"Multi-Release" to true,
+		)
+	}
+
+	duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+	from(sourceSets["main"].output)
+	from(sourceSets["test"].output)
+	from({
+		configurations["testRuntimeClasspath"].map { if (it.isDirectory) it else zipTree(it) }
+	})
+
+	exclude("META-INF/INDEX.LIST")
+	exclude("META-INF/*.SF")
+	exclude("META-INF/*.DSA")
+	exclude("META-INF/*.RSA")
+	exclude("**/module-info.class")
+
+	group = BasePlugin.BUILD_GROUP
+	archiveClassifier.set("shadow")
+	archiveFileName.set("${rootProject.name}-${project.version}-all.jar")
 }
