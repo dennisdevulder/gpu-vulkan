@@ -583,10 +583,22 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 	 * actors for whole frames as the camera pans, which would otherwise
 	 * leave the player flickering — iterating the lists ourselves bypasses
 	 * that.
+	 *
+	 * <p>Local player is captured FIRST. The scene pipeline uses
+	 * {@code VK_COMPARE_OP_GREATER} (strict), so at exactly equal z — two
+	 * actors sharing a tile — the second-drawn fragment is discarded and
+	 * the first-drawn wins. Capturing the user's character first makes
+	 * sure they stay visible when an NPC or another player stands on the
+	 * same square.
 	 */
 	private void captureActors()
 	{
 		seenActors.clear();
+		Player local = client.getLocalPlayer();
+		if (local != null && seenActors.put(local, Boolean.TRUE) == null)
+		{
+			captureActor(local);
+		}
 		java.util.List<NPC> npcs = client.getNpcs();
 		if (npcs != null)
 		{
