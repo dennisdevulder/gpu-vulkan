@@ -166,6 +166,12 @@ tasks.register<Jar>("shadowJar") {
 	exclude("META-INF/*.DSA")
 	exclude("META-INF/*.RSA")
 	exclude("**/module-info.class")
+	// The slim plugin jar carries runelite-plugin.properties for installs
+	// from ~/.runelite/plugins/. In the shadowJar that file would make the
+	// plugin manifest-discoverable in addition to the loadBuiltin() call
+	// in main(), registering "GPU (Vulkan)" twice in the plugin list and
+	// breaking plugin startup. Drop it from the shadowJar only.
+	exclude("runelite-plugin.properties")
 
 	group = BasePlugin.BUILD_GROUP
 	archiveClassifier.set("shadow")
