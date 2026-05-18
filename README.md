@@ -11,66 +11,87 @@ source tree.
 ## Status
 
 - **Linux/X11** — working (daily driver). Several open issues — see
-  `KNOWN_ISSUES.md`. Notable release blocker: sidebar-collapse crash
+  the issue tracker. Notable release blocker: sidebar-collapse crash
   (needs Vulkan-to-offscreen + GL blit refactor).
-- **Windows** — surface code implemented, never tested.
-- **macOS** — stub. Enabling the plugin throws "not implemented" by
-  design. See `MacOSPlatformSurface.java` — wiring up requires
-  `JAWTSurfaceLayers` + `CAMetalLayer` + `vkCreateMetalSurfaceEXT`,
-  plus `VK_KHR_portability_enumeration` on the instance, plus the
-  MoltenVK natives on the runtime classpath.
+- **macOS** — working on Apple Silicon via MoltenVK; one outstanding
+  layer-flicker bug (see issues).
+- **Windows** — surface code implemented, never tested. See
+  [issue #4](https://github.com/dennisdevulder/gpu-vulkan/issues/4) if
+  you have a Windows box to validate it.
 
-## Build
+## Requirements
 
-Requirements:
+- **JDK 21 (Eclipse Temurin)** — this is what the project is developed
+  and tested against. Get it from
+  [Adoptium](https://adoptium.net/temurin/releases/?version=21).
 
-- JDK 11+
-- `glslangValidator` on `PATH` (or set `GLSLANG=/path/to/glslangValidator`)
+  Other JDKs may work but watch out for **Fedora's
+  `java-25-openjdk-headless` package** in particular — it ships without
+  `libawt_xawt.so`, so RuneLite fails to open a window with a
+  `HeadlessException` even when you have a working display. Install
+  Temurin 21 alongside it and point `JAVA_HOME` /
+  `update-alternatives` at the Temurin path.
+- **`glslangValidator`** on `PATH` (or set
+  `GLSLANG=/path/to/glslangValidator`):
   - macOS: `brew install glslang`
   - Debian/Ubuntu: `apt install glslang-tools`
   - Fedora: `dnf install glslang`
-- Vulkan loader on the host (MoltenVK on macOS — bundled with
-  `lwjgl-vulkan` natives via the Vulkan SDK, or install separately)
+- **Vulkan loader** on the host — MoltenVK on macOS is bundled inside
+  the shadowJar via `lwjgl-vulkan` natives, so no extra step there.
+
+## Build
 
 ```
-./gradlew build
+JAVA_HOME=/path/to/temurin-21 ./gradlew build
 ```
 
-## Run from IDE
+If `java -version` already points at a Temurin JDK, the `JAVA_HOME=`
+prefix is unnecessary.
 
-Open the project in IntelliJ. Run `GpuVulkanPluginTest#main` — it calls
-`ExternalPluginManager.loadBuiltin()` and starts RuneLite with this
-plugin already loaded.
+## Run
 
-The first launch will dial out for the published RuneLite client artifact
-from `repo.runelite.net`. Then it boots like a normal RuneLite session
-with **GPU (Vulkan)** in the plugin list.
+Three ways, in increasing order of "useful to other people":
 
-## Standalone runnable jar
+### 1. From your IDE
+
+Open the project in IntelliJ (or any Gradle-aware IDE) and run
+`GpuVulkanPluginTest#main`. RuneLite boots with this plugin already on
+its classpath; **GPU (Vulkan)** shows up in the plugin list.
+
+### 2. `./gradlew run`
+
+Same entry point as the IDE, from a terminal:
+
+```
+JAVA_HOME=/path/to/temurin-21 ./gradlew run
+```
+
+### 3. Standalone runnable jar
 
 `./gradlew shadowJar` produces a self-contained jar at
-`build/libs/gpu-vulkan-<version>-all.jar` that bundles a full RuneLite
-client + this plugin + LWJGL natives for Linux/Windows/macOS (incl.
-MoltenVK). Run it with:
+`build/libs/gpu-vulkan-<version>-all.jar` (~41 MB) bundling a full
+RuneLite client + this plugin + LWJGL natives for Linux, Windows, and
+macOS (including MoltenVK for x64 + arm64). Run it directly:
 
 ```
-java -ea -jar build/libs/gpu-vulkan-<version>-all.jar
+/path/to/temurin-21/bin/java -ea -jar build/libs/gpu-vulkan-<version>-all.jar
 ```
 
-It boots like a normal RuneLite session — character configuration,
-account state, plugin settings all come from your existing
-`~/.runelite/` directory, so it won't disturb the setup of someone
-who already has RuneLite installed.
+This is the form to hand to a tester who isn't building from source.
+The jar honours `~/.runelite/` so it won't disturb an existing
+RuneLite install's character / plugin / config state.
 
-The `-ea` (assertions) flag matches what the plugin-hub template does
-and helps surface plugin bugs.
+The `-ea` flag enables assertions, matching what the plugin-hub
+template does — helps surface plugin bugs early.
 
 ## Side-loading into an installed RuneLite
 
 `./gradlew jar` produces a slim `build/libs/gpu-vulkan-<version>.jar`
-(plugin classes + shaders only, no bundled deps). Drop into RuneLite's
-external plugins directory. This jar does NOT bring its LWJGL Vulkan
-dependency along — for a self-contained build use `shadowJar` above.
+(plugin classes + shaders only, no bundled deps) that drops into
+RuneLite's external plugins directory. This jar does NOT carry its
+LWJGL Vulkan dependency, so RuneLite needs to already have
+`lwjgl-vulkan` on its classpath — which the stock installer does not.
+For a self-contained binary use `shadowJar` (#3 above).
 
 ## Repo layout
 
