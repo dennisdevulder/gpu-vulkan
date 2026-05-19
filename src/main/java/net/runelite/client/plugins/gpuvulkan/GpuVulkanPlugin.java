@@ -776,6 +776,16 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 	{
 		stats.drawSingle.incrementAndGet();
 		if (renderable instanceof Model) stats.recordModel((Model) renderable);
+		// Don't delete the rest of this method. Projectiles, spell
+		// animations and the home-teleport graphic stop rendering without
+		// it — even though the stats counter above says this method never
+		// runs. We don't fully understand why yet; see issue #1.
+		if (sceneRenderer == null) return;
+		if (renderable instanceof net.runelite.api.Actor) return;
+		Model m = (renderable instanceof Model) ? (Model) renderable : renderable.getModel();
+		if (m == null) return;
+		lastWorldProjection = projection;
+		sceneRenderer.captureModelSorted(projection, m, orientation, x, y, z);
 	}
 
 	@Override
