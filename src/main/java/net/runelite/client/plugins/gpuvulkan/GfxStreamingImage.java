@@ -1,6 +1,7 @@
 package net.runelite.client.plugins.gpuvulkan;
 
 import java.util.Arrays;
+import lombok.extern.slf4j.Slf4j;
 import net.runelite.client.plugins.gpuvulkan.gfx.StreamingImage;
 import org.lwjgl.vulkan.VkCommandBuffer;
 
@@ -20,6 +21,7 @@ import static org.lwjgl.vulkan.VK13.vkDeviceWaitIdle;
  * <p>Format is fixed to {@code VK_FORMAT_B8G8R8A8_UNORM} — matches the
  * RuneLite BufferProvider's pixel layout and the only consumer today.
  */
+@Slf4j
 final class GfxStreamingImage implements StreamingImage
 {
 	private final VulkanDevice device;
@@ -33,6 +35,12 @@ final class GfxStreamingImage implements StreamingImage
 	private final int[][] dirtyRowStarts;
 	private final int[][] dirtyRowHeights;
 	private final int[] dirtyRangeCounts;
+	private long nextDirtyLogNanos = System.nanoTime() + 1_000_000_000L;
+	private long dirtyLogFrames;
+	private long dirtyLogRows;
+	private long dirtyLogTotalRows;
+	private long dirtyLogRanges;
+	private long dirtyLogFullUploads;
 
 	GfxStreamingImage(VulkanDevice device, FrameSync frameSync, int width, int height)
 	{
@@ -88,10 +96,12 @@ final class GfxStreamingImage implements StreamingImage
 			dirtyRangeCounts[slot] = 1;
 			needsFullUpload[slot] = false;
 			staging.flushIfNeeded();
+			recordDirtyUploadStats(rows, rows, 1, true);
 			return;
 		}
 
 		int rangeCount = 0;
+		int dirtyRows = 0;
 		for (int y = 0; y < rows; )
 		{
 			int rowOffset = y * width;
@@ -111,6 +121,7 @@ final class GfxStreamingImage implements StreamingImage
 			while (y < rows && rowDiffers(pixels, previous, y * width, width));
 
 			int rowCount = y - startRow;
+			dirtyRows += rowCount;
 			int intOffset = startRow * width;
 			staging.writeInts(previous, intOffset, intOffset, rowCount * width);
 			dirtyRowStarts[slot][rangeCount] = startRow;
@@ -123,6 +134,7 @@ final class GfxStreamingImage implements StreamingImage
 		{
 			staging.flushIfNeeded();
 		}
+		recordDirtyUploadStats(rows, dirtyRows, rangeCount, false);
 	}
 
 	/** Records the staging→image copy + the layout transitions around it,
@@ -147,6 +159,42 @@ final class GfxStreamingImage implements StreamingImage
 	private static boolean rowDiffers(int[] current, int[] previous, int offset, int width)
 	{
 		return Arrays.mismatch(current, offset, offset + width, previous, offset, offset + width) >= 0;
+	}
+
+	private void recordDirtyUploadStats(int totalRows, int dirtyRows, int dirtyRanges, boolean fullUpload)
+	{
+		dirtyLogFrames++;
+		dirtyLogRows += dirtyRows;
+		dirtyLogTotalRows += totalRows;
+		dirtyLogRanges += dirtyRanges;
+		if (fullUpload)
+		{
+			dirtyLogFullUploads++;
+		}
+
+		long now = System.nanoTime();
+		if (now < nextDirtyLogNanos)
+		{
+			return;
+		}
+		nextDirtyLogNanos = now + 1_000_000_000L;
+		long frames = dirtyLogFrames;
+		long rows = dirtyLogRows;
+		long total = dirtyLogTotalRows;
+		long ranges = dirtyLogRanges;
+		long full = dirtyLogFullUploads;
+		dirtyLogFrames = 0;
+		dirtyLogRows = 0;
+		dirtyLogTotalRows = 0;
+		dirtyLogRanges = 0;
+		dirtyLogFullUploads = 0;
+
+		double dirtyPct = total == 0 ? 0.0 : (rows * 100.0) / total;
+		double avgRows = frames == 0 ? 0.0 : rows / (double) frames;
+		double avgRanges = frames == 0 ? 0.0 : ranges / (double) frames;
+		log.info("uiDirty | frames={} dirtyRows={}/{} ({}) avgRows={} avgRanges={} fullUploads={}",
+			frames, rows, total, String.format("%.1f%%", dirtyPct),
+			String.format("%.1f", avgRows), String.format("%.1f", avgRanges), full);
 	}
 
 	/** Per-slot view + sampler handles, exposed so {@link GfxBindGroup} can
