@@ -704,6 +704,7 @@ final class SceneRenderer implements AutoCloseable
 			int bias = faceBias != null ? (faceBias[f] & 0xFF) : 0;
 			int trans = faceTransparencies != null ? (faceTransparencies[f] & 0xFF) : 0;
 			int packedTexLayer = texLayer | (bias << 16) | (trans << 24);
+			boolean noUv = texLayer == 0;
 
 			int ia = fa[f];
 			int ib = fb[f];
@@ -715,21 +716,42 @@ final class SceneRenderer implements AutoCloseable
 				float r = HSL_RGB[rgbOffset];
 				float g = HSL_RGB[rgbOffset + 1];
 				float b = HSL_RGB[rgbOffset + 2];
-				writeRotatedVertexRgb(vx[ia], vy[ia], vz[ia], cos, sin, worldX, worldY, worldZ, light, r, g, b, u0, v0, packedTexLayer);
-				writeRotatedVertexRgb(vx[ib], vy[ib], vz[ib], cos, sin, worldX, worldY, worldZ, light, r, g, b, u1, v1, packedTexLayer);
-				writeRotatedVertexRgb(vx[ic], vy[ic], vz[ic], cos, sin, worldX, worldY, worldZ, light, r, g, b, u2, v2, packedTexLayer);
+				if (noUv)
+				{
+					writeRotatedVertexRgbNoUv(vx[ia], vy[ia], vz[ia], cos, sin, worldX, worldY, worldZ, light, r, g, b, packedTexLayer);
+					writeRotatedVertexRgbNoUv(vx[ib], vy[ib], vz[ib], cos, sin, worldX, worldY, worldZ, light, r, g, b, packedTexLayer);
+					writeRotatedVertexRgbNoUv(vx[ic], vy[ic], vz[ic], cos, sin, worldX, worldY, worldZ, light, r, g, b, packedTexLayer);
+				}
+				else
+				{
+					writeRotatedVertexRgb(vx[ia], vy[ia], vz[ia], cos, sin, worldX, worldY, worldZ, light, r, g, b, u0, v0, packedTexLayer);
+					writeRotatedVertexRgb(vx[ib], vy[ib], vz[ib], cos, sin, worldX, worldY, worldZ, light, r, g, b, u1, v1, packedTexLayer);
+					writeRotatedVertexRgb(vx[ic], vy[ic], vz[ic], cos, sin, worldX, worldY, worldZ, light, r, g, b, u2, v2, packedTexLayer);
+				}
 			}
 			else
 			{
 				int rgbOffset1 = (col1 & 0xFFFF) * 3;
 				int rgbOffset2 = (col2 & 0xFFFF) * 3;
 				int rgbOffset3 = (col3 & 0xFFFF) * 3;
-				writeRotatedVertexRgb(vx[ia], vy[ia], vz[ia], cos, sin, worldX, worldY, worldZ,
-					(float) (col1 & 0xFFFF), HSL_RGB[rgbOffset1], HSL_RGB[rgbOffset1 + 1], HSL_RGB[rgbOffset1 + 2], u0, v0, packedTexLayer);
-				writeRotatedVertexRgb(vx[ib], vy[ib], vz[ib], cos, sin, worldX, worldY, worldZ,
-					(float) (col2 & 0xFFFF), HSL_RGB[rgbOffset2], HSL_RGB[rgbOffset2 + 1], HSL_RGB[rgbOffset2 + 2], u1, v1, packedTexLayer);
-				writeRotatedVertexRgb(vx[ic], vy[ic], vz[ic], cos, sin, worldX, worldY, worldZ,
-					(float) (col3 & 0xFFFF), HSL_RGB[rgbOffset3], HSL_RGB[rgbOffset3 + 1], HSL_RGB[rgbOffset3 + 2], u2, v2, packedTexLayer);
+				if (noUv)
+				{
+					writeRotatedVertexRgbNoUv(vx[ia], vy[ia], vz[ia], cos, sin, worldX, worldY, worldZ,
+						(float) (col1 & 0xFFFF), HSL_RGB[rgbOffset1], HSL_RGB[rgbOffset1 + 1], HSL_RGB[rgbOffset1 + 2], packedTexLayer);
+					writeRotatedVertexRgbNoUv(vx[ib], vy[ib], vz[ib], cos, sin, worldX, worldY, worldZ,
+						(float) (col2 & 0xFFFF), HSL_RGB[rgbOffset2], HSL_RGB[rgbOffset2 + 1], HSL_RGB[rgbOffset2 + 2], packedTexLayer);
+					writeRotatedVertexRgbNoUv(vx[ic], vy[ic], vz[ic], cos, sin, worldX, worldY, worldZ,
+						(float) (col3 & 0xFFFF), HSL_RGB[rgbOffset3], HSL_RGB[rgbOffset3 + 1], HSL_RGB[rgbOffset3 + 2], packedTexLayer);
+				}
+				else
+				{
+					writeRotatedVertexRgb(vx[ia], vy[ia], vz[ia], cos, sin, worldX, worldY, worldZ,
+						(float) (col1 & 0xFFFF), HSL_RGB[rgbOffset1], HSL_RGB[rgbOffset1 + 1], HSL_RGB[rgbOffset1 + 2], u0, v0, packedTexLayer);
+					writeRotatedVertexRgb(vx[ib], vy[ib], vz[ib], cos, sin, worldX, worldY, worldZ,
+						(float) (col2 & 0xFFFF), HSL_RGB[rgbOffset2], HSL_RGB[rgbOffset2 + 1], HSL_RGB[rgbOffset2 + 2], u1, v1, packedTexLayer);
+					writeRotatedVertexRgb(vx[ic], vy[ic], vz[ic], cos, sin, worldX, worldY, worldZ,
+						(float) (col3 & 0xFFFF), HSL_RGB[rgbOffset3], HSL_RGB[rgbOffset3 + 1], HSL_RGB[rgbOffset3 + 2], u2, v2, packedTexLayer);
+				}
 			}
 			wrote += 3;
 		}
@@ -892,6 +914,7 @@ final class SceneRenderer implements AutoCloseable
 			int bias = faceBiasArr != null ? (faceBiasArr[f] & 0xFF) : 0;
 			int trans = faceTransparencies != null ? (faceTransparencies[f] & 0xFF) : 0;
 			int packedTexLayer = texLayer | (bias << 16) | (trans << 24);
+			boolean noUv = texLayer == 0;
 
 			int ia = fa[f];
 			int ib = fb[f];
@@ -903,21 +926,42 @@ final class SceneRenderer implements AutoCloseable
 				float r = HSL_RGB[rgbOffset];
 				float g = HSL_RGB[rgbOffset + 1];
 				float b = HSL_RGB[rgbOffset + 2];
-				writePackedVertexRgb(lx[ia], ly[ia], lz[ia], light, r, g, b, u0, v0, packedTexLayer);
-				writePackedVertexRgb(lx[ib], ly[ib], lz[ib], light, r, g, b, u1, v1, packedTexLayer);
-				writePackedVertexRgb(lx[ic], ly[ic], lz[ic], light, r, g, b, u2, v2, packedTexLayer);
+				if (noUv)
+				{
+					writePackedVertexRgbNoUv(lx[ia], ly[ia], lz[ia], light, r, g, b, packedTexLayer);
+					writePackedVertexRgbNoUv(lx[ib], ly[ib], lz[ib], light, r, g, b, packedTexLayer);
+					writePackedVertexRgbNoUv(lx[ic], ly[ic], lz[ic], light, r, g, b, packedTexLayer);
+				}
+				else
+				{
+					writePackedVertexRgb(lx[ia], ly[ia], lz[ia], light, r, g, b, u0, v0, packedTexLayer);
+					writePackedVertexRgb(lx[ib], ly[ib], lz[ib], light, r, g, b, u1, v1, packedTexLayer);
+					writePackedVertexRgb(lx[ic], ly[ic], lz[ic], light, r, g, b, u2, v2, packedTexLayer);
+				}
 			}
 			else
 			{
 				int rgbOffset1 = (col1 & 0xFFFF) * 3;
 				int rgbOffset2 = (col2 & 0xFFFF) * 3;
 				int rgbOffset3 = (col3 & 0xFFFF) * 3;
-				writePackedVertexRgb(lx[ia], ly[ia], lz[ia],
-					(float) (col1 & 0xFFFF), HSL_RGB[rgbOffset1], HSL_RGB[rgbOffset1 + 1], HSL_RGB[rgbOffset1 + 2], u0, v0, packedTexLayer);
-				writePackedVertexRgb(lx[ib], ly[ib], lz[ib],
-					(float) (col2 & 0xFFFF), HSL_RGB[rgbOffset2], HSL_RGB[rgbOffset2 + 1], HSL_RGB[rgbOffset2 + 2], u1, v1, packedTexLayer);
-				writePackedVertexRgb(lx[ic], ly[ic], lz[ic],
-					(float) (col3 & 0xFFFF), HSL_RGB[rgbOffset3], HSL_RGB[rgbOffset3 + 1], HSL_RGB[rgbOffset3 + 2], u2, v2, packedTexLayer);
+				if (noUv)
+				{
+					writePackedVertexRgbNoUv(lx[ia], ly[ia], lz[ia],
+						(float) (col1 & 0xFFFF), HSL_RGB[rgbOffset1], HSL_RGB[rgbOffset1 + 1], HSL_RGB[rgbOffset1 + 2], packedTexLayer);
+					writePackedVertexRgbNoUv(lx[ib], ly[ib], lz[ib],
+						(float) (col2 & 0xFFFF), HSL_RGB[rgbOffset2], HSL_RGB[rgbOffset2 + 1], HSL_RGB[rgbOffset2 + 2], packedTexLayer);
+					writePackedVertexRgbNoUv(lx[ic], ly[ic], lz[ic],
+						(float) (col3 & 0xFFFF), HSL_RGB[rgbOffset3], HSL_RGB[rgbOffset3 + 1], HSL_RGB[rgbOffset3 + 2], packedTexLayer);
+				}
+				else
+				{
+					writePackedVertexRgb(lx[ia], ly[ia], lz[ia],
+						(float) (col1 & 0xFFFF), HSL_RGB[rgbOffset1], HSL_RGB[rgbOffset1 + 1], HSL_RGB[rgbOffset1 + 2], u0, v0, packedTexLayer);
+					writePackedVertexRgb(lx[ib], ly[ib], lz[ib],
+						(float) (col2 & 0xFFFF), HSL_RGB[rgbOffset2], HSL_RGB[rgbOffset2 + 1], HSL_RGB[rgbOffset2 + 2], u1, v1, packedTexLayer);
+					writePackedVertexRgb(lx[ic], ly[ic], lz[ic],
+						(float) (col3 & 0xFFFF), HSL_RGB[rgbOffset3], HSL_RGB[rgbOffset3 + 1], HSL_RGB[rgbOffset3 + 2], u2, v2, packedTexLayer);
+				}
 			}
 			wrote += 3;
 		}
@@ -1096,6 +1140,7 @@ final class SceneRenderer implements AutoCloseable
 			int bias = faceBiasArr != null ? (faceBiasArr[f] & 0xFF) : 0;
 			int trans = faceTransparencies != null ? (faceTransparencies[f] & 0xFF) : 0;
 			int packedTexLayer = texLayer | (bias << 16) | (trans << 24);
+			boolean noUv = texLayer == 0;
 
 			if (col1 == col2 && col1 == col3)
 			{
@@ -1104,21 +1149,42 @@ final class SceneRenderer implements AutoCloseable
 				float r = HSL_RGB[rgbOffset];
 				float g = HSL_RGB[rgbOffset + 1];
 				float b = HSL_RGB[rgbOffset + 2];
-				writePackedVertexRgb(cullLocalX[ia], cullLocalY[ia], cullLocalZ[ia], light, r, g, b, u0, v0, packedTexLayer);
-				writePackedVertexRgb(cullLocalX[ib], cullLocalY[ib], cullLocalZ[ib], light, r, g, b, u1, v1, packedTexLayer);
-				writePackedVertexRgb(cullLocalX[ic], cullLocalY[ic], cullLocalZ[ic], light, r, g, b, u2, v2, packedTexLayer);
+				if (noUv)
+				{
+					writePackedVertexRgbNoUv(cullLocalX[ia], cullLocalY[ia], cullLocalZ[ia], light, r, g, b, packedTexLayer);
+					writePackedVertexRgbNoUv(cullLocalX[ib], cullLocalY[ib], cullLocalZ[ib], light, r, g, b, packedTexLayer);
+					writePackedVertexRgbNoUv(cullLocalX[ic], cullLocalY[ic], cullLocalZ[ic], light, r, g, b, packedTexLayer);
+				}
+				else
+				{
+					writePackedVertexRgb(cullLocalX[ia], cullLocalY[ia], cullLocalZ[ia], light, r, g, b, u0, v0, packedTexLayer);
+					writePackedVertexRgb(cullLocalX[ib], cullLocalY[ib], cullLocalZ[ib], light, r, g, b, u1, v1, packedTexLayer);
+					writePackedVertexRgb(cullLocalX[ic], cullLocalY[ic], cullLocalZ[ic], light, r, g, b, u2, v2, packedTexLayer);
+				}
 			}
 			else
 			{
 				int rgbOffset1 = (col1 & 0xFFFF) * 3;
 				int rgbOffset2 = (col2 & 0xFFFF) * 3;
 				int rgbOffset3 = (col3 & 0xFFFF) * 3;
-				writePackedVertexRgb(cullLocalX[ia], cullLocalY[ia], cullLocalZ[ia],
-					(float) (col1 & 0xFFFF), HSL_RGB[rgbOffset1], HSL_RGB[rgbOffset1 + 1], HSL_RGB[rgbOffset1 + 2], u0, v0, packedTexLayer);
-				writePackedVertexRgb(cullLocalX[ib], cullLocalY[ib], cullLocalZ[ib],
-					(float) (col2 & 0xFFFF), HSL_RGB[rgbOffset2], HSL_RGB[rgbOffset2 + 1], HSL_RGB[rgbOffset2 + 2], u1, v1, packedTexLayer);
-				writePackedVertexRgb(cullLocalX[ic], cullLocalY[ic], cullLocalZ[ic],
-					(float) (col3 & 0xFFFF), HSL_RGB[rgbOffset3], HSL_RGB[rgbOffset3 + 1], HSL_RGB[rgbOffset3 + 2], u2, v2, packedTexLayer);
+				if (noUv)
+				{
+					writePackedVertexRgbNoUv(cullLocalX[ia], cullLocalY[ia], cullLocalZ[ia],
+						(float) (col1 & 0xFFFF), HSL_RGB[rgbOffset1], HSL_RGB[rgbOffset1 + 1], HSL_RGB[rgbOffset1 + 2], packedTexLayer);
+					writePackedVertexRgbNoUv(cullLocalX[ib], cullLocalY[ib], cullLocalZ[ib],
+						(float) (col2 & 0xFFFF), HSL_RGB[rgbOffset2], HSL_RGB[rgbOffset2 + 1], HSL_RGB[rgbOffset2 + 2], packedTexLayer);
+					writePackedVertexRgbNoUv(cullLocalX[ic], cullLocalY[ic], cullLocalZ[ic],
+						(float) (col3 & 0xFFFF), HSL_RGB[rgbOffset3], HSL_RGB[rgbOffset3 + 1], HSL_RGB[rgbOffset3 + 2], packedTexLayer);
+				}
+				else
+				{
+					writePackedVertexRgb(cullLocalX[ia], cullLocalY[ia], cullLocalZ[ia],
+						(float) (col1 & 0xFFFF), HSL_RGB[rgbOffset1], HSL_RGB[rgbOffset1 + 1], HSL_RGB[rgbOffset1 + 2], u0, v0, packedTexLayer);
+					writePackedVertexRgb(cullLocalX[ib], cullLocalY[ib], cullLocalZ[ib],
+						(float) (col2 & 0xFFFF), HSL_RGB[rgbOffset2], HSL_RGB[rgbOffset2 + 1], HSL_RGB[rgbOffset2 + 2], u1, v1, packedTexLayer);
+					writePackedVertexRgb(cullLocalX[ic], cullLocalY[ic], cullLocalZ[ic],
+						(float) (col3 & 0xFFFF), HSL_RGB[rgbOffset3], HSL_RGB[rgbOffset3 + 1], HSL_RGB[rgbOffset3 + 2], u2, v2, packedTexLayer);
+				}
 			}
 			wrote += 3;
 		}
@@ -1426,6 +1492,17 @@ final class SceneRenderer implements AutoCloseable
 		writePackedVertexRgb(rx + wx, ly + wy, rz + wz, light, r, g, b, u, v, texLayer);
 	}
 
+	private void writeRotatedVertexRgbNoUv(float lx, float ly, float lz,
+										   float cos, float sin,
+										   int wx, int wy, int wz,
+										   float light, float r, float g, float b,
+										   int texLayer)
+	{
+		float rx = lx * cos + lz * sin;
+		float rz = -lx * sin + lz * cos;
+		writePackedVertexRgbNoUv(rx + wx, ly + wy, rz + wz, light, r, g, b, texLayer);
+	}
+
 	private void writeHslVert(float x, float y, float z, int hsl16, float u, float v, int texLayer)
 	{
 		writePackedVertex(x, y, z, hsl16, u, v, texLayer);
@@ -1458,6 +1535,26 @@ final class SceneRenderer implements AutoCloseable
 		MemoryUtil.memPutFloat(p + 32, light);
 		MemoryUtil.memPutFloat(p + 36, u);
 		MemoryUtil.memPutFloat(p + 40, v);
+		MemoryUtil.memPutInt(p + 44, texLayer);
+		writePtr = p + ScenePipeline.VERTEX_STRIDE;
+	}
+
+	private void writePackedVertexRgbNoUv(float x, float y, float z,
+										  float light, float r, float g, float b,
+										  int texLayer)
+	{
+		long p = writePtr;
+		MemoryUtil.memPutFloat(p, x);
+		MemoryUtil.memPutFloat(p + 4, y);
+		MemoryUtil.memPutFloat(p + 8, z);
+		MemoryUtil.memPutFloat(p + 12, 0f);
+		MemoryUtil.memPutFloat(p + 16, r);
+		MemoryUtil.memPutFloat(p + 20, g);
+		MemoryUtil.memPutFloat(p + 24, b);
+		MemoryUtil.memPutFloat(p + 28, 0f);
+		MemoryUtil.memPutFloat(p + 32, light);
+		MemoryUtil.memPutFloat(p + 36, 0f);
+		MemoryUtil.memPutFloat(p + 40, 0f);
 		MemoryUtil.memPutInt(p + 44, texLayer);
 		writePtr = p + ScenePipeline.VERTEX_STRIDE;
 	}
