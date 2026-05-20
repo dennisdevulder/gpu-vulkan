@@ -102,19 +102,20 @@ final class GfxStreamingImage implements StreamingImage
 
 		int rangeCount = 0;
 		int dirtyRows = 0;
-		for (int y = 0; y < rows; )
+		int rowInts = rows * width;
+		for (int searchOffset = 0; searchOffset < rowInts; )
 		{
-			int rowOffset = y * width;
-			if (!rowDiffers(pixels, previous, rowOffset, width))
+			int mismatch = Arrays.mismatch(pixels, searchOffset, rowInts, previous, searchOffset, rowInts);
+			if (mismatch < 0)
 			{
-				y++;
-				continue;
+				break;
 			}
 
+			int y = (searchOffset + mismatch) / width;
 			int startRow = y;
 			do
 			{
-				rowOffset = y * width;
+				int rowOffset = y * width;
 				System.arraycopy(pixels, rowOffset, previous, rowOffset, width);
 				y++;
 			}
@@ -127,6 +128,7 @@ final class GfxStreamingImage implements StreamingImage
 			dirtyRowStarts[slot][rangeCount] = startRow;
 			dirtyRowHeights[slot][rangeCount] = rowCount;
 			rangeCount++;
+			searchOffset = y * width;
 		}
 
 		dirtyRangeCounts[slot] = rangeCount;
