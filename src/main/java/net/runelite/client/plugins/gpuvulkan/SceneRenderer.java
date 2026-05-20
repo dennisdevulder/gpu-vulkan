@@ -928,9 +928,11 @@ final class SceneRenderer implements AutoCloseable
 				float b = HSL_RGB[rgbOffset + 2];
 				if (noUv)
 				{
-					writePackedVertexRgbNoUv(lx[ia], ly[ia], lz[ia], light, r, g, b, packedTexLayer);
-					writePackedVertexRgbNoUv(lx[ib], ly[ib], lz[ib], light, r, g, b, packedTexLayer);
-					writePackedVertexRgbNoUv(lx[ic], ly[ic], lz[ic], light, r, g, b, packedTexLayer);
+					writePackedTriangleRgbNoUv(
+						lx[ia], ly[ia], lz[ia],
+						lx[ib], ly[ib], lz[ib],
+						lx[ic], ly[ic], lz[ic],
+						light, r, g, b, packedTexLayer);
 				}
 				else
 				{
@@ -1151,9 +1153,11 @@ final class SceneRenderer implements AutoCloseable
 				float b = HSL_RGB[rgbOffset + 2];
 				if (noUv)
 				{
-					writePackedVertexRgbNoUv(cullLocalX[ia], cullLocalY[ia], cullLocalZ[ia], light, r, g, b, packedTexLayer);
-					writePackedVertexRgbNoUv(cullLocalX[ib], cullLocalY[ib], cullLocalZ[ib], light, r, g, b, packedTexLayer);
-					writePackedVertexRgbNoUv(cullLocalX[ic], cullLocalY[ic], cullLocalZ[ic], light, r, g, b, packedTexLayer);
+					writePackedTriangleRgbNoUv(
+						cullLocalX[ia], cullLocalY[ia], cullLocalZ[ia],
+						cullLocalX[ib], cullLocalY[ib], cullLocalZ[ib],
+						cullLocalX[ic], cullLocalY[ic], cullLocalZ[ic],
+						light, r, g, b, packedTexLayer);
 				}
 				else
 				{
@@ -1557,6 +1561,39 @@ final class SceneRenderer implements AutoCloseable
 		MemoryUtil.memPutFloat(p + 40, 0f);
 		MemoryUtil.memPutInt(p + 44, texLayer);
 		writePtr = p + ScenePipeline.VERTEX_STRIDE;
+	}
+
+	private void writePackedTriangleRgbNoUv(float x0, float y0, float z0,
+											float x1, float y1, float z1,
+											float x2, float y2, float z2,
+											float light, float r, float g, float b,
+											int texLayer)
+	{
+		long p = writePtr;
+		writePackedVertexRgbNoUvAt(p, x0, y0, z0, light, r, g, b, texLayer);
+		p += ScenePipeline.VERTEX_STRIDE;
+		writePackedVertexRgbNoUvAt(p, x1, y1, z1, light, r, g, b, texLayer);
+		p += ScenePipeline.VERTEX_STRIDE;
+		writePackedVertexRgbNoUvAt(p, x2, y2, z2, light, r, g, b, texLayer);
+		writePtr = p + ScenePipeline.VERTEX_STRIDE;
+	}
+
+	private static void writePackedVertexRgbNoUvAt(long p, float x, float y, float z,
+												   float light, float r, float g, float b,
+												   int texLayer)
+	{
+		MemoryUtil.memPutFloat(p, x);
+		MemoryUtil.memPutFloat(p + 4, y);
+		MemoryUtil.memPutFloat(p + 8, z);
+		MemoryUtil.memPutFloat(p + 12, 0f);
+		MemoryUtil.memPutFloat(p + 16, r);
+		MemoryUtil.memPutFloat(p + 20, g);
+		MemoryUtil.memPutFloat(p + 24, b);
+		MemoryUtil.memPutFloat(p + 28, 0f);
+		MemoryUtil.memPutFloat(p + 32, light);
+		MemoryUtil.memPutFloat(p + 36, 0f);
+		MemoryUtil.memPutFloat(p + 40, 0f);
+		MemoryUtil.memPutInt(p + 44, texLayer);
 	}
 
 	/**
