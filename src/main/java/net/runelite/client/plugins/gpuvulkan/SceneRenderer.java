@@ -585,13 +585,20 @@ final class SceneRenderer implements AutoCloseable
 
 	void captureModel(Model m, int orient, int worldX, int worldY, int worldZ)
 	{
-		if (m == null) return;
+		if (m == null || !markCaptureSeen(m, worldX, worldZ)) return;
+		captureModelUnsorted(m, orient, worldX, worldY, worldZ);
+	}
 
+	private boolean markCaptureSeen(Model m, int worldX, int worldZ)
+	{
 		long key = ((long) System.identityHashCode(m) & 0xFFFFFFFFL)
 			| ((long) (worldX & 0xFFFF) << 32)
 			| ((long) (worldZ & 0xFFFF) << 48);
-		if (!seenCaptures.add(key)) return;
+		return seenCaptures.add(key);
+	}
 
+	private void captureModelUnsorted(Model m, int orient, int worldX, int worldY, int worldZ)
+	{
 		float[] vx = m.getVerticesX();
 		float[] vy = m.getVerticesY();
 		float[] vz = m.getVerticesZ();
@@ -686,8 +693,10 @@ final class SceneRenderer implements AutoCloseable
 
 	/**
 	 * Sorted variant of {@link #captureModel} — runs the model through
-	 * {@link ModelSorter} (camera-space depth bucketing + back-face cull +
-	 * near-plane reject), then emits the model's triangles back-to-front.
+	 * {@link ModelSorter} (camera-space depth bucketing + back-face cull),
+	 * then emits the model's triangles back-to-front. If sorting rejects the
+	 * model or emits no faces, this falls back to the unsorted path so
+	 * transient effects don't disappear.
 	 * Use this from the engine's {@code drawDynamic} / {@code drawTemp}
 	 * callbacks where a {@link Projection} is supplied; the existing
 	 * unsorted {@link #captureModel} stays in place for the actor walk,
@@ -699,20 +708,24 @@ final class SceneRenderer implements AutoCloseable
 	void captureModelSorted(Projection proj, Model m, int orient, int worldX, int worldY, int worldZ)
 	{
 		if (m == null || proj == null) return;
-
-		long key = ((long) System.identityHashCode(m) & 0xFFFFFFFFL)
-			| ((long) (worldX & 0xFFFF) << 32)
-			| ((long) (worldZ & 0xFFFF) << 48);
-		if (!seenCaptures.add(key)) return;
+		if (!markCaptureSeen(m, worldX, worldZ)) return;
 
 		if (!sorter.sort(proj, m, orient, worldX, worldY, worldZ))
 		{
-			// Near-plane reject / oversized / null arrays.
+			// Sorting is a quality pass, not a visibility gate. Some transient
+			// renderables (projectiles / spotanims) have bounds that make the
+			// sorter reject them; keep them visible by falling back to the basic
+			// model emitter.
+			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
 			return;
 		}
 
 		int faces = sorter.sortedCount;
-		if (faces == 0) return;
+		if (faces == 0)
+		{
+			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
+			return;
+		}
 		if (vertexCount + faces * 3 > MAX_VERTICES) { overflow(); return; }
 
 		// Vertex positions are read by computeFaceUvs only; emit uses the
