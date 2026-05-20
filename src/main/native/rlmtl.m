@@ -150,9 +150,7 @@ Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nResizeMetalLayer(
 
         [CATransaction begin];
         [CATransaction setDisableActions: YES];
-        if (layer.bounds.size.width <= 0 || layer.bounds.size.height <= 0) {
-            layer.bounds = CGRectMake(0, 0, w, h);
-        }
+        layer.bounds = CGRectMake(0, 0, w, h);
         layer.drawableSize = CGSizeMake(w * scale, h * scale);
         [CATransaction commit];
         [CATransaction flush];
