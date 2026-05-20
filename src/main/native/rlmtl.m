@@ -132,7 +132,7 @@ Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nDetachMetalLayer(
 
 JNIEXPORT void JNICALL
 Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nResizeMetalLayer(
-    JNIEnv* env, jclass cls, jint widthPoints, jint heightPoints)
+    JNIEnv* env, jclass cls, jint widthPoints, jint heightPoints, jdouble scaleHint)
 {
     CAMetalLayer* layer = gMetalLayer;
     if (!layer) {
@@ -141,12 +141,12 @@ Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nResizeMetalLayer(
     int w = widthPoints > 0 ? widthPoints : 1;
     int h = heightPoints > 0 ? heightPoints : 1;
     void (^resize)(void) = ^{
-        CGFloat scale = layer.contentsScale;
+        CGFloat scale = scaleHint > 0 ? (CGFloat) scaleHint : layer.contentsScale;
         if (scale <= 0) {
             scale = [[NSScreen mainScreen] backingScaleFactor];
             if (scale <= 0) scale = 1;
-            layer.contentsScale = scale;
         }
+        layer.contentsScale = scale;
 
         [CATransaction begin];
         [CATransaction setDisableActions: YES];
@@ -313,7 +313,7 @@ Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nPresentDrawable(
 JNIEXPORT jlong JNICALL
 Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nAttachMetalLayer(
     JNIEnv* env, jclass cls, jobject canvas, jboolean vsync,
-    jint initialWidthPoints, jint initialHeightPoints)
+    jint initialWidthPoints, jint initialHeightPoints, jdouble scaleHint)
 {
     rlmtlDetachMetalLayer();
 
@@ -368,10 +368,12 @@ Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nAttachMetalLayer(
     }
 
     __block CAMetalLayer* metalLayer = nil;
-    __block CGFloat scale = 1;
+    __block CGFloat scale = scaleHint > 0 ? (CGFloat) scaleHint : 1;
     dispatch_sync(dispatch_get_main_queue(), ^{
-        scale = [[NSScreen mainScreen] backingScaleFactor];
-        if (scale <= 0) scale = 1;
+        if (scale <= 0) {
+            scale = [[NSScreen mainScreen] backingScaleFactor];
+            if (scale <= 0) scale = 1;
+        }
 
         metalLayer = [[CAMetalLayer alloc] init];
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();

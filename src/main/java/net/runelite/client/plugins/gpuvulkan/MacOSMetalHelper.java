@@ -1,6 +1,8 @@
 package net.runelite.client.plugins.gpuvulkan;
 
 import java.awt.Canvas;
+import java.awt.GraphicsConfiguration;
+import java.awt.geom.AffineTransform;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
@@ -22,6 +24,7 @@ import lombok.extern.slf4j.Slf4j;
 final class MacOSMetalHelper
 {
 	private static volatile boolean loaded;
+	private static volatile double layerScale = 1.0;
 
 	private MacOSMetalHelper() {}
 
@@ -68,9 +71,9 @@ final class MacOSMetalHelper
 	}
 
 	private static native long nAttachMetalLayer(Canvas canvas, boolean vsync,
-		int initialWidthPoints, int initialHeightPoints);
+		int initialWidthPoints, int initialHeightPoints, double scale);
 	private static native void nDetachMetalLayer();
-	private static native void nResizeMetalLayer(int widthPoints, int heightPoints);
+	private static native void nResizeMetalLayer(int widthPoints, int heightPoints, double scale);
 	private static native long[] nNextDrawable();
 	private static native void nPresentDrawable(long drawable, long mtlQueue);
 	private static native void nRetainObject(long ptr);
@@ -85,7 +88,8 @@ final class MacOSMetalHelper
 		// start rendering" symptom).
 		int w = Math.max(canvas.getWidth(), 1);
 		int h = Math.max(canvas.getHeight(), 1);
-		long ptr = nAttachMetalLayer(canvas, vsync, w, h);
+		layerScale = canvasScale(canvas);
+		long ptr = nAttachMetalLayer(canvas, vsync, w, h, layerScale);
 		if (ptr == 0L)
 		{
 			throw new RuntimeException("nAttachMetalLayer returned NULL — "
@@ -105,6 +109,7 @@ final class MacOSMetalHelper
 
 	static void resizeMetalLayer(Canvas canvas)
 	{
+		layerScale = canvasScale(canvas);
 		resizeMetalLayerSize(canvas.getWidth(), canvas.getHeight());
 	}
 
@@ -112,8 +117,23 @@ final class MacOSMetalHelper
 	{
 		if (loaded)
 		{
-			nResizeMetalLayer(Math.max(widthPoints, 1), Math.max(heightPoints, 1));
+			nResizeMetalLayer(Math.max(widthPoints, 1), Math.max(heightPoints, 1), layerScale);
 		}
+	}
+
+	private static double canvasScale(Canvas canvas)
+	{
+		if (canvas == null)
+		{
+			return 1.0;
+		}
+		GraphicsConfiguration graphicsConfiguration = canvas.getGraphicsConfiguration();
+		if (graphicsConfiguration == null)
+		{
+			return 1.0;
+		}
+		AffineTransform transform = graphicsConfiguration.getDefaultTransform();
+		return Math.max(transform.getScaleX(), transform.getScaleY());
 	}
 
 	/**
