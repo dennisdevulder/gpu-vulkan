@@ -207,6 +207,37 @@ final class Texture implements AutoCloseable
 		}
 	}
 
+	/** Records full-width row-range copies from a tightly packed full-image staging buffer. */
+	void recordCopyRowsFrom(VkCommandBuffer cmd, Buffer staging, int copyWidth, int[] rowStarts, int[] rowHeights, int rangeCount)
+	{
+		if (rangeCount <= 0)
+		{
+			return;
+		}
+		try (MemoryStack stack = stackPush())
+		{
+			VkBufferImageCopy.Buffer regions = VkBufferImageCopy.calloc(rangeCount, stack);
+			for (int i = 0; i < rangeCount; i++)
+			{
+				int rowStart = rowStarts[i];
+				int rowHeight = rowHeights[i];
+				regions.get(i)
+					.bufferOffset((long) rowStart * copyWidth * Integer.BYTES)
+					.bufferRowLength(copyWidth)
+					.bufferImageHeight(height)
+					.imageOffset(o -> o.set(0, rowStart, 0))
+					.imageExtent(e -> e.width(copyWidth).height(rowHeight).depth(1));
+				regions.get(i).imageSubresource()
+					.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
+					.mipLevel(0)
+					.baseArrayLayer(0).layerCount(1);
+			}
+
+			vkCmdCopyBufferToImage(cmd, staging.handle(), image,
+				VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, regions);
+		}
+	}
+
 	@Override
 	public void close()
 	{

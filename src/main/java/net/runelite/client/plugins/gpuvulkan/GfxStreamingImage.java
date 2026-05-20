@@ -27,6 +27,11 @@ final class GfxStreamingImage implements StreamingImage
 	private final int height;
 	private final Texture[] textures;
 	private final Buffer[] stagings;
+	private final int[][] previousPixels;
+	private final boolean[] needsFullUpload;
+	private final int[][] dirtyRowStarts;
+	private final int[][] dirtyRowHeights;
+	private final int[] dirtyRangeCounts;
 
 	GfxStreamingImage(VulkanDevice device, FrameSync frameSync, int width, int height)
 	{
@@ -36,6 +41,11 @@ final class GfxStreamingImage implements StreamingImage
 		this.height = height;
 		this.textures = new Texture[FrameSync.FRAMES_IN_FLIGHT];
 		this.stagings = new Buffer[FrameSync.FRAMES_IN_FLIGHT];
+		this.previousPixels = new int[FrameSync.FRAMES_IN_FLIGHT][];
+		this.needsFullUpload = new boolean[FrameSync.FRAMES_IN_FLIGHT];
+		this.dirtyRowStarts = new int[FrameSync.FRAMES_IN_FLIGHT][];
+		this.dirtyRowHeights = new int[FrameSync.FRAMES_IN_FLIGHT][];
+		this.dirtyRangeCounts = new int[FrameSync.FRAMES_IN_FLIGHT];
 
 		long sizeBytes = (long) width * height * 4L;
 		for (int i = 0; i < FrameSync.FRAMES_IN_FLIGHT; i++)
@@ -46,14 +56,72 @@ final class GfxStreamingImage implements StreamingImage
 				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
 				VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
 			stagings[i].mapPersistent();
+			previousPixels[i] = new int[width * height];
+			needsFullUpload[i] = true;
+			dirtyRowStarts[i] = new int[height];
+			dirtyRowHeights[i] = new int[height];
 		}
 	}
 
 	@Override
 	public void uploadPixels(int[] pixels)
 	{
+		int slot = frameSync.currentFrame();
 		int count = Math.min(pixels.length, width * height);
-		stagings[frameSync.currentFrame()].writeInts(pixels, 0, count);
+		int rows = count / width;
+		dirtyRangeCounts[slot] = 0;
+		if (rows <= 0)
+		{
+			return;
+		}
+
+		Buffer staging = stagings[slot];
+		int[] previous = previousPixels[slot];
+		if (needsFullUpload[slot])
+		{
+			int rowInts = rows * width;
+			staging.writeInts(pixels, 0, 0, rowInts);
+			System.arraycopy(pixels, 0, previous, 0, rowInts);
+			dirtyRowStarts[slot][0] = 0;
+			dirtyRowHeights[slot][0] = rows;
+			dirtyRangeCounts[slot] = 1;
+			needsFullUpload[slot] = false;
+			staging.flushIfNeeded();
+			return;
+		}
+
+		int rangeCount = 0;
+		for (int y = 0; y < rows; )
+		{
+			int rowOffset = y * width;
+			if (!rowDiffers(pixels, previous, rowOffset, width))
+			{
+				y++;
+				continue;
+			}
+
+			int startRow = y;
+			do
+			{
+				rowOffset = y * width;
+				System.arraycopy(pixels, rowOffset, previous, rowOffset, width);
+				y++;
+			}
+			while (y < rows && rowDiffers(pixels, previous, y * width, width));
+
+			int rowCount = y - startRow;
+			int intOffset = startRow * width;
+			staging.writeInts(previous, intOffset, intOffset, rowCount * width);
+			dirtyRowStarts[slot][rangeCount] = startRow;
+			dirtyRowHeights[slot][rangeCount] = rowCount;
+			rangeCount++;
+		}
+
+		dirtyRangeCounts[slot] = rangeCount;
+		if (rangeCount > 0)
+		{
+			staging.flushIfNeeded();
+		}
 	}
 
 	/** Records the staging→image copy + the layout transitions around it,
@@ -62,11 +130,29 @@ final class GfxStreamingImage implements StreamingImage
 	 *  one). */
 	void recordCopyToImage(VkCommandBuffer cmd)
 	{
-		Texture t = textures[frameSync.currentFrame()];
-		Buffer s = stagings[frameSync.currentFrame()];
+		int slot = frameSync.currentFrame();
+		int rangeCount = dirtyRangeCounts[slot];
+		if (rangeCount <= 0)
+		{
+			return;
+		}
+		Texture t = textures[slot];
+		Buffer s = stagings[slot];
 		t.transitionLayout(cmd, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-		t.recordCopyFrom(cmd, s, width, height);
+		t.recordCopyRowsFrom(cmd, s, width, dirtyRowStarts[slot], dirtyRowHeights[slot], rangeCount);
 		t.transitionLayout(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	}
+
+	private static boolean rowDiffers(int[] current, int[] previous, int offset, int width)
+	{
+		for (int i = 0; i < width; i++)
+		{
+			if (current[offset + i] != previous[offset + i])
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/** Per-slot view + sampler handles, exposed so {@link GfxBindGroup} can

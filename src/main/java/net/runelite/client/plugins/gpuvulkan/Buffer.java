@@ -114,10 +114,17 @@ final class Buffer implements AutoCloseable
 	/** Convenience: copy an int[] (one pixel = one int) into the mapped region. */
 	void writeInts(int[] src, int srcOffset, int count)
 	{
+		writeInts(src, srcOffset, 0, count);
+		flushIfNeeded();
+	}
+
+	/** Copy an int[] into the mapped region at an int offset. */
+	void writeInts(int[] src, int srcOffset, int dstOffset, int count)
+	{
 		if (mappedAddress == 0L) throw new IllegalStateException("buffer not mapped");
 		mappedIntView.clear();
+		mappedIntView.position(dstOffset);
 		mappedIntView.put(src, srcOffset, count);
-		flushIfNeeded();
 	}
 
 	void flushIfNeeded()
