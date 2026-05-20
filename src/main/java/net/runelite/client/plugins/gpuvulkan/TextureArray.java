@@ -286,27 +286,30 @@ final class TextureArray implements AutoCloseable
 
 				// All mips → TRANSFER_DST. Base level gets memcpy'd; higher
 				// levels are blit destinations in the mip cascade below.
-				transitionAllLayers(cmd, stack, 0, MIP_LEVELS,
+				transitionAllLayers(cmd, 0, MIP_LEVELS,
 					VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 					VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
 					0, VK_ACCESS_TRANSFER_WRITE_BIT);
 
-				VkBufferImageCopy.Buffer regions = VkBufferImageCopy.calloc(layerCount, stack);
-				for (int layer = 0; layer < layerCount; layer++)
+				try (MemoryStack copyStack = stackPush())
 				{
-					regions.get(layer)
-						.bufferOffset((long) layer * bytesPerLayer)
-						.bufferRowLength(0)
-						.bufferImageHeight(0)
-						.imageOffset(o -> o.set(0, 0, 0))
-						.imageExtent(e -> e.width(LAYER_SIZE).height(LAYER_SIZE).depth(1));
-					regions.get(layer).imageSubresource()
-						.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
-						.mipLevel(0)
-						.baseArrayLayer(layer).layerCount(1);
+					VkBufferImageCopy.Buffer regions = VkBufferImageCopy.calloc(layerCount, copyStack);
+					for (int layer = 0; layer < layerCount; layer++)
+					{
+						regions.get(layer)
+							.bufferOffset((long) layer * bytesPerLayer)
+							.bufferRowLength(0)
+							.bufferImageHeight(0)
+							.imageOffset(o -> o.set(0, 0, 0))
+							.imageExtent(e -> e.width(LAYER_SIZE).height(LAYER_SIZE).depth(1));
+						regions.get(layer).imageSubresource()
+							.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
+							.mipLevel(0)
+							.baseArrayLayer(layer).layerCount(1);
+					}
+					vkCmdCopyBufferToImage(cmd, staging.handle(), image,
+						VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, regions);
 				}
-				vkCmdCopyBufferToImage(cmd, staging.handle(), image,
-					VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, regions);
 
 				// Mip cascade: blit i-1 → i, transitioning the source to
 				// SHADER_READ_ONLY once we're done reading it.
@@ -316,34 +319,37 @@ final class TextureArray implements AutoCloseable
 					int dstW = Math.max(1, srcW >> 1);
 					int dstH = Math.max(1, srcH >> 1);
 
-					transitionAllLayers(cmd, stack, level - 1, 1,
+					transitionAllLayers(cmd, level - 1, 1,
 						VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 						VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
 						VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
 
-					VkImageBlit.Buffer blits = VkImageBlit.calloc(layerCount, stack);
-					for (int layer = 0; layer < layerCount; layer++)
+					try (MemoryStack blitStack = stackPush())
 					{
-						VkImageBlit b = blits.get(layer);
-						b.srcOffsets(0).set(0, 0, 0);
-						b.srcOffsets(1).set(srcW, srcH, 1);
-						b.srcSubresource()
-							.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
-							.mipLevel(level - 1)
-							.baseArrayLayer(layer).layerCount(1);
-						b.dstOffsets(0).set(0, 0, 0);
-						b.dstOffsets(1).set(dstW, dstH, 1);
-						b.dstSubresource()
-							.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
-							.mipLevel(level)
-							.baseArrayLayer(layer).layerCount(1);
+						VkImageBlit.Buffer blits = VkImageBlit.calloc(layerCount, blitStack);
+						for (int layer = 0; layer < layerCount; layer++)
+						{
+							VkImageBlit b = blits.get(layer);
+							b.srcOffsets(0).set(0, 0, 0);
+							b.srcOffsets(1).set(srcW, srcH, 1);
+							b.srcSubresource()
+								.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
+								.mipLevel(level - 1)
+								.baseArrayLayer(layer).layerCount(1);
+							b.dstOffsets(0).set(0, 0, 0);
+							b.dstOffsets(1).set(dstW, dstH, 1);
+							b.dstSubresource()
+								.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
+								.mipLevel(level)
+								.baseArrayLayer(layer).layerCount(1);
+						}
+						vkCmdBlitImage(cmd,
+							image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+							image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+							blits, VK_FILTER_LINEAR);
 					}
-					vkCmdBlitImage(cmd,
-						image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-						image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-						blits, VK_FILTER_LINEAR);
 
-					transitionAllLayers(cmd, stack, level - 1, 1,
+					transitionAllLayers(cmd, level - 1, 1,
 						VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 						VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
 						VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT);
@@ -353,7 +359,7 @@ final class TextureArray implements AutoCloseable
 				}
 
 				// Last mip is still TRANSFER_DST.
-				transitionAllLayers(cmd, stack, MIP_LEVELS - 1, 1,
+				transitionAllLayers(cmd, MIP_LEVELS - 1, 1,
 					VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
 					VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
 					VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
@@ -375,25 +381,27 @@ final class TextureArray implements AutoCloseable
 		}
 	}
 
-	private void transitionAllLayers(VkCommandBuffer cmd, MemoryStack stack,
-									 int baseMip, int levelCount,
+	private void transitionAllLayers(VkCommandBuffer cmd, int baseMip, int levelCount,
 									 int oldLayout, int newLayout,
 									 int srcStage, int dstStage,
 									 int srcAccess, int dstAccess)
 	{
-		VkImageMemoryBarrier.Buffer barrier = VkImageMemoryBarrier.calloc(1, stack);
-		barrier.get(0)
-			.sType$Default()
-			.srcAccessMask(srcAccess).dstAccessMask(dstAccess)
-			.oldLayout(oldLayout).newLayout(newLayout)
-			.srcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
-			.dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
-			.image(image)
-			.subresourceRange(r -> r
-				.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
-				.baseMipLevel(baseMip).levelCount(levelCount)
-				.baseArrayLayer(0).layerCount(this.layerCount));
-		vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, null, null, barrier);
+		try (MemoryStack stack = stackPush())
+		{
+			VkImageMemoryBarrier.Buffer barrier = VkImageMemoryBarrier.calloc(1, stack);
+			barrier.get(0)
+				.sType$Default()
+				.srcAccessMask(srcAccess).dstAccessMask(dstAccess)
+				.oldLayout(oldLayout).newLayout(newLayout)
+				.srcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+				.dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+				.image(image)
+				.subresourceRange(r -> r
+					.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
+					.baseMipLevel(baseMip).levelCount(levelCount)
+					.baseArrayLayer(0).layerCount(this.layerCount));
+			vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, null, null, barrier);
+		}
 	}
 
 	@Override

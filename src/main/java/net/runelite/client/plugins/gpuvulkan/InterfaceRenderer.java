@@ -10,7 +10,7 @@ import net.runelite.client.plugins.gpuvulkan.gfx.BindGroupLayout;
 import net.runelite.client.plugins.gpuvulkan.gfx.BindGroupLayoutDesc;
 import net.runelite.client.plugins.gpuvulkan.gfx.RenderPipeline;
 import net.runelite.client.plugins.gpuvulkan.gfx.RenderPipelineDesc;
-import net.runelite.client.plugins.gpuvulkan.gfx.Renderer;
+import net.runelite.client.plugins.gpuvulkan.gfx.RenderDevice;
 import net.runelite.client.plugins.gpuvulkan.gfx.ShaderModule;
 import net.runelite.client.plugins.gpuvulkan.gfx.ShaderStage;
 import net.runelite.client.plugins.gpuvulkan.gfx.StreamingImage;
@@ -25,7 +25,7 @@ import org.lwjgl.vulkan.VkCommandBuffer;
  */
 final class InterfaceRenderer implements AutoCloseable
 {
-	private final Renderer renderer;
+	private final RenderDevice renderer;
 	private final BindGroupLayout bgl;
 	private final ShaderModule vertex;
 	private final ShaderModule fragment;
@@ -36,7 +36,7 @@ final class InterfaceRenderer implements AutoCloseable
 	private int width;
 	private int height;
 
-	InterfaceRenderer(Renderer renderer)
+	InterfaceRenderer(RenderDevice renderer)
 	{
 		this.renderer = renderer;
 		this.bgl = renderer.createBindGroupLayout(BindGroupLayoutDesc.builder()

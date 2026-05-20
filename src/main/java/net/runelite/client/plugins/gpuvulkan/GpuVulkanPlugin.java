@@ -2,6 +2,8 @@ package net.runelite.client.plugins.gpuvulkan;
 
 import com.google.inject.Provides;
 import java.awt.Canvas;
+import java.util.ArrayList;
+import java.util.List;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.BufferProvider;
@@ -37,7 +39,7 @@ import net.runelite.client.plugins.PluginManager;
 	loadInSafeMode = false
 )
 @Slf4j
-public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
+public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRenderBackend
 {
 	@Inject
 	private GpuVulkanPluginConfig config;
@@ -59,10 +61,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 	private DepthBuffer depthBuffer;
 	private MsaaColorBuffer msaaColor;
 	private RenderPass renderPass;
-	private SceneRenderer sceneRenderer;
 	private RegionManager regionManager;
 	private TextureArray textureArray;
-	private InterfaceRenderer interfaceRenderer;
+	private RenderExtensions renderExtensions;
 	private net.runelite.client.plugins.gpuvulkan.gfx.Renderer gfx;
 	private net.runelite.rlawt.AWTContext awtContext;
 	private Framebuffers framebuffers;
@@ -78,6 +79,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 	private volatile double lastCamPitch, lastCamYaw;
 	private volatile boolean startRequested;
 	private static boolean shutdownHookRegistered;
+	private final List<ExtensionRegistration> queuedExtensions = new ArrayList<>();
 
 	/** Read by the JVM shutdown hook to find the live instance — must be
 	 *  static because the hook outlives any single plugin instance. */
@@ -266,20 +268,25 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 					config.anisotropicFilteringLevel());
 				disposables.add(textureArray);
 
-				sceneRenderer = new SceneRenderer(device, sync, renderPass, textureArray);
-				applyWireframeConfig();
-				disposables.add(sceneRenderer);
-
 				regionManager = new RegionManager();
 
-				interfaceRenderer = new InterfaceRenderer(gfx);
-				disposables.add(interfaceRenderer);
+				renderExtensions = new RenderExtensions(
+					new DefaultVulkanRenderContext(client, config, gfx, device, sync, renderPass, textureArray));
+				renderExtensions.register(new BaseRenderer());
+				synchronized (queuedExtensions)
+				{
+					for (ExtensionRegistration registration : queuedExtensions)
+					{
+						registration.attach(renderExtensions);
+					}
+				}
+				disposables.add(renderExtensions);
 
 				framebuffers = new Framebuffers(device, renderPass, swapchain, depthBuffer, msaaColor);
 				disposables.add(framebuffers);
 
-				renderer = new VulkanRenderer(device, renderPass, sceneRenderer,
-					interfaceRenderer, swapchain, depthBuffer, msaaColor, framebuffers, sync);
+				renderer = new VulkanRenderer(device, renderPass, renderExtensions,
+					swapchain, depthBuffer, msaaColor, framebuffers, sync);
 				disposables.add(renderer);
 
 				log.info("Vulkan ready: {} ({}x{}, {} swapchain images)",
@@ -357,6 +364,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 				{
 					disposables.close();
 					disposables = null;
+					markExtensionBackendDetached();
 				}
 				if (awtContext != null)
 				{
@@ -378,10 +386,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 				depthBuffer = null;
 				msaaColor = null;
 				renderPass = null;
-				sceneRenderer = null;
 				regionManager = null;
 				textureArray = null;
-				interfaceRenderer = null;
+				renderExtensions = null;
 				gfx = null;
 				framebuffers = null;
 				sync = null;
@@ -431,6 +438,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 			{
 				disposables.close();
 				disposables = null;
+				markExtensionBackendDetached();
 			}
 
 			if (awtContext != null)
@@ -455,9 +463,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 			depthBuffer = null;
 			msaaColor = null;
 			renderPass = null;
-			sceneRenderer = null;
 			textureArray = null;
-			interfaceRenderer = null;
+			renderExtensions = null;
 			gfx = null;
 			framebuffers = null;
 			sync = null;
@@ -472,9 +479,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 	public void onConfigChanged(ConfigChanged ev)
 	{
 		if (!GpuVulkanPluginConfig.GROUP.equals(ev.getGroup())) return;
-		if (sceneRenderer != null && ev.getKey() != null && ev.getKey().startsWith("wireframe"))
+		if (renderExtensions != null)
 		{
-			applyWireframeConfig();
+			renderExtensions.onConfigChanged(ev);
 		}
 	}
 
@@ -484,11 +491,11 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 		// Drop captured scene on logout / hop / connection-lost so the
 		// login screen doesn't render with the previous world bleeding
 		// through. LOADING is kept (next region is streaming in).
-		if (sceneRenderer == null) return;
+		if (renderExtensions == null) return;
 		net.runelite.api.GameState state = ev.getGameState();
 		if (state.getState() < net.runelite.api.GameState.LOADING.getState())
 		{
-			sceneRenderer.invalidateCapturedScene();
+			renderExtensions.invalidateCapturedScene();
 			capturedScene = null;
 		}
 	}
@@ -506,15 +513,89 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 		return false;
 	}
 
-	private void applyWireframeConfig()
+	@Override
+	public boolean isReady()
 	{
-		if (sceneRenderer == null) return;
-		sceneRenderer.setWireframe(SceneRenderer.Layer.TERRAIN,      config.wireframeTerrain());
-		sceneRenderer.setWireframe(SceneRenderer.Layer.WALLS,        config.wireframeWalls());
-		sceneRenderer.setWireframe(SceneRenderer.Layer.DECORATIVE,   config.wireframeDecorative());
-		sceneRenderer.setWireframe(SceneRenderer.Layer.GROUND,       config.wireframeGround());
-		sceneRenderer.setWireframe(SceneRenderer.Layer.GAME_OBJECTS, config.wireframeGameObjects());
-		sceneRenderer.setWireframe(SceneRenderer.Layer.DYNAMIC,      config.wireframeDynamic());
+		return renderExtensions != null;
+	}
+
+	@Override
+	public AutoCloseable registerExtension(VulkanRenderExtension extension)
+	{
+		ExtensionRegistration registration = new ExtensionRegistration(extension);
+		synchronized (queuedExtensions)
+		{
+			queuedExtensions.add(registration);
+			if (renderExtensions != null)
+			{
+				registration.attach(renderExtensions);
+			}
+		}
+		return registration;
+	}
+
+	private final class ExtensionRegistration implements AutoCloseable
+	{
+		private final VulkanRenderExtension extension;
+		private RenderExtensions attachedRegistry;
+		private boolean closed;
+		private boolean closedByBackend;
+
+		private ExtensionRegistration(VulkanRenderExtension extension)
+		{
+			this.extension = extension;
+		}
+
+		private void attach(RenderExtensions registry)
+		{
+			if (closed || attachedRegistry == registry)
+			{
+				return;
+			}
+			registry.register(extension);
+			attachedRegistry = registry;
+			closedByBackend = false;
+		}
+
+		private void markBackendDetached()
+		{
+			attachedRegistry = null;
+			closedByBackend = true;
+		}
+
+		@Override
+		public void close()
+		{
+			synchronized (queuedExtensions)
+			{
+				if (closed)
+				{
+					return;
+				}
+				closed = true;
+				queuedExtensions.remove(this);
+				if (attachedRegistry != null)
+				{
+					attachedRegistry.unregister(extension);
+					attachedRegistry = null;
+				}
+				else if (!closedByBackend)
+				{
+					extension.close();
+				}
+			}
+		}
+	}
+
+	private void markExtensionBackendDetached()
+	{
+		synchronized (queuedExtensions)
+		{
+			for (ExtensionRegistration registration : queuedExtensions)
+			{
+				registration.markBackendDetached();
+			}
+		}
 	}
 
 	// ---- DrawCallbacks --------------------------------------------------
@@ -565,11 +646,11 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 		// Camera doubles here come from a different reference frame than
 		// preSceneDraw's floats — we use preSceneDraw's exclusively for the
 		// projection MVP, so don't overwrite them here.
-		if (sceneRenderer != null)
+		if (renderExtensions != null)
 		{
-			sceneRenderer.beginFrame();
+			renderExtensions.beginFrame();
 			captureActors();
-			sceneRenderer.captureDynamicPending();
+			renderExtensions.captureDynamicPending();
 		}
 	}
 
@@ -621,15 +702,15 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 		net.runelite.api.Projection proj = lastWorldProjection;
 		if (proj != null)
 		{
-			sceneRenderer.captureModelSorted(proj, m, actor.getCurrentOrientation(), loc.getX(), tileH, loc.getY());
+			renderExtensions.captureModel(proj, m, actor.getCurrentOrientation(), loc.getX(), tileH, loc.getY());
 		}
 		else
 		{
-			sceneRenderer.captureModel(m, actor.getCurrentOrientation(), loc.getX(), tileH, loc.getY());
+			renderExtensions.captureModel(m, actor.getCurrentOrientation(), loc.getX(), tileH, loc.getY());
 		}
 	}
 
-	/** Identity of the scene captured into sceneRenderer. swapScene /
+	/** Identity of the scene captured into render extensions. swapScene /
 	 *  loadScene callbacks are unreliable in this engine version, so we
 	 *  detect scene transitions by reference comparison instead. */
 	private Scene capturedScene;
@@ -645,14 +726,14 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 		// reliable signal that the scene has been swapped is the Scene object
 		// reference itself changing between frames. Re-capture on identity
 		// change so geometry stays fresh after chunk transitions.
-		if (scene != capturedScene && sceneRenderer != null)
+		if (scene != capturedScene && renderExtensions != null)
 		{
 			capturedScene = scene;
 			captureSceneNow(scene);
 		}
-		if (sceneRenderer != null)
+		if (renderExtensions != null)
 		{
-			sceneRenderer.setLevelRange(minLevel, maxLevel);
+			renderExtensions.setLevelRange(minLevel, maxLevel);
 		}
 		lastCamX = cameraX;
 		lastCamY = cameraY;
@@ -662,7 +743,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 		// Drives the engine's per-entity clickbox loops; without it only
 		// tiles within the engine's tiny default range register clicks.
 		scene.setDrawDistance(config.drawDistance());
-		if (sceneRenderer != null) sceneRenderer.setHideRoofIds(hideRoofIds);
+		if (renderExtensions != null) renderExtensions.setHideRoofIds(hideRoofIds);
 	}
 
 	@Override
@@ -679,7 +760,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 		// preSceneDraw (engine doesn't reliably call swapScene), but if it
 		// does, preSceneDraw's check will see scene == capturedScene and
 		// won't double-capture.
-		if (sceneRenderer != null)
+		if (renderExtensions != null)
 		{
 			capturedScene = scene;
 			captureSceneNow(scene);
@@ -696,9 +777,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 
 	private void captureSceneNow(Scene scene)
 	{
-		if (sceneRenderer == null) return;
+		if (renderExtensions == null) return;
 		prepareScene(scene);
-		sceneRenderer.captureScene(scene);
+		renderExtensions.captureScene(scene);
 	}
 
 	@Override
@@ -750,7 +831,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 		if (tileObject == null) return;
 		if (r instanceof net.runelite.api.Actor) return;
 		lastWorldProjection = worldProjection;
-		if (sceneRenderer != null) sceneRenderer.captureModelSorted(worldProjection, m, orient, x, y, z);
+		if (renderExtensions != null) renderExtensions.captureModel(worldProjection, m, orient, x, y, z);
 	}
 
 	@Override
@@ -762,7 +843,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 		// captureActors() already drew it.
 		if (gameObject == null) return;
 		lastWorldProjection = worldProjection;
-		if (sceneRenderer != null) sceneRenderer.captureModelSorted(worldProjection, m, orient, x, y, z);
+		if (renderExtensions != null) renderExtensions.captureModel(worldProjection, m, orient, x, y, z);
 	}
 
 	@Override
@@ -780,12 +861,12 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 		// animations and the home-teleport graphic stop rendering without
 		// it — even though the stats counter above says this method never
 		// runs. We don't fully understand why yet; see issue #1.
-		if (sceneRenderer == null) return;
+		if (renderExtensions == null) return;
 		if (renderable instanceof net.runelite.api.Actor) return;
 		Model m = (renderable instanceof Model) ? (Model) renderable : renderable.getModel();
 		if (m == null) return;
 		lastWorldProjection = projection;
-		sceneRenderer.captureModelSorted(projection, m, orientation, x, y, z);
+		renderExtensions.captureModel(projection, m, orientation, x, y, z);
 	}
 
 	@Override
@@ -800,5 +881,11 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks
 	GpuVulkanPluginConfig provideConfig(ConfigManager cm)
 	{
 		return cm.getConfig(GpuVulkanPluginConfig.class);
+	}
+
+	@Provides
+	VulkanRenderBackend provideVulkanRenderBackend()
+	{
+		return this;
 	}
 }
