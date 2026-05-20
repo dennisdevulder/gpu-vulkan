@@ -646,6 +646,9 @@ final class SceneRenderer implements AutoCloseable
 
 		float[] uv = uvScratch;
 		int wrote = 0;
+		int texturedFaces = 0;
+		int overrideFaces = 0;
+		long uvNanos = 0;
 		for (int f = 0; f < faces; f++)
 		{
 			int col1 = c1 != null ? c1[f] : 0;
@@ -669,9 +672,12 @@ final class SceneRenderer implements AutoCloseable
 			float u0 = 0, v0 = 0, u1 = 0, v1 = 0, u2 = 0, v2 = 0;
 			if (faceTextures != null && faceTextures[f] != -1)
 			{
+				long uvStart = System.nanoTime();
 				texLayer = (faceTextures[f] & 0xFFFF) + 1;
 				computeFaceUvs(uv, vx, vy, vz, fa[f], fb[f], fc[f],
 					textureFaces, texIndicesA, texIndicesB, texIndicesC, f);
+				uvNanos += System.nanoTime() - uvStart;
+				texturedFaces++;
 				u0 = uv[0]; v0 = uv[1];
 				u1 = uv[2]; v1 = uv[3];
 				u2 = uv[4]; v2 = uv[5];
@@ -682,6 +688,7 @@ final class SceneRenderer implements AutoCloseable
 			// mirrors stock SceneUploader.uploadTempModel scoping.
 			if (hasOverride && texLayer == 0)
 			{
+				overrideFaces++;
 				col1 = applyHslOverride(col1, overrideHue, overrideSat, overrideLum, overrideAmount);
 				col2 = applyHslOverride(col2, overrideHue, overrideSat, overrideLum, overrideAmount);
 				col3 = applyHslOverride(col3, overrideHue, overrideSat, overrideLum, overrideAmount);
@@ -692,15 +699,43 @@ final class SceneRenderer implements AutoCloseable
 			int trans = faceTransparencies != null ? (faceTransparencies[f] & 0xFF) : 0;
 			int packedTexLayer = texLayer | (bias << 16) | (trans << 24);
 
-			writeRotatedVertex(vx[fa[f]], vy[fa[f]], vz[fa[f]], cos, sin, worldX, worldY, worldZ, col1, u0, v0, packedTexLayer);
-			writeRotatedVertex(vx[fb[f]], vy[fb[f]], vz[fb[f]], cos, sin, worldX, worldY, worldZ, col2, u1, v1, packedTexLayer);
-			writeRotatedVertex(vx[fc[f]], vy[fc[f]], vz[fc[f]], cos, sin, worldX, worldY, worldZ, col3, u2, v2, packedTexLayer);
+			int ia = fa[f];
+			int ib = fb[f];
+			int ic = fc[f];
+			if (col1 == col2 && col1 == col3)
+			{
+				int rgbOffset = (col1 & 0xFFFF) * 3;
+				float light = (float) (col1 & 0xFFFF);
+				float r = HSL_RGB[rgbOffset];
+				float g = HSL_RGB[rgbOffset + 1];
+				float b = HSL_RGB[rgbOffset + 2];
+				writeRotatedVertexRgb(vx[ia], vy[ia], vz[ia], cos, sin, worldX, worldY, worldZ, light, r, g, b, u0, v0, packedTexLayer);
+				writeRotatedVertexRgb(vx[ib], vy[ib], vz[ib], cos, sin, worldX, worldY, worldZ, light, r, g, b, u1, v1, packedTexLayer);
+				writeRotatedVertexRgb(vx[ic], vy[ic], vz[ic], cos, sin, worldX, worldY, worldZ, light, r, g, b, u2, v2, packedTexLayer);
+			}
+			else
+			{
+				int rgbOffset1 = (col1 & 0xFFFF) * 3;
+				int rgbOffset2 = (col2 & 0xFFFF) * 3;
+				int rgbOffset3 = (col3 & 0xFFFF) * 3;
+				writeRotatedVertexRgb(vx[ia], vy[ia], vz[ia], cos, sin, worldX, worldY, worldZ,
+					(float) (col1 & 0xFFFF), HSL_RGB[rgbOffset1], HSL_RGB[rgbOffset1 + 1], HSL_RGB[rgbOffset1 + 2], u0, v0, packedTexLayer);
+				writeRotatedVertexRgb(vx[ib], vy[ib], vz[ib], cos, sin, worldX, worldY, worldZ,
+					(float) (col2 & 0xFFFF), HSL_RGB[rgbOffset2], HSL_RGB[rgbOffset2 + 1], HSL_RGB[rgbOffset2 + 2], u1, v1, packedTexLayer);
+				writeRotatedVertexRgb(vx[ic], vy[ic], vz[ic], cos, sin, worldX, worldY, worldZ,
+					(float) (col3 & 0xFFFF), HSL_RGB[rgbOffset3], HSL_RGB[rgbOffset3 + 1], HSL_RGB[rgbOffset3 + 2], u2, v2, packedTexLayer);
+			}
 			wrote += 3;
 		}
 		vertexCount += wrote;
 		stats.unsortedModels.incrementAndGet();
 		stats.unsortedFaces.addAndGet(wrote / 3);
-		stats.addNanos(stats.modelEmitNanos, emitStart);
+		long emitNanos = System.nanoTime() - emitStart;
+		stats.modelEmitNanos.addAndGet(emitNanos);
+		stats.modelUnsortedEmitNanos.addAndGet(emitNanos);
+		stats.modelUvNanos.addAndGet(uvNanos);
+		stats.texturedEmitFaces.addAndGet(texturedFaces);
+		stats.overrideEmitFaces.addAndGet(overrideFaces);
 	}
 
 	/**
@@ -800,6 +835,9 @@ final class SceneRenderer implements AutoCloseable
 
 		int wrote = 0;
 		long emitStart = System.nanoTime();
+		int texturedFaces = 0;
+		int overrideFaces = 0;
+		long uvNanos = 0;
 		for (int i = 0; i < faces; i++)
 		{
 			int f = sorter.sortedFaces[i];
@@ -822,9 +860,12 @@ final class SceneRenderer implements AutoCloseable
 			float u0 = 0, v0 = 0, u1 = 0, v1 = 0, u2 = 0, v2 = 0;
 			if (faceTextures != null && faceTextures[f] != -1)
 			{
+				long uvStart = System.nanoTime();
 				texLayer = (faceTextures[f] & 0xFFFF) + 1;
 				computeFaceUvs(uv, vxs, vys, vzs, fa[f], fb[f], fc[f],
 					textureFaces, texIndicesA, texIndicesB, texIndicesC, f);
+				uvNanos += System.nanoTime() - uvStart;
+				texturedFaces++;
 				u0 = uv[0]; v0 = uv[1];
 				u1 = uv[2]; v1 = uv[3];
 				u2 = uv[4]; v2 = uv[5];
@@ -832,6 +873,7 @@ final class SceneRenderer implements AutoCloseable
 
 			if (hasOverride && texLayer == 0)
 			{
+				overrideFaces++;
 				col1 = applyHslOverride(col1, overrideHue, overrideSat, overrideLum, overrideAmount);
 				col2 = applyHslOverride(col2, overrideHue, overrideSat, overrideLum, overrideAmount);
 				col3 = applyHslOverride(col3, overrideHue, overrideSat, overrideLum, overrideAmount);
@@ -841,10 +883,32 @@ final class SceneRenderer implements AutoCloseable
 			int trans = faceTransparencies != null ? (faceTransparencies[f] & 0xFF) : 0;
 			int packedTexLayer = texLayer | (bias << 16) | (trans << 24);
 
-			// writeHslVert (no rotation) — positions already world-space.
-			writeHslVert(lx[fa[f]], ly[fa[f]], lz[fa[f]], col1, u0, v0, packedTexLayer);
-			writeHslVert(lx[fb[f]], ly[fb[f]], lz[fb[f]], col2, u1, v1, packedTexLayer);
-			writeHslVert(lx[fc[f]], ly[fc[f]], lz[fc[f]], col3, u2, v2, packedTexLayer);
+			int ia = fa[f];
+			int ib = fb[f];
+			int ic = fc[f];
+			if (col1 == col2 && col1 == col3)
+			{
+				int rgbOffset = (col1 & 0xFFFF) * 3;
+				float light = (float) (col1 & 0xFFFF);
+				float r = HSL_RGB[rgbOffset];
+				float g = HSL_RGB[rgbOffset + 1];
+				float b = HSL_RGB[rgbOffset + 2];
+				writePackedVertexRgb(lx[ia], ly[ia], lz[ia], light, r, g, b, u0, v0, packedTexLayer);
+				writePackedVertexRgb(lx[ib], ly[ib], lz[ib], light, r, g, b, u1, v1, packedTexLayer);
+				writePackedVertexRgb(lx[ic], ly[ic], lz[ic], light, r, g, b, u2, v2, packedTexLayer);
+			}
+			else
+			{
+				int rgbOffset1 = (col1 & 0xFFFF) * 3;
+				int rgbOffset2 = (col2 & 0xFFFF) * 3;
+				int rgbOffset3 = (col3 & 0xFFFF) * 3;
+				writePackedVertexRgb(lx[ia], ly[ia], lz[ia],
+					(float) (col1 & 0xFFFF), HSL_RGB[rgbOffset1], HSL_RGB[rgbOffset1 + 1], HSL_RGB[rgbOffset1 + 2], u0, v0, packedTexLayer);
+				writePackedVertexRgb(lx[ib], ly[ib], lz[ib],
+					(float) (col2 & 0xFFFF), HSL_RGB[rgbOffset2], HSL_RGB[rgbOffset2 + 1], HSL_RGB[rgbOffset2 + 2], u1, v1, packedTexLayer);
+				writePackedVertexRgb(lx[ic], ly[ic], lz[ic],
+					(float) (col3 & 0xFFFF), HSL_RGB[rgbOffset3], HSL_RGB[rgbOffset3 + 1], HSL_RGB[rgbOffset3 + 2], u2, v2, packedTexLayer);
+			}
 			wrote += 3;
 		}
 		vertexCount += wrote;
@@ -859,7 +923,12 @@ final class SceneRenderer implements AutoCloseable
 			stats.cullOnlyModels.incrementAndGet();
 		}
 		stats.sortedFaces.addAndGet(wrote / 3);
-		stats.addNanos(stats.modelEmitNanos, emitStart);
+		long emitNanos = System.nanoTime() - emitStart;
+		stats.modelEmitNanos.addAndGet(emitNanos);
+		stats.modelSortedEmitNanos.addAndGet(emitNanos);
+		stats.modelUvNanos.addAndGet(uvNanos);
+		stats.texturedEmitFaces.addAndGet(texturedFaces);
+		stats.overrideEmitFaces.addAndGet(overrideFaces);
 	}
 
 	private static int countTransparentFaces(Model m)
@@ -1136,6 +1205,17 @@ final class SceneRenderer implements AutoCloseable
 		writePackedVertex(rx + wx, ly + wy, rz + wz, hsl16, u, v, texLayer);
 	}
 
+	private void writeRotatedVertexRgb(float lx, float ly, float lz,
+									   float cos, float sin,
+									   int wx, int wy, int wz,
+									   float light, float r, float g, float b,
+									   float u, float v, int texLayer)
+	{
+		float rx = lx * cos + lz * sin;
+		float rz = -lx * sin + lz * cos;
+		writePackedVertexRgb(rx + wx, ly + wy, rz + wz, light, r, g, b, u, v, texLayer);
+	}
+
 	private void writeHslVert(float x, float y, float z, int hsl16, float u, float v, int texLayer)
 	{
 		writePackedVertex(x, y, z, hsl16, u, v, texLayer);
@@ -1149,14 +1229,21 @@ final class SceneRenderer implements AutoCloseable
 		// RGB for the smooth look (smoothBanding=1). Vertex layout is
 		// padded to vec4 alignment for MoltenVK — see ScenePipeline.VERTEX_STRIDE.
 		float light = (float) (hsl16 & 0xFFFF);
+		writePackedVertexRgb(x, y, z, light, HSL_RGB[rgbOffset], HSL_RGB[rgbOffset + 1], HSL_RGB[rgbOffset + 2], u, v, texLayer);
+	}
+
+	private void writePackedVertexRgb(float x, float y, float z,
+									  float light, float r, float g, float b,
+									  float u, float v, int texLayer)
+	{
 		long p = writePtr;
 		MemoryUtil.memPutFloat(p, x);
 		MemoryUtil.memPutFloat(p + 4, y);
 		MemoryUtil.memPutFloat(p + 8, z);
 		MemoryUtil.memPutFloat(p + 12, 0f);
-		MemoryUtil.memPutFloat(p + 16, HSL_RGB[rgbOffset]);
-		MemoryUtil.memPutFloat(p + 20, HSL_RGB[rgbOffset + 1]);
-		MemoryUtil.memPutFloat(p + 24, HSL_RGB[rgbOffset + 2]);
+		MemoryUtil.memPutFloat(p + 16, r);
+		MemoryUtil.memPutFloat(p + 20, g);
+		MemoryUtil.memPutFloat(p + 24, b);
 		MemoryUtil.memPutFloat(p + 28, 0f);
 		MemoryUtil.memPutFloat(p + 32, light);
 		MemoryUtil.memPutFloat(p + 36, u);

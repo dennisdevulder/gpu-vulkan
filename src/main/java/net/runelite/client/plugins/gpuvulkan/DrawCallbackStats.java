@@ -61,6 +61,9 @@ final class DrawCallbackStats
 	final AtomicLong modelFullSortNanos = new AtomicLong();
 	final AtomicLong modelCullOnlyNanos = new AtomicLong();
 	final AtomicLong modelEmitNanos = new AtomicLong();
+	final AtomicLong modelSortedEmitNanos = new AtomicLong();
+	final AtomicLong modelUnsortedEmitNanos = new AtomicLong();
+	final AtomicLong modelUvNanos = new AtomicLong();
 	final AtomicLong sortedModels = new AtomicLong();
 	final AtomicLong fullSortModels = new AtomicLong();
 	final AtomicLong cullOnlyModels = new AtomicLong();
@@ -69,6 +72,8 @@ final class DrawCallbackStats
 	final AtomicLong sortedFaces = new AtomicLong();
 	final AtomicLong unsortedFaces = new AtomicLong();
 	final AtomicLong fullSortTransparentFaces = new AtomicLong();
+	final AtomicLong texturedEmitFaces = new AtomicLong();
+	final AtomicLong overrideEmitFaces = new AtomicLong();
 
 	// Sample fields — last-write-wins, fine for "what's the camera at"
 	volatile double lastCamX;
@@ -132,6 +137,9 @@ final class DrawCallbackStats
 		long fullSort = modelFullSortNanos.getAndSet(0);
 		long cullOnly = modelCullOnlyNanos.getAndSet(0);
 		long emit = modelEmitNanos.getAndSet(0);
+		long sortedEmit = modelSortedEmitNanos.getAndSet(0);
+		long unsortedEmit = modelUnsortedEmitNanos.getAndSet(0);
+		long uv = modelUvNanos.getAndSet(0);
 		long sortedModelCount = sortedModels.getAndSet(0);
 		long fullSortModelCount = fullSortModels.getAndSet(0);
 		long cullOnlyModelCount = cullOnlyModels.getAndSet(0);
@@ -140,9 +148,11 @@ final class DrawCallbackStats
 		long sortedFaceCount = sortedFaces.getAndSet(0);
 		long unsortedFaceCount = unsortedFaces.getAndSet(0);
 		long transparentFaceCount = fullSortTransparentFaces.getAndSet(0);
+		long texturedFaceCount = texturedEmitFaces.getAndSet(0);
+		long overrideFaceCount = overrideEmitFaces.getAndSet(0);
 
 		log.info(String.format(
-			"recon | scene=%d preSD=%d postSD=%d swap=%d load=%d | paint=%d tileModel=%d | zoneOpq=%d zoneAlpha=%d | dyn=%d temp=%d pass=%d single=%d | dynVerts=%d dynFaces=%d maxF=%d | cam=(%.1f, %.1f, %.1f) plane=%d | anim=%d | cpu/frame avg ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f | scene avg ms: begin=%.2f actors=%.2f pending=%.2f staticCaptureTotal=%.2f | model ms: sort=%.2f full=%.2f cull=%.2f emit=%.2f | models sorted=%d full=%d cull=%d unsorted=%d fallback=%d | faces sorted=%d unsorted=%d fullTrans=%d",
+			"recon | scene=%d preSD=%d postSD=%d swap=%d load=%d | paint=%d tileModel=%d | zoneOpq=%d zoneAlpha=%d | dyn=%d temp=%d pass=%d single=%d | dynVerts=%d dynFaces=%d maxF=%d | cam=(%.1f, %.1f, %.1f) plane=%d | anim=%d | cpu/frame avg ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f | scene avg ms: begin=%.2f actors=%.2f pending=%.2f staticCaptureTotal=%.2f | model ms: sort=%.2f full=%.2f cull=%.2f emit=%.2f sortedEmit=%.2f unsortedEmit=%.2f uv=%.2f | models sorted=%d full=%d cull=%d unsorted=%d fallback=%d | faces sorted=%d unsorted=%d tex=%d override=%d fullTrans=%d",
 			drawSceneCount,
 			preSceneDraw.getAndSet(0),
 			postDrawScene.getAndSet(0),
@@ -179,6 +189,9 @@ final class DrawCallbackStats
 			totalMs(fullSort),
 			totalMs(cullOnly),
 			totalMs(emit),
+			totalMs(sortedEmit),
+			totalMs(unsortedEmit),
+			totalMs(uv),
 			sortedModelCount,
 			fullSortModelCount,
 			cullOnlyModelCount,
@@ -186,6 +199,8 @@ final class DrawCallbackStats
 			fallbackModelCount,
 			sortedFaceCount,
 			unsortedFaceCount,
+			texturedFaceCount,
+			overrideFaceCount,
 			transparentFaceCount
 		));
 	}
