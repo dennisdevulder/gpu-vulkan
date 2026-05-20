@@ -3,6 +3,11 @@
 Vulkan-backed renderer plugin for [RuneLite](https://runelite.net). A
 work-in-progress alternative to the stock OpenGL GPU plugin.
 
+This repository is also the first pass at a reusable Vulkan backend for
+RuneLite plugins. The goal is that plugin authors do not each have to solve
+platform surfaces, Vulkan instance/device creation, swapchain recreation,
+frame sync, UI compositing, and DrawCallbacks ownership from scratch.
+
 Active development happens in the parent `runelite-vkport` tree; this
 standalone repo is a snapshot intended for cross-platform development
 (macOS, Windows, Wayland) where you don't want to pull the whole client
@@ -93,13 +98,62 @@ LWJGL Vulkan dependency, so RuneLite needs to already have
 `lwjgl-vulkan` on its classpath — which the stock installer does not.
 For a self-contained binary use `shadowJar` (#3 above).
 
+## Vulkan backend API
+
+`GpuVulkanPlugin` owns RuneLite's `DrawCallbacks` slot and exposes a small
+backend service:
+
+```java
+@Inject
+private VulkanRenderBackend vulkanBackend;
+
+private AutoCloseable registration;
+
+void start()
+{
+    registration = vulkanBackend.registerExtension(new MyRenderExtension());
+}
+
+void stop() throws Exception
+{
+    if (registration != null)
+    {
+        registration.close();
+    }
+}
+```
+
+Extensions implement `VulkanRenderExtension`. The backend fans out scene
+capture, dynamic model capture, config changes, pre-renderpass upload hooks,
+and in-renderpass command recording through that interface. The current
+stock-parity scene/UI renderer is registered through the same path as
+`BaseRenderer`, so this plugin exercises the extension model
+instead of bypassing it.
+
+`VulkanRenderContext` exposes the shared rendering-device facade through
+`renderer()` for shader modules, bind groups, pipelines and streaming images.
+Extensions that want the stock scene capture/draw path can request their own
+`VulkanSceneRenderer` through `createSceneRenderer()` instead of touching
+backend-owned Vulkan internals directly.
+
+`VulkanRenderContext.encode()` exposes Vulkan video encode capability data for
+plugins such as trackers/recorders. It reports whether the selected physical
+device has a video encode queue and H.264/H.265/AV1 encode extensions. The
+current backend does not create an encode queue yet, so consumers must check
+`VulkanEncodeContext.isAvailable()` before using queue handles.
+
+The API is intentionally narrow right now. It is meant to establish the
+backend boundary for future RuneLite Vulkan work, not to guarantee that HD
+plugins can already swap in advanced materials, lighting, shadows, or
+post-processing without additional API design.
+
 ## Repo layout
 
 ```
 src/main/java/...      plugin sources
 src/main/shaders/...   GLSL — compiled to SPIR-V at build time
 src/test/java/...      IDE-run main
-build.gradle.kts       Gradle build (shader compile task, deps)
+build.gradle           Gradle build (shader compile task, deps)
 runelite-plugin.properties   plugin-hub-style descriptor
 KNOWN_ISSUES.md        engineering notes; read before opening a PR
 ```

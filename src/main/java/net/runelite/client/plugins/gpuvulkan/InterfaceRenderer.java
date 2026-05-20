@@ -10,7 +10,7 @@ import net.runelite.client.plugins.gpuvulkan.gfx.BindGroupLayout;
 import net.runelite.client.plugins.gpuvulkan.gfx.BindGroupLayoutDesc;
 import net.runelite.client.plugins.gpuvulkan.gfx.RenderPipeline;
 import net.runelite.client.plugins.gpuvulkan.gfx.RenderPipelineDesc;
-import net.runelite.client.plugins.gpuvulkan.gfx.Renderer;
+import net.runelite.client.plugins.gpuvulkan.gfx.RenderDevice;
 import net.runelite.client.plugins.gpuvulkan.gfx.ShaderModule;
 import net.runelite.client.plugins.gpuvulkan.gfx.ShaderStage;
 import net.runelite.client.plugins.gpuvulkan.gfx.StreamingImage;
@@ -25,7 +25,7 @@ import org.lwjgl.vulkan.VkCommandBuffer;
  */
 final class InterfaceRenderer implements AutoCloseable
 {
-	private final Renderer renderer;
+	private final RenderDevice renderer;
 	private final BindGroupLayout bgl;
 	private final ShaderModule vertex;
 	private final ShaderModule fragment;
@@ -36,7 +36,7 @@ final class InterfaceRenderer implements AutoCloseable
 	private int width;
 	private int height;
 
-	InterfaceRenderer(Renderer renderer)
+	InterfaceRenderer(RenderDevice renderer)
 	{
 		this.renderer = renderer;
 		this.bgl = renderer.createBindGroupLayout(BindGroupLayoutDesc.builder()
@@ -70,11 +70,15 @@ final class InterfaceRenderer implements AutoCloseable
 		}
 	}
 
-	void recordDraw(VkCommandBuffer cmd, int overlayColor)
+	void recordDraw(VulkanFrameContext frame)
 	{
 		if (bindGroup == null) return;
 		try (MemoryStack stack = MemoryStack.stackPush())
 		{
+			int targetWidth = frame.targetWidth();
+			int targetHeight = frame.targetHeight();
+			VkCommandBuffer cmd = frame.commandBuffer();
+			int overlayColor = frame.overlayColor();
 			// Engine ARGB → shader vec4 (rgb tint, a blend factor).
 			// overlayColor == 0 → all-zero push → ui.frag mix is a no-op.
 			float a = ((overlayColor >>> 24) & 0xFF) / 255f;
@@ -85,6 +89,8 @@ final class InterfaceRenderer implements AutoCloseable
 			push.putFloat(r).putFloat(g).putFloat(b).putFloat(a);
 			push.flip();
 			renderer.encodeInto(cmd)
+				.setViewport(0, 0, targetWidth, targetHeight)
+				.setScissor(0, 0, targetWidth, targetHeight)
 				.bindPipeline(pipeline)
 				.bindBindGroup(0, bindGroup)
 				.pushConstants(ShaderStage.FRAGMENT, 0, push)

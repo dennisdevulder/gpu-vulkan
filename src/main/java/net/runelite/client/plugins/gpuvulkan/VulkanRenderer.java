@@ -34,8 +34,7 @@ final class VulkanRenderer implements AutoCloseable
 {
 	private final VulkanDevice device;
 	private final RenderPass renderPass;
-	private final SceneRenderer sceneRenderer;
-	private final InterfaceRenderer interfaceRenderer;
+	private final RenderExtensions renderExtensions;
 	private final FrameSync sync;
 
 	private final Swapchain swapchain;
@@ -71,15 +70,14 @@ final class VulkanRenderer implements AutoCloseable
 	private int overlayColor = 0;
 
 	VulkanRenderer(VulkanDevice device, RenderPass renderPass,
-				   SceneRenderer sceneRenderer, InterfaceRenderer interfaceRenderer,
+				   RenderExtensions renderExtensions,
 				   Swapchain swapchain, DepthBuffer depthBuffer,
 				   MsaaColorBuffer msaaColor,
 				   Framebuffers framebuffers, FrameSync sync)
 	{
 		this.device = device;
 		this.renderPass = renderPass;
-		this.sceneRenderer = sceneRenderer;
-		this.interfaceRenderer = interfaceRenderer;
+		this.renderExtensions = renderExtensions;
 		this.swapchain = swapchain;
 		this.depthBuffer = depthBuffer;
 		this.msaaColor = msaaColor;
@@ -190,11 +188,11 @@ final class VulkanRenderer implements AutoCloseable
 
 			// CPU-side memcpy into the persistently-mapped staging buffer. Done
 			// before recording the command buffer so the GPU read sees it.
-			interfaceRenderer.uploadPixels(uiPixels, uiWidth, uiHeight);
+			renderExtensions.uploadUiPixels(uiPixels, uiWidth, uiHeight);
 
 			if (useCustomPresent)
 			{
-				drawFrameCustomPresent(stack);
+				drawFrameCustomPresent(stack, desiredWidth, desiredHeight);
 			}
 			else
 			{
@@ -263,14 +261,19 @@ final class VulkanRenderer implements AutoCloseable
 	 * guarantees the present is scheduled after the render. No cross-queue
 	 * semaphore needed.
 	 */
-	private void drawFrameCustomPresent(MemoryStack stack)
+	private void drawFrameCustomPresent(MemoryStack stack, int desiredWidth, int desiredHeight)
 	{
 		long[] d = MacOSMetalHelper.nextDrawable();
 		if (d == null)
 		{
-			// CAMetalLayer didn't hand us a drawable inside its internal
-			// timeout. Treat as a dropped frame.
-			return;
+			MacOSMetalHelper.resizeMetalLayerSize(desiredWidth, desiredHeight);
+			d = MacOSMetalHelper.nextDrawable();
+			if (d == null)
+			{
+				// CAMetalLayer didn't hand us a drawable inside its internal
+				// timeout. Treat as a dropped frame.
+				return;
+			}
 		}
 		long drawable = d[0];
 		long mtlTexture = d[1];
@@ -353,7 +356,7 @@ final class VulkanRenderer implements AutoCloseable
 
 		// UI texture upload + transitions happen OUTSIDE the render pass —
 		// vkCmdCopyBufferToImage isn't allowed inside one.
-		interfaceRenderer.recordCopyToImage(cmd);
+		renderExtensions.recordBeforeRenderPass(cmd);
 
 		// Two clears now: colour attachment then depth attachment, in the same
 		// order they were declared in the render pass. Depth clear = 0 because
@@ -429,14 +432,20 @@ final class VulkanRenderer implements AutoCloseable
 		Mat4Ops.mul(sceneMvp, Mat4Ops.rotateY((float) cameraYaw));
 		Mat4Ops.mul(sceneMvp, Mat4Ops.translate(-(float) cameraX, -(float) cameraY, -(float) cameraZ));
 
-		sceneRenderer.recordDraw(cmd, sceneMvp, brightness,
-			(float) cameraX, (float) cameraZ, drawDistanceTiles, fogDepthTiles,
+		VulkanFrameContext frame = new DefaultVulkanFrameContext(cmd,
+			targetWidth, targetHeight,
+			viewportXOffset, viewportYOffset, viewportWidth, viewportHeight,
+			canvasWidth, canvasHeight, scale,
+			sceneMvp,
+			(float) cameraX, (float) cameraZ, brightness,
+			drawDistanceTiles, fogDepthTiles,
 			((skyboxColor >> 16) & 0xFF) / 255f,
 			((skyboxColor >>  8) & 0xFF) / 255f,
 			( skyboxColor        & 0xFF) / 255f,
 			gameTick, textureLightMode,
 			colorBlindMode, colorBlindIntensity,
-			smoothBanding);
+			smoothBanding, overlayColor);
+		renderExtensions.recordRenderPass(frame);
 
 		// Switch viewport back to full canvas for the UI fullscreen quad — the UI
 		// texture covers everything, including the regions outside the scene rect.
@@ -457,8 +466,6 @@ final class VulkanRenderer implements AutoCloseable
 		// depth disabled in the pipeline so it always wins. overlayColor is the engine's
 		// per-frame fade/tint (login screen fade, etc.) — passed all the way through
 		// from DrawCallbacks.draw(int) to the ui.frag push constant.
-		interfaceRenderer.recordDraw(cmd, overlayColor);
-
 		vkCmdEndRenderPass(cmd);
 
 		Vk.check("vkEndCommandBuffer", vkEndCommandBuffer(cmd));

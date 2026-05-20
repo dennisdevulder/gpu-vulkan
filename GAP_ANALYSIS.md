@@ -14,7 +14,7 @@ Last updated: 2026-05-14.
 | 4 | Entity vs scene dual-MVP                        | Open          |
 | 5 | Smooth-banding mode                             | Open          |
 | 6 | Colorblind filter                               | **Done** — new `ColorBlindMode` enum, `colorBlindMode` + `colorBlindIntensity` config keys; `colorblind.glsl` ported inline into `scene.frag` (runtime branch instead of `#if`); applied post-fog matching stock's order. Reuses `fragExtras.y` (mode) and `fragExtras.z` (intensity 0..1) push-constant slots |
-| 7 | Near-plane geometry cull                        | **Done (mirrors stock)** — dynamic side via `ModelSorter`'s `p[2] < 50` reject (matches `FacePrioritySorter.java:145`). Static side has no near-cull in stock either; the earlier `geom.glsl:~56-60` claim was a research-agent hallucination (no such file exists in stock's resources). |
+| 7 | Near-plane geometry cull                        | **Mostly done** — dynamic sorted capture uses `ModelSorter`'s `p[2] < 50` reject (matches `FacePrioritySorter.java:145`), but falls back to unsorted emission when sorting rejects a transient model so projectiles / spotanims stay visible. Static side has no near-cull in stock either; the earlier `geom.glsl:~56-60` claim was a research-agent hallucination (no such file exists in stock's resources). |
 | 8 | In-place scene mutation (farming/doors/trees)   | Open — needs per-zone re-upload; whole-scene re-capture on every `invalidateZone` tanks FPS in combat |
 | 9 | Frame-to-frame depth-stencil sync hazard        | **Done** — `RenderPass` subpass dependency now declares prior color/depth writes; silences `WRITE_AFTER_WRITE` validation spam and the hit-X validation-layer SIGSEGV |
 | 10| Exit-time Vulkan teardown                       | **Done** — JVM shutdown hook (`vkgpu-shutdown-watch`) now runs `vkDeviceWaitIdle` + `disposables.close()` against a static `activeInstance` reference. `draw()` gates on a `shuttingDown` flag to stop new frame submissions while the hook runs. Silences validation's "dispatch handle not found" at X-press. |
@@ -85,7 +85,8 @@ bigger structural change than reality requires.
   Same constants as stock.
 - `SceneRenderer.captureModelSorted(Projection, Model, ...)` — uses the
   sorter, emits triangles back-to-front via `writeHslVert` (sorter pre-
-  applies orientation + world translate).
+  applies orientation + world translate). Sort rejects fall back to unsorted
+  emission so transient effects do not vanish.
 - `GpuVulkanPlugin.drawDynamic` and `drawTemp` now call
   `captureModelSorted` with the engine-supplied `worldProjection`.
 
@@ -97,9 +98,10 @@ bigger structural change than reality requires.
   scene with no prior `drawDynamic`/`drawTemp` callback yet, actors fall
   back to unsorted for one frame. Not user-visible.
 - **Side benefit**: the sorter's `p[2] < 50` reject implements gap **#7
-  (near-plane geometry cull)** for all geometry going through
-  `captureModelSorted`. Static scene capture still has no near-cull, so
-  #7 stays partially open.
+  (near-plane geometry cull)** for successfully sorted geometry going through
+  `captureModelSorted`. Models rejected by sorting fall back to unsorted
+  emission to preserve transient visibility. Static scene capture still has no
+  near-cull, so #7 stays partially open.
 
 ### 2. Brightness gamma on untextured faces
 
@@ -128,18 +130,18 @@ do the banded path.
 
 `colorblind.glsl` in stock with protan/deuteran/tritan modes. We have none.
 
-### 7. Near-plane geometry cull — RESOLVED, NOT A GAP
+### 7. Near-plane geometry cull — MOSTLY RESOLVED
 
 Original claim was based on a research-agent hallucination: stock has no
 `geom.glsl` (verified by `ls` of stock's resources directory). The only
 `< 50` near-plane check anywhere in stock is in
 `FacePrioritySorter.java:145`, which rejects whole dynamic models when
-any vertex projects to z < 50. We mirror this exactly in
-`ModelSorter.sort()`.
+any vertex projects to z < 50. We mirror this in `ModelSorter.sort()`,
+then fall back to unsorted emission if sorting rejects a transient model.
 
 Static-scene near-plane culling: stock doesn't have it. With
 `Mat4.projection(w, h, 50)`, the "50" is a depth-scale, not a near plane —
 the projection's natural frustum clip kicks in only at `z = 0.01`. Camera
 clipping into a wall shows inside faces in both stock and our renderer.
 
-Nothing to port.
+Nothing else to port unless the fallback produces visible near-plane artifacts.

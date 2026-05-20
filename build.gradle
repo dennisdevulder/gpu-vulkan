@@ -1,0 +1,148 @@
+/*
+ * gpu-vulkan - RuneLite external plugin
+ *
+ * Plain Java/Groovy Gradle build. Shaders compile at build time via
+ * glslangValidator and are placed on the classpath at
+ * /net/runelite/client/plugins/gpuvulkan/.
+ */
+
+plugins {
+	id 'java'
+}
+
+repositories {
+	mavenLocal()
+	maven {
+		url = uri('https://repo.runelite.net')
+		content {
+			includeGroupAndSubgroups('net.runelite')
+		}
+	}
+	mavenCentral()
+}
+
+group = 'net.runelite.client.plugins.gpuvulkan'
+version = '1.0.0-SNAPSHOT'
+
+java {
+	sourceCompatibility = JavaVersion.VERSION_11
+	targetCompatibility = JavaVersion.VERSION_11
+}
+
+def runeLiteVersion = 'latest.release'
+def pluginMainClass = 'net.runelite.client.plugins.gpuvulkan.GpuVulkanPluginTest'
+def lwjglVersion = '3.3.2'
+def lwjglVulkanVersion = '3.3.6'
+def lombokVersion = '1.18.34'
+
+dependencies {
+	compileOnly "net.runelite:client:${runeLiteVersion}"
+	compileOnly 'net.runelite:rlawt:1.8'
+
+	implementation "org.lwjgl:lwjgl:${lwjglVersion}"
+	implementation "org.lwjgl:lwjgl-vulkan:${lwjglVulkanVersion}"
+	implementation "org.lwjgl:lwjgl-jawt:${lwjglVulkanVersion}"
+
+	compileOnly "org.projectlombok:lombok:${lombokVersion}"
+	annotationProcessor "org.projectlombok:lombok:${lombokVersion}"
+
+	testImplementation "net.runelite:client:${runeLiteVersion}"
+	testImplementation "net.runelite:jshell:${runeLiteVersion}"
+	testImplementation 'junit:junit:4.13.2'
+
+	testRuntimeOnly "org.lwjgl:lwjgl:${lwjglVersion}:natives-linux"
+	testRuntimeOnly "org.lwjgl:lwjgl:${lwjglVersion}:natives-linux-arm64"
+	testRuntimeOnly "org.lwjgl:lwjgl:${lwjglVersion}:natives-windows"
+	testRuntimeOnly "org.lwjgl:lwjgl:${lwjglVersion}:natives-macos"
+	testRuntimeOnly "org.lwjgl:lwjgl:${lwjglVersion}:natives-macos-arm64"
+	testRuntimeOnly "org.lwjgl:lwjgl-vulkan:${lwjglVulkanVersion}:natives-macos"
+	testRuntimeOnly "org.lwjgl:lwjgl-vulkan:${lwjglVulkanVersion}:natives-macos-arm64"
+}
+
+def gpuVulkanShaderSrc = file('src/main/shaders/gpuvulkan')
+def gpuVulkanShaderOut = layout.buildDirectory
+	.dir('generated/resources/net/runelite/client/plugins/gpuvulkan')
+	.get()
+	.asFile
+def glslangValidator = providers.environmentVariable('GLSLANG').getOrElse('glslangValidator')
+
+def compileGpuVulkanShaders = tasks.register('compileGpuVulkanShaders') {
+	group = 'build'
+	description = 'Compile gpuvulkan GLSL shaders to SPIR-V'
+
+	inputs.dir(gpuVulkanShaderSrc)
+	outputs.dir(gpuVulkanShaderOut)
+
+	doLast {
+		gpuVulkanShaderOut.mkdirs()
+		fileTree(gpuVulkanShaderSrc).matching {
+			include '**/*.vert', '**/*.frag', '**/*.comp', '**/*.geom'
+		}.each { src ->
+			def outFile = new File(gpuVulkanShaderOut, "${src.name}.spv")
+			def result = providers.exec {
+				commandLine glslangValidator, '-V', src.absolutePath, '-o', outFile.absolutePath
+			}.result.get()
+			if (result.exitValue != 0) {
+				throw new GradleException("glslangValidator failed for ${src}")
+			}
+		}
+	}
+}
+
+sourceSets {
+	main {
+		resources {
+			srcDir layout.buildDirectory.dir('generated/resources')
+		}
+	}
+}
+
+processResources {
+	dependsOn compileGpuVulkanShaders
+	from(projectDir) {
+		include 'runelite-plugin.properties'
+	}
+}
+
+tasks.withType(JavaCompile).configureEach {
+	options.encoding = 'UTF-8'
+}
+
+tasks.withType(Test).configureEach {
+	useJUnit()
+}
+
+tasks.register('run', JavaExec) {
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = pluginMainClass
+	jvmArgs '-ea'
+	args '--developer-mode', '--debug'
+}
+
+tasks.register('shadowJar', Jar) {
+	dependsOn configurations.testRuntimeClasspath, 'classes', 'testClasses'
+	manifest {
+		attributes(
+			'Main-Class': pluginMainClass,
+			'Multi-Release': true
+		)
+	}
+
+	duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+	from sourceSets.main.output
+	from sourceSets.test.output
+	from {
+		configurations.testRuntimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+	}
+
+	exclude 'META-INF/INDEX.LIST'
+	exclude 'META-INF/*.SF'
+	exclude 'META-INF/*.DSA'
+	exclude 'META-INF/*.RSA'
+	exclude '**/module-info.class'
+	exclude 'runelite-plugin.properties'
+
+	group = BasePlugin.BUILD_GROUP
+	archiveClassifier = 'shadow'
+	archiveFileName = "${rootProject.name}-${project.version}-all.jar"
+}

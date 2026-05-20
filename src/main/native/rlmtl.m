@@ -130,6 +130,40 @@ Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nDetachMetalLayer(
     rlmtlDetachMetalLayer();
 }
 
+JNIEXPORT void JNICALL
+Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nResizeMetalLayer(
+    JNIEnv* env, jclass cls, jint widthPoints, jint heightPoints, jdouble scaleHint)
+{
+    CAMetalLayer* layer = gMetalLayer;
+    if (!layer) {
+        return;
+    }
+    int w = widthPoints > 0 ? widthPoints : 1;
+    int h = heightPoints > 0 ? heightPoints : 1;
+    void (^resize)(void) = ^{
+        CGFloat scale = scaleHint > 0 ? (CGFloat) scaleHint : layer.contentsScale;
+        if (scale <= 0) {
+            scale = [[NSScreen mainScreen] backingScaleFactor];
+            if (scale <= 0) scale = 1;
+        }
+        layer.contentsScale = scale;
+
+        [CATransaction begin];
+        [CATransaction setDisableActions: YES];
+        layer.anchorPoint = CGPointZero;
+        layer.position = CGPointZero;
+        layer.frame = CGRectMake(0, 0, w, h);
+        layer.drawableSize = CGSizeMake(w * scale, h * scale);
+        [CATransaction commit];
+        [CATransaction flush];
+    };
+    if ([NSThread isMainThread]) {
+        resize();
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), resize);
+    }
+}
+
 /*
  * Retain/release an arbitrary Objective-C object pointer (used for keeping
  * MTLTexture handles alive while MetalDrawableSet caches VkImages wrapping
@@ -279,7 +313,7 @@ Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nPresentDrawable(
 JNIEXPORT jlong JNICALL
 Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nAttachMetalLayer(
     JNIEnv* env, jclass cls, jobject canvas, jboolean vsync,
-    jint initialWidthPoints, jint initialHeightPoints)
+    jint initialWidthPoints, jint initialHeightPoints, jdouble scaleHint)
 {
     rlmtlDetachMetalLayer();
 
@@ -334,10 +368,12 @@ Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nAttachMetalLayer(
     }
 
     __block CAMetalLayer* metalLayer = nil;
-    __block CGFloat scale = 1;
+    __block CGFloat scale = scaleHint > 0 ? (CGFloat) scaleHint : 1;
     dispatch_sync(dispatch_get_main_queue(), ^{
-        scale = [[NSScreen mainScreen] backingScaleFactor];
-        if (scale <= 0) scale = 1;
+        if (scale <= 0) {
+            scale = [[NSScreen mainScreen] backingScaleFactor];
+            if (scale <= 0) scale = 1;
+        }
 
         metalLayer = [[CAMetalLayer alloc] init];
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
@@ -347,6 +383,11 @@ Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nAttachMetalLayer(
         }
         metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
         metalLayer.contentsScale = scale;
+        metalLayer.anchorPoint = CGPointZero;
+        metalLayer.position = CGPointZero;
+        metalLayer.frame = CGRectMake(0, 0,
+                                      initialWidthPoints > 0 ? initialWidthPoints : 1,
+                                      initialHeightPoints > 0 ? initialHeightPoints : 1);
         /* drawableSize MUST start small here because vkCreateSwapchainKHR
          * later reads surfaceCapabilities.currentExtent, which MoltenVK
          * derives from drawableSize. A full-size value here makes
