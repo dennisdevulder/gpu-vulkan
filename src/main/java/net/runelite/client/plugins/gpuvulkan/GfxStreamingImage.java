@@ -1,5 +1,6 @@
 package net.runelite.client.plugins.gpuvulkan;
 
+import java.util.Arrays;
 import net.runelite.client.plugins.gpuvulkan.gfx.StreamingImage;
 import org.lwjgl.vulkan.VkCommandBuffer;
 
@@ -145,14 +146,7 @@ final class GfxStreamingImage implements StreamingImage
 
 	private static boolean rowDiffers(int[] current, int[] previous, int offset, int width)
 	{
-		for (int i = 0; i < width; i++)
-		{
-			if (current[offset + i] != previous[offset + i])
-			{
-				return true;
-			}
-		}
-		return false;
+		return Arrays.mismatch(current, offset, offset + width, previous, offset, offset + width) >= 0;
 	}
 
 	/** Per-slot view + sampler handles, exposed so {@link GfxBindGroup} can
