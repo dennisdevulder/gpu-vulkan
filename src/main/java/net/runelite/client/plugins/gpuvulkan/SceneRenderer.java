@@ -98,6 +98,12 @@ final class SceneRenderer implements AutoCloseable
 	private final int slotBytes;
 	private final DrawCallbackStats stats;
 	private long writePtr;
+	private final float[] cullLocalX = new float[ModelSorter.MAX_VERTEX_COUNT];
+	private final float[] cullLocalY = new float[ModelSorter.MAX_VERTEX_COUNT];
+	private final float[] cullLocalZ = new float[ModelSorter.MAX_VERTEX_COUNT];
+	private final float[] cullProjX = new float[ModelSorter.MAX_VERTEX_COUNT];
+	private final float[] cullProjY = new float[ModelSorter.MAX_VERTEX_COUNT];
+	private final float[] cullProjectScratch = new float[3];
 
 	private static final int MAX_PLANES = 4;
 
@@ -769,11 +775,19 @@ final class SceneRenderer implements AutoCloseable
 			return;
 		}
 
+		if (!needsFaceSort)
+		{
+			if (!captureModelCullOnlyFused(proj, m, orient, worldX, worldY, worldZ))
+			{
+				stats.sortFallbackModels.incrementAndGet();
+				captureModelUnsorted(m, orient, worldX, worldY, worldZ);
+			}
+			return;
+		}
+
 		long sortStart = System.nanoTime();
-		boolean sorted = needsFaceSort
-			? sorter.sort(proj, m, orient, worldX, worldY, worldZ)
-			: sorter.cullOnly(proj, m, orient, worldX, worldY, worldZ);
-		stats.addNanos(needsFaceSort ? stats.modelFullSortNanos : stats.modelCullOnlyNanos, sortStart);
+		boolean sorted = sorter.sort(proj, m, orient, worldX, worldY, worldZ);
+		stats.addNanos(stats.modelFullSortNanos, sortStart);
 		stats.addNanos(stats.modelSortNanos, sortStart);
 		if (!sorted)
 		{
@@ -789,10 +803,6 @@ final class SceneRenderer implements AutoCloseable
 		int faces = sorter.sortedCount;
 		if (faces == 0)
 		{
-			if (!needsFaceSort)
-			{
-				return;
-			}
 			stats.sortFallbackModels.incrementAndGet();
 			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
 			return;
@@ -929,6 +939,206 @@ final class SceneRenderer implements AutoCloseable
 		stats.modelUvNanos.addAndGet(uvNanos);
 		stats.texturedEmitFaces.addAndGet(texturedFaces);
 		stats.overrideEmitFaces.addAndGet(overrideFaces);
+	}
+
+	private boolean captureModelCullOnlyFused(Projection proj, Model m, int orientation, int wx, int wy, int wz)
+	{
+		final int modelVertexCount = m.getVerticesCount();
+		if (modelVertexCount > ModelSorter.MAX_VERTEX_COUNT)
+		{
+			return false;
+		}
+
+		final float[] vxs = m.getVerticesX();
+		final float[] vys = m.getVerticesY();
+		final float[] vzs = m.getVerticesZ();
+		if (vxs == null || vys == null || vzs == null)
+		{
+			return false;
+		}
+
+		final int faceCount = Math.min(m.getFaceCount(), ModelSorter.MAX_FACE_COUNT);
+		final int[] fa = m.getFaceIndices1();
+		final int[] fb = m.getFaceIndices2();
+		final int[] fc = m.getFaceIndices3();
+		if (fa == null || fb == null || fc == null)
+		{
+			return false;
+		}
+
+		float orientSine = 0f;
+		float orientCosine = 0f;
+		if (orientation != 0)
+		{
+			orientSine = Perspective.SINE[orientation & 0x7FF] / 65536f;
+			orientCosine = Perspective.COSINE[orientation & 0x7FF] / 65536f;
+		}
+
+		long cullStart = System.nanoTime();
+		for (int v = 0; v < modelVertexCount; v++)
+		{
+			float vx = vxs[v];
+			float vy = vys[v];
+			float vz = vzs[v];
+
+			if (orientation != 0)
+			{
+				float x0 = vx;
+				vx = vz * orientSine + x0 * orientCosine;
+				vz = vz * orientCosine - x0 * orientSine;
+			}
+
+			vx += wx;
+			vy += wy;
+			vz += wz;
+
+			cullLocalX[v] = vx;
+			cullLocalY[v] = vy;
+			cullLocalZ[v] = vz;
+
+			float[] p = proj.project(vx, vy, vz, cullProjectScratch);
+			if (p[2] < 50f)
+			{
+				return false;
+			}
+
+			cullProjX[v] = p[0] / p[2];
+			cullProjY[v] = p[1] / p[2];
+		}
+		long cullNanos = System.nanoTime() - cullStart;
+		stats.modelCullOnlyNanos.addAndGet(cullNanos);
+		stats.modelSortNanos.addAndGet(cullNanos);
+
+		int[] c1 = m.getFaceColors1();
+		int[] c2 = m.getFaceColors2();
+		int[] c3 = m.getFaceColors3();
+		short[] faceTextures = m.getFaceTextures();
+		byte[] textureFaces = m.getTextureFaces();
+		int[] texIndicesA = m.getTexIndices1();
+		int[] texIndicesB = m.getTexIndices2();
+		int[] texIndicesC = m.getTexIndices3();
+		byte[] faceTransparencies = m.getFaceTransparencies();
+		byte[] faceBiasArr = m.getFaceBias();
+
+		final byte overrideAmount = m.getOverrideAmount();
+		final byte overrideHue = m.getOverrideHue();
+		final byte overrideSat = m.getOverrideSaturation();
+		final byte overrideLum = m.getOverrideLuminance();
+		final boolean hasOverride = (overrideAmount & 0xFF) != 0;
+		float[] uv = uvScratch;
+
+		int wrote = 0;
+		int texturedFaces = 0;
+		int overrideFaces = 0;
+		long uvNanos = 0;
+		long emitStart = System.nanoTime();
+		for (int f = 0; f < faceCount; f++)
+		{
+			if (c3 != null && c3[f] == -2)
+			{
+				continue;
+			}
+
+			final int ia = fa[f];
+			final int ib = fb[f];
+			final int ic = fc[f];
+
+			final float aX = cullProjX[ia], aY = cullProjY[ia];
+			final float bX = cullProjX[ib], bY = cullProjY[ib];
+			final float cX = cullProjX[ic], cY = cullProjY[ic];
+
+			if ((aX - bX) * (cY - bY) - (cX - bX) * (aY - bY) <= 0)
+			{
+				continue;
+			}
+
+			if (vertexCount + wrote + 3 > MAX_VERTICES)
+			{
+				overflow();
+				break;
+			}
+
+			int col1 = c1 != null ? c1[f] : 0;
+			int col2 = col1;
+			int col3 = col1;
+			if (c3 != null)
+			{
+				int raw3 = c3[f];
+				if (raw3 != -1)
+				{
+					col2 = c2[f];
+					col3 = raw3;
+				}
+			}
+
+			int texLayer = 0;
+			float u0 = 0, v0 = 0, u1 = 0, v1 = 0, u2 = 0, v2 = 0;
+			if (faceTextures != null && faceTextures[f] != -1)
+			{
+				long uvStart = System.nanoTime();
+				texLayer = (faceTextures[f] & 0xFFFF) + 1;
+				computeFaceUvs(uv, vxs, vys, vzs, ia, ib, ic, textureFaces, texIndicesA, texIndicesB, texIndicesC, f);
+				uvNanos += System.nanoTime() - uvStart;
+				texturedFaces++;
+				u0 = uv[0]; v0 = uv[1];
+				u1 = uv[2]; v1 = uv[3];
+				u2 = uv[4]; v2 = uv[5];
+			}
+
+			if (hasOverride && texLayer == 0)
+			{
+				overrideFaces++;
+				col1 = applyHslOverride(col1, overrideHue, overrideSat, overrideLum, overrideAmount);
+				col2 = applyHslOverride(col2, overrideHue, overrideSat, overrideLum, overrideAmount);
+				col3 = applyHslOverride(col3, overrideHue, overrideSat, overrideLum, overrideAmount);
+			}
+
+			int bias = faceBiasArr != null ? (faceBiasArr[f] & 0xFF) : 0;
+			int trans = faceTransparencies != null ? (faceTransparencies[f] & 0xFF) : 0;
+			int packedTexLayer = texLayer | (bias << 16) | (trans << 24);
+
+			if (col1 == col2 && col1 == col3)
+			{
+				int rgbOffset = (col1 & 0xFFFF) * 3;
+				float light = (float) (col1 & 0xFFFF);
+				float r = HSL_RGB[rgbOffset];
+				float g = HSL_RGB[rgbOffset + 1];
+				float b = HSL_RGB[rgbOffset + 2];
+				writePackedVertexRgb(cullLocalX[ia], cullLocalY[ia], cullLocalZ[ia], light, r, g, b, u0, v0, packedTexLayer);
+				writePackedVertexRgb(cullLocalX[ib], cullLocalY[ib], cullLocalZ[ib], light, r, g, b, u1, v1, packedTexLayer);
+				writePackedVertexRgb(cullLocalX[ic], cullLocalY[ic], cullLocalZ[ic], light, r, g, b, u2, v2, packedTexLayer);
+			}
+			else
+			{
+				int rgbOffset1 = (col1 & 0xFFFF) * 3;
+				int rgbOffset2 = (col2 & 0xFFFF) * 3;
+				int rgbOffset3 = (col3 & 0xFFFF) * 3;
+				writePackedVertexRgb(cullLocalX[ia], cullLocalY[ia], cullLocalZ[ia],
+					(float) (col1 & 0xFFFF), HSL_RGB[rgbOffset1], HSL_RGB[rgbOffset1 + 1], HSL_RGB[rgbOffset1 + 2], u0, v0, packedTexLayer);
+				writePackedVertexRgb(cullLocalX[ib], cullLocalY[ib], cullLocalZ[ib],
+					(float) (col2 & 0xFFFF), HSL_RGB[rgbOffset2], HSL_RGB[rgbOffset2 + 1], HSL_RGB[rgbOffset2 + 2], u1, v1, packedTexLayer);
+				writePackedVertexRgb(cullLocalX[ic], cullLocalY[ic], cullLocalZ[ic],
+					(float) (col3 & 0xFFFF), HSL_RGB[rgbOffset3], HSL_RGB[rgbOffset3 + 1], HSL_RGB[rgbOffset3 + 2], u2, v2, packedTexLayer);
+			}
+			wrote += 3;
+		}
+
+		if (wrote == 0)
+		{
+			return true;
+		}
+
+		vertexCount += wrote;
+		stats.sortedModels.incrementAndGet();
+		stats.cullOnlyModels.incrementAndGet();
+		stats.sortedFaces.addAndGet(wrote / 3);
+		long emitNanos = System.nanoTime() - emitStart;
+		stats.modelEmitNanos.addAndGet(emitNanos);
+		stats.modelSortedEmitNanos.addAndGet(emitNanos);
+		stats.modelUvNanos.addAndGet(uvNanos);
+		stats.texturedEmitFaces.addAndGet(texturedFaces);
+		stats.overrideEmitFaces.addAndGet(overrideFaces);
+		return true;
 	}
 
 	private static int countTransparentFaces(Model m)
