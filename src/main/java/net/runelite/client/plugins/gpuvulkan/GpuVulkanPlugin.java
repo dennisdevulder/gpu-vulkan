@@ -617,6 +617,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		{
 			renderer.markSwapchainStale();
 		}
+		stats.setDetailedModelStats(config.detailedModelStats());
 		BufferProvider bp = client.getBufferProvider();
 		renderer.drawFrame(w, h, bp.getPixels(), bp.getWidth(), bp.getHeight(),
 			lastCamX, lastCamY, lastCamZ, lastCamPitch, lastCamYaw,

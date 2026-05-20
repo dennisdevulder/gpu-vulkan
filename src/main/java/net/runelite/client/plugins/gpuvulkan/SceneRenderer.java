@@ -614,7 +614,8 @@ final class SceneRenderer implements AutoCloseable
 
 	private void captureModelUnsorted(Model m, int orient, int worldX, int worldY, int worldZ)
 	{
-		long emitStart = System.nanoTime();
+		boolean detailedStats = stats.isDetailedModelStats();
+		long emitStart = detailedStats ? System.nanoTime() : 0L;
 		float[] vx = m.getVerticesX();
 		float[] vy = m.getVerticesY();
 		float[] vz = m.getVerticesZ();
@@ -678,11 +679,14 @@ final class SceneRenderer implements AutoCloseable
 			float u0 = 0, v0 = 0, u1 = 0, v1 = 0, u2 = 0, v2 = 0;
 			if (faceTextures != null && faceTextures[f] != -1)
 			{
-				long uvStart = System.nanoTime();
+				long uvStart = detailedStats ? System.nanoTime() : 0L;
 				texLayer = (faceTextures[f] & 0xFFFF) + 1;
 				computeFaceUvs(uv, vx, vy, vz, fa[f], fb[f], fc[f],
 					textureFaces, texIndicesA, texIndicesB, texIndicesC, f);
-				uvNanos += System.nanoTime() - uvStart;
+				if (detailedStats)
+				{
+					uvNanos += System.nanoTime() - uvStart;
+				}
 				texturedFaces++;
 				u0 = uv[0]; v0 = uv[1];
 				u1 = uv[2]; v1 = uv[3];
@@ -756,14 +760,17 @@ final class SceneRenderer implements AutoCloseable
 			wrote += 3;
 		}
 		vertexCount += wrote;
-		stats.unsortedModels.incrementAndGet();
-		stats.unsortedFaces.addAndGet(wrote / 3);
-		long emitNanos = System.nanoTime() - emitStart;
-		stats.modelEmitNanos.addAndGet(emitNanos);
-		stats.modelUnsortedEmitNanos.addAndGet(emitNanos);
-		stats.modelUvNanos.addAndGet(uvNanos);
-		stats.texturedEmitFaces.addAndGet(texturedFaces);
-		stats.overrideEmitFaces.addAndGet(overrideFaces);
+		if (detailedStats)
+		{
+			stats.unsortedModels.incrementAndGet();
+			stats.unsortedFaces.addAndGet(wrote / 3);
+			long emitNanos = System.nanoTime() - emitStart;
+			stats.modelEmitNanos.addAndGet(emitNanos);
+			stats.modelUnsortedEmitNanos.addAndGet(emitNanos);
+			stats.modelUvNanos.addAndGet(uvNanos);
+			stats.texturedEmitFaces.addAndGet(texturedFaces);
+			stats.overrideEmitFaces.addAndGet(overrideFaces);
+		}
 	}
 
 	/**
@@ -790,6 +797,7 @@ final class SceneRenderer implements AutoCloseable
 		if (m == null || proj == null) return;
 		if (!markCaptureSeen(m, worldX, worldZ)) return;
 
+		boolean detailedStats = stats.isDetailedModelStats();
 		boolean needsFaceSort = renderMode == Renderable.RENDERMODE_SORTED_NO_DEPTH;
 		if (!needsFaceSort && m.getFaceCount() <= OPAQUE_UNSORTED_FACE_THRESHOLD)
 		{
@@ -801,23 +809,32 @@ final class SceneRenderer implements AutoCloseable
 		{
 			if (!captureModelCullOnlyFused(proj, m, orient, worldX, worldY, worldZ))
 			{
-				stats.sortFallbackModels.incrementAndGet();
+				if (detailedStats)
+				{
+					stats.sortFallbackModels.incrementAndGet();
+				}
 				captureModelUnsorted(m, orient, worldX, worldY, worldZ);
 			}
 			return;
 		}
 
-		long sortStart = System.nanoTime();
+		long sortStart = detailedStats ? System.nanoTime() : 0L;
 		boolean sorted = sorter.sort(proj, m, orient, worldX, worldY, worldZ);
-		stats.addNanos(stats.modelFullSortNanos, sortStart);
-		stats.addNanos(stats.modelSortNanos, sortStart);
+		if (detailedStats)
+		{
+			stats.addNanos(stats.modelFullSortNanos, sortStart);
+			stats.addNanos(stats.modelSortNanos, sortStart);
+		}
 		if (!sorted)
 		{
 			// Sorting is a quality pass, not a visibility gate. Some transient
 			// renderables (projectiles / spotanims) have bounds that make the
 			// sorter reject them; keep them visible by falling back to the basic
 			// model emitter.
-			stats.sortFallbackModels.incrementAndGet();
+			if (detailedStats)
+			{
+				stats.sortFallbackModels.incrementAndGet();
+			}
 			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
 			return;
 		}
@@ -825,7 +842,10 @@ final class SceneRenderer implements AutoCloseable
 		int faces = sorter.sortedCount;
 		if (faces == 0)
 		{
-			stats.sortFallbackModels.incrementAndGet();
+			if (detailedStats)
+			{
+				stats.sortFallbackModels.incrementAndGet();
+			}
 			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
 			return;
 		}
@@ -866,7 +886,7 @@ final class SceneRenderer implements AutoCloseable
 		float[] lz = sorter.localZ;
 
 		int wrote = 0;
-		long emitStart = System.nanoTime();
+		long emitStart = detailedStats ? System.nanoTime() : 0L;
 		int texturedFaces = 0;
 		int overrideFaces = 0;
 		long uvNanos = 0;
@@ -892,11 +912,14 @@ final class SceneRenderer implements AutoCloseable
 			float u0 = 0, v0 = 0, u1 = 0, v1 = 0, u2 = 0, v2 = 0;
 			if (faceTextures != null && faceTextures[f] != -1)
 			{
-				long uvStart = System.nanoTime();
+				long uvStart = detailedStats ? System.nanoTime() : 0L;
 				texLayer = (faceTextures[f] & 0xFFFF) + 1;
 				computeFaceUvs(uv, vxs, vys, vzs, fa[f], fb[f], fc[f],
 					textureFaces, texIndicesA, texIndicesB, texIndicesC, f);
-				uvNanos += System.nanoTime() - uvStart;
+				if (detailedStats)
+				{
+					uvNanos += System.nanoTime() - uvStart;
+				}
 				texturedFaces++;
 				u0 = uv[0]; v0 = uv[1];
 				u1 = uv[2]; v1 = uv[3];
@@ -968,27 +991,31 @@ final class SceneRenderer implements AutoCloseable
 			wrote += 3;
 		}
 		vertexCount += wrote;
-		stats.sortedModels.incrementAndGet();
-		if (needsFaceSort)
+		if (detailedStats)
 		{
-			stats.fullSortModels.incrementAndGet();
-			stats.fullSortTransparentFaces.addAndGet(countTransparentFaces(m));
+			stats.sortedModels.incrementAndGet();
+			if (needsFaceSort)
+			{
+				stats.fullSortModels.incrementAndGet();
+				stats.fullSortTransparentFaces.addAndGet(countTransparentFaces(m));
+			}
+			else
+			{
+				stats.cullOnlyModels.incrementAndGet();
+			}
+			stats.sortedFaces.addAndGet(wrote / 3);
+			long emitNanos = System.nanoTime() - emitStart;
+			stats.modelEmitNanos.addAndGet(emitNanos);
+			stats.modelSortedEmitNanos.addAndGet(emitNanos);
+			stats.modelUvNanos.addAndGet(uvNanos);
+			stats.texturedEmitFaces.addAndGet(texturedFaces);
+			stats.overrideEmitFaces.addAndGet(overrideFaces);
 		}
-		else
-		{
-			stats.cullOnlyModels.incrementAndGet();
-		}
-		stats.sortedFaces.addAndGet(wrote / 3);
-		long emitNanos = System.nanoTime() - emitStart;
-		stats.modelEmitNanos.addAndGet(emitNanos);
-		stats.modelSortedEmitNanos.addAndGet(emitNanos);
-		stats.modelUvNanos.addAndGet(uvNanos);
-		stats.texturedEmitFaces.addAndGet(texturedFaces);
-		stats.overrideEmitFaces.addAndGet(overrideFaces);
 	}
 
 	private boolean captureModelCullOnlyFused(Projection proj, Model m, int orientation, int wx, int wy, int wz)
 	{
+		boolean detailedStats = stats.isDetailedModelStats();
 		final int modelVertexCount = m.getVerticesCount();
 		if (modelVertexCount > ModelSorter.MAX_VERTEX_COUNT)
 		{
@@ -1020,7 +1047,7 @@ final class SceneRenderer implements AutoCloseable
 			orientCosine = Perspective.COSINE[orientation & 0x7FF] / 65536f;
 		}
 
-		long cullStart = System.nanoTime();
+		long cullStart = detailedStats ? System.nanoTime() : 0L;
 		for (int v = 0; v < modelVertexCount; v++)
 		{
 			float vx = vxs[v];
@@ -1051,9 +1078,12 @@ final class SceneRenderer implements AutoCloseable
 			cullProjX[v] = p[0] / p[2];
 			cullProjY[v] = p[1] / p[2];
 		}
-		long cullNanos = System.nanoTime() - cullStart;
-		stats.modelCullOnlyNanos.addAndGet(cullNanos);
-		stats.modelSortNanos.addAndGet(cullNanos);
+		if (detailedStats)
+		{
+			long cullNanos = System.nanoTime() - cullStart;
+			stats.modelCullOnlyNanos.addAndGet(cullNanos);
+			stats.modelSortNanos.addAndGet(cullNanos);
+		}
 
 		int[] c1 = m.getFaceColors1();
 		int[] c2 = m.getFaceColors2();
@@ -1077,7 +1107,7 @@ final class SceneRenderer implements AutoCloseable
 		int texturedFaces = 0;
 		int overrideFaces = 0;
 		long uvNanos = 0;
-		long emitStart = System.nanoTime();
+		long emitStart = detailedStats ? System.nanoTime() : 0L;
 		for (int f = 0; f < faceCount; f++)
 		{
 			if (c3 != null && c3[f] == -2)
@@ -1121,10 +1151,13 @@ final class SceneRenderer implements AutoCloseable
 			float u0 = 0, v0 = 0, u1 = 0, v1 = 0, u2 = 0, v2 = 0;
 			if (faceTextures != null && faceTextures[f] != -1)
 			{
-				long uvStart = System.nanoTime();
+				long uvStart = detailedStats ? System.nanoTime() : 0L;
 				texLayer = (faceTextures[f] & 0xFFFF) + 1;
 				computeFaceUvs(uv, vxs, vys, vzs, ia, ib, ic, textureFaces, texIndicesA, texIndicesB, texIndicesC, f);
-				uvNanos += System.nanoTime() - uvStart;
+				if (detailedStats)
+				{
+					uvNanos += System.nanoTime() - uvStart;
+				}
 				texturedFaces++;
 				u0 = uv[0]; v0 = uv[1];
 				u1 = uv[2]; v1 = uv[3];
@@ -1199,15 +1232,18 @@ final class SceneRenderer implements AutoCloseable
 		}
 
 		vertexCount += wrote;
-		stats.sortedModels.incrementAndGet();
-		stats.cullOnlyModels.incrementAndGet();
-		stats.sortedFaces.addAndGet(wrote / 3);
-		long emitNanos = System.nanoTime() - emitStart;
-		stats.modelEmitNanos.addAndGet(emitNanos);
-		stats.modelSortedEmitNanos.addAndGet(emitNanos);
-		stats.modelUvNanos.addAndGet(uvNanos);
-		stats.texturedEmitFaces.addAndGet(texturedFaces);
-		stats.overrideEmitFaces.addAndGet(overrideFaces);
+		if (detailedStats)
+		{
+			stats.sortedModels.incrementAndGet();
+			stats.cullOnlyModels.incrementAndGet();
+			stats.sortedFaces.addAndGet(wrote / 3);
+			long emitNanos = System.nanoTime() - emitStart;
+			stats.modelEmitNanos.addAndGet(emitNanos);
+			stats.modelSortedEmitNanos.addAndGet(emitNanos);
+			stats.modelUvNanos.addAndGet(uvNanos);
+			stats.texturedEmitFaces.addAndGet(texturedFaces);
+			stats.overrideEmitFaces.addAndGet(overrideFaces);
+		}
 		return true;
 	}
 

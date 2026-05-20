@@ -19,6 +19,8 @@ import net.runelite.api.Model;
 @Slf4j
 final class DrawCallbackStats
 {
+	private volatile boolean detailedModelStats;
+
 	// Per-method call counters
 	final AtomicLong drawScene = new AtomicLong();
 	final AtomicLong preSceneDraw = new AtomicLong();
@@ -83,9 +85,27 @@ final class DrawCallbackStats
 
 	private long nextLogNanos = System.nanoTime() + 1_000_000_000L;
 
+	boolean isDetailedModelStats()
+	{
+		return detailedModelStats;
+	}
+
+	void setDetailedModelStats(boolean enabled)
+	{
+		if (detailedModelStats == enabled)
+		{
+			return;
+		}
+		detailedModelStats = enabled;
+		if (!enabled)
+		{
+			resetDetailedModelStats();
+		}
+	}
+
 	void recordModel(Model m)
 	{
-		if (m == null) return;
+		if (!detailedModelStats || m == null) return;
 		int verts = m.getVerticesCount();
 		int[] fa = m.getFaceIndices1();
 		int faces = fa == null ? 0 : fa.length;
@@ -133,6 +153,43 @@ final class DrawCallbackStats
 		long actorCapture = actorCaptureNanos.getAndSet(0);
 		long pendingCapture = pendingCaptureNanos.getAndSet(0);
 		long sceneCapture = sceneCaptureNanos.getAndSet(0);
+		if (!detailedModelStats)
+		{
+			log.info(String.format(
+				"recon | scene=%d preSD=%d postSD=%d swap=%d load=%d | paint=%d tileModel=%d | zoneOpq=%d zoneAlpha=%d | dyn=%d temp=%d pass=%d single=%d | cam=(%.1f, %.1f, %.1f) plane=%d | anim=%d | cpu/frame avg ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f | scene avg ms: begin=%.2f actors=%.2f pending=%.2f staticCaptureTotal=%.2f",
+				drawSceneCount,
+				preSceneDraw.getAndSet(0),
+				postDrawScene.getAndSet(0),
+				swapScene.getAndSet(0),
+				loadScene.getAndSet(0),
+				drawScenePaint.getAndSet(0),
+				drawSceneTileModel.getAndSet(0),
+				drawZoneOpaque.getAndSet(0),
+				drawZoneAlpha.getAndSet(0),
+				drawDynamic.getAndSet(0),
+				drawTemp.getAndSet(0),
+				drawPass.getAndSet(0),
+				drawSingle.getAndSet(0),
+				lastCamX, lastCamY, lastCamZ, lastCamPlane,
+				animate.getAndSet(0),
+				avgMs(drawFrame, frameCount),
+				avgMs(fenceWait, frameCount),
+				avgMs(uiUpload, frameCount),
+				avgMs(acquire, frameCount),
+				avgMs(commandRecord, frameCount),
+				avgMs(beforePass, frameCount),
+				avgMs(renderPass, frameCount),
+				avgMs(submit, frameCount),
+				avgMs(present, frameCount),
+				avgMs(customDrawable, frameCount),
+				avgMs(beginFrame, drawSceneCount),
+				avgMs(actorCapture, drawSceneCount),
+				avgMs(pendingCapture, drawSceneCount),
+				totalMs(sceneCapture)
+			));
+			return;
+		}
+
 		long sort = modelSortNanos.getAndSet(0);
 		long fullSort = modelFullSortNanos.getAndSet(0);
 		long cullOnly = modelCullOnlyNanos.getAndSet(0);
@@ -203,5 +260,29 @@ final class DrawCallbackStats
 			overrideFaceCount,
 			transparentFaceCount
 		));
+	}
+
+	private void resetDetailedModelStats()
+	{
+		totalDynamicVerts.set(0);
+		totalDynamicFaces.set(0);
+		maxDynamicFaces.set(0);
+		modelSortNanos.set(0);
+		modelFullSortNanos.set(0);
+		modelCullOnlyNanos.set(0);
+		modelEmitNanos.set(0);
+		modelSortedEmitNanos.set(0);
+		modelUnsortedEmitNanos.set(0);
+		modelUvNanos.set(0);
+		sortedModels.set(0);
+		fullSortModels.set(0);
+		cullOnlyModels.set(0);
+		unsortedModels.set(0);
+		sortFallbackModels.set(0);
+		sortedFaces.set(0);
+		unsortedFaces.set(0);
+		fullSortTransparentFaces.set(0);
+		texturedEmitFaces.set(0);
+		overrideEmitFaces.set(0);
 	}
 }
