@@ -70,11 +70,15 @@ final class InterfaceRenderer implements AutoCloseable
 		}
 	}
 
-	void recordDraw(VkCommandBuffer cmd, int overlayColor)
+	void recordDraw(VulkanFrameContext frame)
 	{
 		if (bindGroup == null) return;
 		try (MemoryStack stack = MemoryStack.stackPush())
 		{
+			int targetWidth = frame.targetWidth();
+			int targetHeight = frame.targetHeight();
+			VkCommandBuffer cmd = frame.commandBuffer();
+			int overlayColor = frame.overlayColor();
 			// Engine ARGB → shader vec4 (rgb tint, a blend factor).
 			// overlayColor == 0 → all-zero push → ui.frag mix is a no-op.
 			float a = ((overlayColor >>> 24) & 0xFF) / 255f;
@@ -85,6 +89,8 @@ final class InterfaceRenderer implements AutoCloseable
 			push.putFloat(r).putFloat(g).putFloat(b).putFloat(a);
 			push.flip();
 			renderer.encodeInto(cmd)
+				.setViewport(0, 0, targetWidth, targetHeight)
+				.setScissor(0, 0, targetWidth, targetHeight)
 				.bindPipeline(pipeline)
 				.bindBindGroup(0, bindGroup)
 				.pushConstants(ShaderStage.FRAGMENT, 0, push)

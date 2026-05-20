@@ -110,7 +110,7 @@ final class BaseRenderer implements VulkanRenderExtension
 		}
 		if (interfaceRenderer != null)
 		{
-			interfaceRenderer.recordDraw(frame.commandBuffer(), frame.overlayColor());
+			interfaceRenderer.recordDraw(frame);
 		}
 	}
 
