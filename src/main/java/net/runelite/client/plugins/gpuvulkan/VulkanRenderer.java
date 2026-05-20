@@ -192,7 +192,7 @@ final class VulkanRenderer implements AutoCloseable
 
 			if (useCustomPresent)
 			{
-				drawFrameCustomPresent(stack);
+				drawFrameCustomPresent(stack, desiredWidth, desiredHeight);
 			}
 			else
 			{
@@ -261,14 +261,19 @@ final class VulkanRenderer implements AutoCloseable
 	 * guarantees the present is scheduled after the render. No cross-queue
 	 * semaphore needed.
 	 */
-	private void drawFrameCustomPresent(MemoryStack stack)
+	private void drawFrameCustomPresent(MemoryStack stack, int desiredWidth, int desiredHeight)
 	{
 		long[] d = MacOSMetalHelper.nextDrawable();
 		if (d == null)
 		{
-			// CAMetalLayer didn't hand us a drawable inside its internal
-			// timeout. Treat as a dropped frame.
-			return;
+			MacOSMetalHelper.resizeMetalLayerSize(desiredWidth, desiredHeight);
+			d = MacOSMetalHelper.nextDrawable();
+			if (d == null)
+			{
+				// CAMetalLayer didn't hand us a drawable inside its internal
+				// timeout. Treat as a dropped frame.
+				return;
+			}
 		}
 		long drawable = d[0];
 		long mtlTexture = d[1];

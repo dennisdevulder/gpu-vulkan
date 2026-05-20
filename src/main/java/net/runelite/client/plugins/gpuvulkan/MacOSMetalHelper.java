@@ -70,6 +70,7 @@ final class MacOSMetalHelper
 	private static native long nAttachMetalLayer(Canvas canvas, boolean vsync,
 		int initialWidthPoints, int initialHeightPoints);
 	private static native void nDetachMetalLayer();
+	private static native void nResizeMetalLayer(int widthPoints, int heightPoints);
 	private static native long[] nNextDrawable();
 	private static native void nPresentDrawable(long drawable, long mtlQueue);
 	private static native void nRetainObject(long ptr);
@@ -99,6 +100,19 @@ final class MacOSMetalHelper
 		if (loaded)
 		{
 			nDetachMetalLayer();
+		}
+	}
+
+	static void resizeMetalLayer(Canvas canvas)
+	{
+		resizeMetalLayerSize(canvas.getWidth(), canvas.getHeight());
+	}
+
+	static void resizeMetalLayerSize(int widthPoints, int heightPoints)
+	{
+		if (loaded)
+		{
+			nResizeMetalLayer(Math.max(widthPoints, 1), Math.max(heightPoints, 1));
 		}
 	}
 

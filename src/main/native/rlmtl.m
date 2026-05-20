@@ -130,6 +130,40 @@ Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nDetachMetalLayer(
     rlmtlDetachMetalLayer();
 }
 
+JNIEXPORT void JNICALL
+Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nResizeMetalLayer(
+    JNIEnv* env, jclass cls, jint widthPoints, jint heightPoints)
+{
+    CAMetalLayer* layer = gMetalLayer;
+    if (!layer) {
+        return;
+    }
+    int w = widthPoints > 0 ? widthPoints : 1;
+    int h = heightPoints > 0 ? heightPoints : 1;
+    void (^resize)(void) = ^{
+        CGFloat scale = layer.contentsScale;
+        if (scale <= 0) {
+            scale = [[NSScreen mainScreen] backingScaleFactor];
+            if (scale <= 0) scale = 1;
+            layer.contentsScale = scale;
+        }
+
+        [CATransaction begin];
+        [CATransaction setDisableActions: YES];
+        if (layer.bounds.size.width <= 0 || layer.bounds.size.height <= 0) {
+            layer.bounds = CGRectMake(0, 0, w, h);
+        }
+        layer.drawableSize = CGSizeMake(w * scale, h * scale);
+        [CATransaction commit];
+        [CATransaction flush];
+    };
+    if ([NSThread isMainThread]) {
+        resize();
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), resize);
+    }
+}
+
 /*
  * Retain/release an arbitrary Objective-C object pointer (used for keeping
  * MTLTexture handles alive while MetalDrawableSet caches VkImages wrapping

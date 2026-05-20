@@ -233,6 +233,10 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 
 				swapchain = new Swapchain(device, surface, canvas.getWidth(), canvas.getHeight(), config.fpsMode());
 				disposables.add(swapchain);
+				if (isMac)
+				{
+					MacOSMetalHelper.resizeMetalLayer(canvas);
+				}
 				sync.recreateRenderFinished(swapchain.imageCount());
 
 				int desiredSamples;
