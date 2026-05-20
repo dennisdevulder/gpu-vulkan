@@ -84,6 +84,7 @@ final class SceneRenderer implements AutoCloseable
 	private static final int MAX_VERTICES = 8_000_000;
 	private static final long BUFFER_BYTES = (long) MAX_VERTICES * ScenePipeline.VERTEX_STRIDE;
 	private static final int HSL_HIDDEN = 12345678;
+	private static final int OPAQUE_UNSORTED_FACE_THRESHOLD = 24;
 	private static final int SCENE_OFFSET = (Constants.EXTENDED_SCENE_SIZE - Constants.SCENE_SIZE) / 2;
 	private static final float[] HSL_RGB = buildHslRgbTable();
 
@@ -718,14 +719,26 @@ final class SceneRenderer implements AutoCloseable
 	 */
 	void captureModelSorted(Projection proj, Model m, int orient, int worldX, int worldY, int worldZ)
 	{
+		captureModelSorted(proj, m, orient, worldX, worldY, worldZ, Renderable.RENDERMODE_DEFAULT);
+	}
+
+	void captureModelSorted(Projection proj, Model m, int orient, int worldX, int worldY, int worldZ, int renderMode)
+	{
 		if (m == null || proj == null) return;
 		if (!markCaptureSeen(m, worldX, worldZ)) return;
 
-		boolean needsFaceSort = needsFaceSort(m);
+		boolean needsFaceSort = renderMode == Renderable.RENDERMODE_SORTED_NO_DEPTH;
+		if (!needsFaceSort && m.getFaceCount() <= OPAQUE_UNSORTED_FACE_THRESHOLD)
+		{
+			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
+			return;
+		}
+
 		long sortStart = System.nanoTime();
 		boolean sorted = needsFaceSort
 			? sorter.sort(proj, m, orient, worldX, worldY, worldZ)
 			: sorter.cullOnly(proj, m, orient, worldX, worldY, worldZ);
+		stats.addNanos(needsFaceSort ? stats.modelFullSortNanos : stats.modelCullOnlyNanos, sortStart);
 		stats.addNanos(stats.modelSortNanos, sortStart);
 		if (!sorted)
 		{
@@ -836,27 +849,36 @@ final class SceneRenderer implements AutoCloseable
 		}
 		vertexCount += wrote;
 		stats.sortedModels.incrementAndGet();
+		if (needsFaceSort)
+		{
+			stats.fullSortModels.incrementAndGet();
+			stats.fullSortTransparentFaces.addAndGet(countTransparentFaces(m));
+		}
+		else
+		{
+			stats.cullOnlyModels.incrementAndGet();
+		}
 		stats.sortedFaces.addAndGet(wrote / 3);
 		stats.addNanos(stats.modelEmitNanos, emitStart);
 	}
 
-	private static boolean needsFaceSort(Model m)
+	private static int countTransparentFaces(Model m)
 	{
 		byte[] transparencies = m.getFaceTransparencies();
 		if (transparencies == null)
 		{
-			return false;
+			return 0;
 		}
-
+		int transparent = 0;
 		int faces = Math.min(m.getFaceCount(), transparencies.length);
 		for (int i = 0; i < faces; i++)
 		{
 			if (transparencies[i] != 0)
 			{
-				return true;
+				transparent++;
 			}
 		}
-		return false;
+		return transparent;
 	}
 
 	private final float[] uvScratch = new float[6];

@@ -843,7 +843,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		if (tileObject == null) return;
 		if (r instanceof net.runelite.api.Actor) return;
 		lastWorldProjection = worldProjection;
-		if (renderExtensions != null) renderExtensions.captureModel(worldProjection, m, orient, x, y, z);
+		if (renderExtensions != null) renderExtensions.captureModel(worldProjection, m, orient, x, y, z, renderModeOf(r));
 	}
 
 	@Override
@@ -855,7 +855,12 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		// captureActors() already drew it.
 		if (gameObject == null) return;
 		lastWorldProjection = worldProjection;
-		if (renderExtensions != null) renderExtensions.captureModel(worldProjection, m, orient, x, y, z);
+		if (renderExtensions != null) renderExtensions.captureModel(worldProjection, m, orient, x, y, z, renderModeOf(gameObject.getRenderable()));
+	}
+
+	private static int renderModeOf(Renderable renderable)
+	{
+		return renderable != null ? renderable.getRenderMode() : Renderable.RENDERMODE_DEFAULT;
 	}
 
 	@Override
