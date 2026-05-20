@@ -35,6 +35,7 @@ final class GfxStreamingImage implements StreamingImage
 	private final int[][] dirtyRowStarts;
 	private final int[][] dirtyRowHeights;
 	private final int[] dirtyRangeCounts;
+	private final boolean logDirtyRows = Boolean.parseBoolean(System.getProperty("vkgpu.uiDirtyStats", "false"));
 	private long nextDirtyLogNanos = System.nanoTime() + 1_000_000_000L;
 	private long dirtyLogFrames;
 	private long dirtyLogRows;
@@ -89,7 +90,7 @@ final class GfxStreamingImage implements StreamingImage
 		if (needsFullUpload[slot])
 		{
 			int rowInts = rows * width;
-			staging.writeInts(pixels, 0, 0, rowInts);
+			staging.writeIntsUnflushed(pixels, 0, 0, rowInts);
 			System.arraycopy(pixels, 0, previous, 0, rowInts);
 			dirtyRowStarts[slot][0] = 0;
 			dirtyRowHeights[slot][0] = rows;
@@ -124,7 +125,7 @@ final class GfxStreamingImage implements StreamingImage
 			int rowCount = y - startRow;
 			dirtyRows += rowCount;
 			int intOffset = startRow * width;
-			staging.writeInts(previous, intOffset, intOffset, rowCount * width);
+			staging.writeIntsUnflushed(previous, intOffset, intOffset, rowCount * width);
 			dirtyRowStarts[slot][rangeCount] = startRow;
 			dirtyRowHeights[slot][rangeCount] = rowCount;
 			rangeCount++;
@@ -165,6 +166,11 @@ final class GfxStreamingImage implements StreamingImage
 
 	private void recordDirtyUploadStats(int totalRows, int dirtyRows, int dirtyRanges, boolean fullUpload)
 	{
+		if (!logDirtyRows)
+		{
+			return;
+		}
+
 		dirtyLogFrames++;
 		dirtyLogRows += dirtyRows;
 		dirtyLogTotalRows += totalRows;
