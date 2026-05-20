@@ -150,7 +150,9 @@ Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nResizeMetalLayer(
 
         [CATransaction begin];
         [CATransaction setDisableActions: YES];
-        layer.bounds = CGRectMake(0, 0, w, h);
+        layer.anchorPoint = CGPointZero;
+        layer.position = CGPointZero;
+        layer.frame = CGRectMake(0, 0, w, h);
         layer.drawableSize = CGSizeMake(w * scale, h * scale);
         [CATransaction commit];
         [CATransaction flush];
@@ -381,6 +383,11 @@ Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nAttachMetalLayer(
         }
         metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
         metalLayer.contentsScale = scale;
+        metalLayer.anchorPoint = CGPointZero;
+        metalLayer.position = CGPointZero;
+        metalLayer.frame = CGRectMake(0, 0,
+                                      initialWidthPoints > 0 ? initialWidthPoints : 1,
+                                      initialHeightPoints > 0 ? initialHeightPoints : 1);
         /* drawableSize MUST start small here because vkCreateSwapchainKHR
          * later reads surfaceCapabilities.currentExtent, which MoltenVK
          * derives from drawableSize. A full-size value here makes
