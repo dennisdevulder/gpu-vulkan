@@ -7,7 +7,7 @@ import static org.lwjgl.vulkan.VK13.VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 import static org.lwjgl.vulkan.VK13.VK_FORMAT_B8G8R8A8_UNORM;
 import static org.lwjgl.vulkan.VK13.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 import static org.lwjgl.vulkan.VK13.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-import static org.lwjgl.vulkan.VK13.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+import static org.lwjgl.vulkan.VK13.VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
 import static org.lwjgl.vulkan.VK13.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
 import static org.lwjgl.vulkan.VK13.vkDeviceWaitIdle;
 
@@ -43,7 +43,8 @@ final class GfxStreamingImage implements StreamingImage
 			textures[i] = new Texture(device, width, height, VK_FORMAT_B8G8R8A8_UNORM);
 			stagings[i] = new Buffer(device, sizeBytes,
 				VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+				VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
 			stagings[i].mapPersistent();
 		}
 	}

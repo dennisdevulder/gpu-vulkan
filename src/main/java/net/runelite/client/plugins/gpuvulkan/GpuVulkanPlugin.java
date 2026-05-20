@@ -275,7 +275,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 				regionManager = new RegionManager();
 
 				renderExtensions = new RenderExtensions(
-					new DefaultVulkanRenderContext(client, config, gfx, device, sync, renderPass, textureArray));
+					new DefaultVulkanRenderContext(client, config, gfx, device, sync, renderPass, textureArray, stats));
 				renderExtensions.register(new BaseRenderer());
 				synchronized (queuedExtensions)
 				{
@@ -290,7 +290,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 				disposables.add(framebuffers);
 
 				renderer = new VulkanRenderer(device, renderPass, renderExtensions,
-					swapchain, depthBuffer, msaaColor, framebuffers, sync);
+					swapchain, depthBuffer, msaaColor, framebuffers, sync, stats);
 				disposables.add(renderer);
 
 				log.info("Vulkan ready: {} ({}x{}, {} swapchain images)",
@@ -652,9 +652,15 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		// projection MVP, so don't overwrite them here.
 		if (renderExtensions != null)
 		{
+			long start = System.nanoTime();
 			renderExtensions.beginFrame();
+			stats.addNanos(stats.beginFrameNanos, start);
+			start = System.nanoTime();
 			captureActors();
+			stats.addNanos(stats.actorCaptureNanos, start);
+			start = System.nanoTime();
 			renderExtensions.captureDynamicPending();
+			stats.addNanos(stats.pendingCaptureNanos, start);
 		}
 	}
 
@@ -783,7 +789,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	{
 		if (renderExtensions == null) return;
 		prepareScene(scene);
+		long start = System.nanoTime();
 		renderExtensions.captureScene(scene);
+		stats.addNanos(stats.sceneCaptureNanos, start);
 	}
 
 	@Override

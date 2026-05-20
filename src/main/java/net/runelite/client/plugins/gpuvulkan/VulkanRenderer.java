@@ -36,6 +36,7 @@ final class VulkanRenderer implements AutoCloseable
 	private final RenderPass renderPass;
 	private final RenderExtensions renderExtensions;
 	private final FrameSync sync;
+	private final DrawCallbackStats stats;
 
 	private final Swapchain swapchain;
 	private final DepthBuffer depthBuffer;
@@ -73,7 +74,8 @@ final class VulkanRenderer implements AutoCloseable
 				   RenderExtensions renderExtensions,
 				   Swapchain swapchain, DepthBuffer depthBuffer,
 				   MsaaColorBuffer msaaColor,
-				   Framebuffers framebuffers, FrameSync sync)
+				   Framebuffers framebuffers, FrameSync sync,
+				   DrawCallbackStats stats)
 	{
 		this.device = device;
 		this.renderPass = renderPass;
@@ -83,6 +85,7 @@ final class VulkanRenderer implements AutoCloseable
 		this.msaaColor = msaaColor;
 		this.framebuffers = framebuffers;
 		this.sync = sync;
+		this.stats = stats;
 		// On macOS the swapchain is still created (we need its surface
 		// capabilities for format selection and its initial extent), but
 		// vkAcquireNextImageKHR / vkQueuePresentKHR are bypassed — we
@@ -134,6 +137,8 @@ final class VulkanRenderer implements AutoCloseable
 				   int drawDistanceTiles, int fogDepthTiles, int gameTick,
 				   float smoothBanding, int overlayColor)
 	{
+		long frameStart = System.nanoTime();
+		stats.frames.incrementAndGet();
 		// Lazy rebuild: only rebuild when the swap-chain itself reports it's
 		// out-of-date (via SUBOPTIMAL/OUT_OF_DATE from acquire or present).
 		// Eager size-check rebuilds caused worse problems: sidebar collapse
@@ -184,11 +189,15 @@ final class VulkanRenderer implements AutoCloseable
 			// from FRAMES_IN_FLIGHT frames ago, producing the half-old, half-new
 			// UI texture that reads as the UI/scene "layer" intermittently
 			// covering and uncovering.
+			long start = System.nanoTime();
 			vkWaitForFences(device.handle(), sync.inFlightFence(), true, Long.MAX_VALUE);
+			stats.addNanos(stats.fenceWaitNanos, start);
 
 			// CPU-side memcpy into the persistently-mapped staging buffer. Done
 			// before recording the command buffer so the GPU read sees it.
+			start = System.nanoTime();
 			renderExtensions.uploadUiPixels(uiPixels, uiWidth, uiHeight);
+			stats.addNanos(stats.uiUploadNanos, start);
 
 			if (useCustomPresent)
 			{
@@ -201,6 +210,10 @@ final class VulkanRenderer implements AutoCloseable
 
 			sync.advance();
 		}
+		finally
+		{
+			stats.addNanos(stats.drawFrameNanos, frameStart);
+		}
 	}
 
 	/**
@@ -210,8 +223,10 @@ final class VulkanRenderer implements AutoCloseable
 	private void drawFrameSwapchain(MemoryStack stack, int desiredWidth, int desiredHeight)
 	{
 		IntBuffer pImageIdx = stack.mallocInt(1);
+		long start = System.nanoTime();
 		int acq = KHRSwapchain.vkAcquireNextImageKHR(device.handle(), swapchain.handle(),
 			Long.MAX_VALUE, sync.imageAvailable(), VK_NULL_HANDLE, pImageIdx);
+		stats.addNanos(stats.acquireNanos, start);
 
 		if (acq == VK_ERROR_OUT_OF_DATE_KHR)
 		{
@@ -232,11 +247,17 @@ final class VulkanRenderer implements AutoCloseable
 
 		VkCommandBuffer cmd = commandBuffers[sync.currentFrame()];
 		vkResetCommandBuffer(cmd, 0);
+		start = System.nanoTime();
 		recordClearPass(stack, cmd, framebuffers.get(imageIdx),
 			swapchain.width(), swapchain.height());
+		stats.addNanos(stats.commandRecordNanos, start);
 
+		start = System.nanoTime();
 		submit(stack, cmd, imageIdx);
+		stats.addNanos(stats.submitNanos, start);
+		start = System.nanoTime();
 		int present = present(stack, imageIdx);
+		stats.addNanos(stats.presentNanos, start);
 		if (present == VK_ERROR_OUT_OF_DATE_KHR || present == VK_SUBOPTIMAL_KHR)
 		{
 			swapchainNeedsRebuild = true;
@@ -263,6 +284,7 @@ final class VulkanRenderer implements AutoCloseable
 	 */
 	private void drawFrameCustomPresent(MemoryStack stack, int desiredWidth, int desiredHeight)
 	{
+		long start = System.nanoTime();
 		long[] d = MacOSMetalHelper.nextDrawable();
 		if (d == null)
 		{
@@ -275,6 +297,7 @@ final class VulkanRenderer implements AutoCloseable
 				return;
 			}
 		}
+		stats.addNanos(stats.customDrawableNanos, start);
 		long drawable = d[0];
 		long mtlTexture = d[1];
 		int width = (int) d[2];
@@ -303,11 +326,17 @@ final class VulkanRenderer implements AutoCloseable
 
 		VkCommandBuffer cmd = commandBuffers[sync.currentFrame()];
 		vkResetCommandBuffer(cmd, 0);
+		start = System.nanoTime();
 		recordClearPass(stack, cmd, entry.framebuffer, width, height);
+		stats.addNanos(stats.commandRecordNanos, start);
 
+		start = System.nanoTime();
 		submitNoSemaphores(stack, cmd);
+		stats.addNanos(stats.submitNanos, start);
 
+		start = System.nanoTime();
 		MacOSMetalHelper.presentDrawable(drawable, device.metalCommandQueue());
+		stats.addNanos(stats.presentNanos, start);
 	}
 
 	@Override
@@ -356,7 +385,9 @@ final class VulkanRenderer implements AutoCloseable
 
 		// UI texture upload + transitions happen OUTSIDE the render pass —
 		// vkCmdCopyBufferToImage isn't allowed inside one.
+		long start = System.nanoTime();
 		renderExtensions.recordBeforeRenderPass(cmd);
+		stats.addNanos(stats.beforeRenderPassNanos, start);
 
 		// Two clears now: colour attachment then depth attachment, in the same
 		// order they were declared in the render pass. Depth clear = 0 because
@@ -445,7 +476,9 @@ final class VulkanRenderer implements AutoCloseable
 			gameTick, textureLightMode,
 			colorBlindMode, colorBlindIntensity,
 			smoothBanding, overlayColor);
+		start = System.nanoTime();
 		renderExtensions.recordRenderPass(frame);
+		stats.addNanos(stats.renderPassNanos, start);
 
 		// Switch viewport back to full canvas for the UI fullscreen quad — the UI
 		// texture covers everything, including the regions outside the scene rect.
