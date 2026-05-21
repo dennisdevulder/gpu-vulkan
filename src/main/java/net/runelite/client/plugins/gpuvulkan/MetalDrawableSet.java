@@ -54,7 +54,6 @@ final class MetalDrawableSet implements AutoCloseable
 		long view;
 		long framebuffer;
 		long textureHandle;
-		long inFlightFence;
 		int width;
 		int height;
 	}
@@ -80,7 +79,6 @@ final class MetalDrawableSet implements AutoCloseable
 		Entry e = byTextureHandle.get(textureHandle);
 		if (e != null && e.width == width && e.height == height)
 		{
-			waitForReuse(e);
 			return e;
 		}
 		if (e != null)
@@ -94,11 +92,6 @@ final class MetalDrawableSet implements AutoCloseable
 		e = buildEntry(textureHandle, width, height, renderPass, depth, msaa);
 		byTextureHandle.put(textureHandle, e);
 		return e;
-	}
-
-	void markSubmitted(Entry e, long fence)
-	{
-		e.inFlightFence = fence;
 	}
 
 	/** Flushes all cached entries. Call on canvas resize before the depth /
@@ -226,7 +219,6 @@ final class MetalDrawableSet implements AutoCloseable
 
 	private void destroyEntry(Entry e)
 	{
-		waitForReuse(e);
 		if (e.framebuffer != VK_NULL_HANDLE)
 		{
 			vkDestroyFramebuffer(device.handle(), e.framebuffer, null);
@@ -244,16 +236,6 @@ final class MetalDrawableSet implements AutoCloseable
 			MacOSMetalHelper.releaseObject(e.textureHandle);
 			e.textureHandle = 0L;
 		}
-	}
-
-	private void waitForReuse(Entry e)
-	{
-		if (e.inFlightFence == VK_NULL_HANDLE)
-		{
-			return;
-		}
-		vkWaitForFences(device.handle(), e.inFlightFence, true, Long.MAX_VALUE);
-		e.inFlightFence = VK_NULL_HANDLE;
 	}
 
 	/** Accessors mirroring the {@link Swapchain#imageFormat()} hook so the

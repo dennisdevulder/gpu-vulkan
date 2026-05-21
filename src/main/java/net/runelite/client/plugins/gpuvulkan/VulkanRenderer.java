@@ -253,13 +253,10 @@ final class VulkanRenderer implements AutoCloseable
 	 * Metal command buffer we own (bypassing
 	 * {@code vkQueuePresentKHR}).
 	 *
-	 * <p>Ordering: {@code vkQueueSubmit} writes render commands into the
-	 * MTLCommandQueue MoltenVK manages for our VkQueue. The subsequent
-	 * {@code [drawable present]} call in {@link MacOSMetalHelper#presentDrawable}
-	 * runs on that SAME MTLCommandQueue (we extracted it via
-	 * {@code vkExportMetalObjectsEXT}), so Metal's in-queue ordering
-	 * guarantees the present is scheduled after the render. No cross-queue
-	 * semaphore needed.
+	 * <p>Ordering: wait for the Vulkan submit fence before scheduling the
+	 * Metal present. MoltenVK exposes the underlying Metal queue, but relying
+	 * on implicit ordering between MoltenVK's internal command buffer commit
+	 * and our own Metal command buffer has proven crash-prone on macOS.
 	 */
 	private void drawFrameCustomPresent(MemoryStack stack, int desiredWidth, int desiredHeight)
 	{
@@ -306,7 +303,8 @@ final class VulkanRenderer implements AutoCloseable
 		recordClearPass(stack, cmd, entry.framebuffer, width, height);
 
 		submitNoSemaphores(stack, cmd);
-		metalDrawables.markSubmitted(entry, sync.inFlightFence());
+		Vk.check("vkWaitForFences (custom present)",
+			vkWaitForFences(device.handle(), sync.inFlightFence(), true, Long.MAX_VALUE));
 
 		MacOSMetalHelper.presentDrawable(drawable, device.metalCommandQueue());
 	}
