@@ -35,6 +35,11 @@ final class RenderPass implements AutoCloseable
 
 	RenderPass(VulkanDevice device, int colorFormat, int samples)
 	{
+		this(device, colorFormat, samples, true);
+	}
+
+	RenderPass(VulkanDevice device, int colorFormat, int samples, boolean presentFinalLayout)
+	{
 		this.device = device;
 		this.samples = samples;
 		try (MemoryStack stack = stackPush())
@@ -57,7 +62,9 @@ final class RenderPass implements AutoCloseable
 				.initialLayout(VK_IMAGE_LAYOUT_UNDEFINED)
 				.finalLayout(msaa
 					? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-					: KHRSwapchain.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+					: presentFinalLayout
+						? KHRSwapchain.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+						: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
 			// Attachment 1: depth. Same sample count as color. Never stored.
 			attachments.get(1)
@@ -89,7 +96,9 @@ final class RenderPass implements AutoCloseable
 					.stencilLoadOp(VK_ATTACHMENT_LOAD_OP_DONT_CARE)
 					.stencilStoreOp(VK_ATTACHMENT_STORE_OP_DONT_CARE)
 					.initialLayout(VK_IMAGE_LAYOUT_UNDEFINED)
-					.finalLayout(KHRSwapchain.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+					.finalLayout(presentFinalLayout
+						? KHRSwapchain.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+						: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
 				resolveRef = VkAttachmentReference.calloc(1, stack);
 				resolveRef.get(0).attachment(2).layout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);

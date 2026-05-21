@@ -272,7 +272,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 					disposables.add(msaaColor);
 				}
 
-				renderPass = new RenderPass(device, swapchain.imageFormat(), samples);
+				renderPass = new RenderPass(device, swapchain.imageFormat(), samples, !isMac);
 				disposables.add(renderPass);
 
 				gfx = Gfx.wrap(device, sync, renderPass);
