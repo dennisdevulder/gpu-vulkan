@@ -260,6 +260,11 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 					default:      desiredSamples = 1;  break;
 				}
 				int samples = device.pickSampleCount(desiredSamples);
+				if (isMac && samples != org.lwjgl.vulkan.VK13.VK_SAMPLE_COUNT_1_BIT)
+				{
+					log.info("Disabling MSAA on macOS custom-present path");
+					samples = org.lwjgl.vulkan.VK13.VK_SAMPLE_COUNT_1_BIT;
+				}
 
 				depthBuffer = new DepthBuffer(device, swapchain.width(), swapchain.height(), samples);
 				disposables.add(depthBuffer);
@@ -272,7 +277,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 					disposables.add(msaaColor);
 				}
 
-				renderPass = new RenderPass(device, swapchain.imageFormat(), samples);
+				renderPass = new RenderPass(device, swapchain.imageFormat(), samples, !isMac);
 				disposables.add(renderPass);
 
 				gfx = Gfx.wrap(device, sync, renderPass);
