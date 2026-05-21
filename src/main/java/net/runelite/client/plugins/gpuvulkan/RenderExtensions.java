@@ -86,6 +86,11 @@ final class RenderExtensions implements AutoCloseable
 		forEachExtension("captureModelSorted", extension -> extension.captureModel(projection, model, orientation, worldX, worldY, worldZ));
 	}
 
+	void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ, int renderMode)
+	{
+		forEachExtension("captureModelSorted", extension -> extension.captureModel(projection, model, orientation, worldX, worldY, worldZ, renderMode));
+	}
+
 	void setLevelRange(int minLevel, int maxLevel)
 	{
 		forEachExtension("setLevelRange", extension -> extension.setLevelRange(minLevel, maxLevel));

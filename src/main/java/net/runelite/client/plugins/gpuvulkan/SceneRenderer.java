@@ -41,6 +41,7 @@ import net.runelite.api.DecorativeObject;
 import net.runelite.api.GameObject;
 import net.runelite.api.GroundObject;
 import net.runelite.api.Model;
+import net.runelite.api.Perspective;
 import net.runelite.api.Projection;
 import net.runelite.api.Renderable;
 import net.runelite.api.Scene;
@@ -83,7 +84,9 @@ final class SceneRenderer implements AutoCloseable
 	private static final int MAX_VERTICES = 8_000_000;
 	private static final long BUFFER_BYTES = (long) MAX_VERTICES * ScenePipeline.VERTEX_STRIDE;
 	private static final int HSL_HIDDEN = 12345678;
+	private static final int OPAQUE_UNSORTED_FACE_THRESHOLD = 24;
 	private static final int SCENE_OFFSET = (Constants.EXTENDED_SCENE_SIZE - Constants.SCENE_SIZE) / 2;
+	private static final float[] HSL_RGB = buildHslRgbTable();
 
 	private final VulkanDevice device;
 	private final FrameSync sync;
@@ -93,6 +96,14 @@ final class SceneRenderer implements AutoCloseable
 	private final ByteBuffer mapped;
 	private final long descriptorSet;
 	private final int slotBytes;
+	private final DrawCallbackStats stats;
+	private long writePtr;
+	private final float[] cullLocalX = new float[ModelSorter.MAX_VERTEX_COUNT];
+	private final float[] cullLocalY = new float[ModelSorter.MAX_VERTEX_COUNT];
+	private final float[] cullLocalZ = new float[ModelSorter.MAX_VERTEX_COUNT];
+	private final float[] cullProjX = new float[ModelSorter.MAX_VERTEX_COUNT];
+	private final float[] cullProjY = new float[ModelSorter.MAX_VERTEX_COUNT];
+	private final float[] cullProjectScratch = new float[3];
 
 	private static final int MAX_PLANES = 4;
 
@@ -185,10 +196,12 @@ final class SceneRenderer implements AutoCloseable
 	private final ModelSorter sorter = new ModelSorter();
 
 	SceneRenderer(VulkanDevice device, FrameSync sync,
-		RenderPass renderPass, TextureArray textureArray)
+		RenderPass renderPass, TextureArray textureArray,
+		DrawCallbackStats stats)
 	{
 		this.device = device;
 		this.sync = sync;
+		this.stats = stats;
 		this.fillPipeline = new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL, true, renderPass.samples());
 		// fillModeNonSolid is required for VK_POLYGON_MODE_LINE; without it
 		// (llvmpipe, some embedded SoCs) wireframe collapses to FILL.
@@ -257,7 +270,9 @@ final class SceneRenderer implements AutoCloseable
 			vkWaitForFences(device.handle(), stack.longs(sync.inFlightFence()), true, Long.MAX_VALUE);
 		}
 		vertexCount = regionEnds[LAST_STATIC.ordinal()];
-		mapped.position(sync.currentFrame() * slotBytes + vertexCount * ScenePipeline.VERTEX_STRIDE);
+		writePtr = MemoryUtil.memAddress(mapped)
+			+ (long) sync.currentFrame() * slotBytes
+			+ (long) vertexCount * ScenePipeline.VERTEX_STRIDE;
 		overflowed = false;
 		seenCaptures.clear();
 	}
@@ -294,7 +309,7 @@ final class SceneRenderer implements AutoCloseable
 			}
 		}
 		vertexCount = 0;
-		mapped.position(0);
+		writePtr = MemoryUtil.memAddress(mapped);
 		overflowed = false;
 		tileRoofCount = 0;
 		pendingRenderables.clear();
@@ -675,6 +690,8 @@ final class SceneRenderer implements AutoCloseable
 
 	private void captureModelUnsorted(Model m, int orient, int worldX, int worldY, int worldZ)
 	{
+		boolean detailedStats = stats.isDetailedModelStats();
+		long emitStart = detailedStats ? System.nanoTime() : 0L;
 		float[] vx = m.getVerticesX();
 		float[] vy = m.getVerticesY();
 		float[] vz = m.getVerticesZ();
@@ -701,9 +718,8 @@ final class SceneRenderer implements AutoCloseable
 		final byte overrideLum    = m.getOverrideLuminance();
 		final boolean hasOverride = (overrideAmount & 0xFF) != 0;
 
-		double theta = (orient & 0x7FF) * (Math.PI * 2.0 / 2048.0);
-		float cos = (float) Math.cos(theta);
-		float sin = (float) Math.sin(theta);
+		float cos = Perspective.COSINE[orient & 0x7FF] / 65536f;
+		float sin = Perspective.SINE[orient & 0x7FF] / 65536f;
 
 		// LANDMINE: Mesh.getFaceCount(), NOT fa.length. Engine over-allocates
 		// face index arrays for assembled actor models (player composition,
@@ -713,6 +729,9 @@ final class SceneRenderer implements AutoCloseable
 
 		float[] uv = uvScratch;
 		int wrote = 0;
+		int texturedFaces = 0;
+		int overrideFaces = 0;
+		long uvNanos = 0;
 		for (int f = 0; f < faces; f++)
 		{
 			int col1 = c1 != null ? c1[f] : 0;
@@ -736,9 +755,15 @@ final class SceneRenderer implements AutoCloseable
 			float u0 = 0, v0 = 0, u1 = 0, v1 = 0, u2 = 0, v2 = 0;
 			if (faceTextures != null && faceTextures[f] != -1)
 			{
+				long uvStart = detailedStats ? System.nanoTime() : 0L;
 				texLayer = (faceTextures[f] & 0xFFFF) + 1;
 				computeFaceUvs(uv, vx, vy, vz, fa[f], fb[f], fc[f],
 					textureFaces, texIndicesA, texIndicesB, texIndicesC, f);
+				if (detailedStats)
+				{
+					uvNanos += System.nanoTime() - uvStart;
+				}
+				texturedFaces++;
 				u0 = uv[0]; v0 = uv[1];
 				u1 = uv[2]; v1 = uv[3];
 				u2 = uv[4]; v2 = uv[5];
@@ -749,6 +774,7 @@ final class SceneRenderer implements AutoCloseable
 			// mirrors stock SceneUploader.uploadTempModel scoping.
 			if (hasOverride && texLayer == 0)
 			{
+				overrideFaces++;
 				col1 = applyHslOverride(col1, overrideHue, overrideSat, overrideLum, overrideAmount);
 				col2 = applyHslOverride(col2, overrideHue, overrideSat, overrideLum, overrideAmount);
 				col3 = applyHslOverride(col3, overrideHue, overrideSat, overrideLum, overrideAmount);
@@ -758,13 +784,69 @@ final class SceneRenderer implements AutoCloseable
 			int bias = faceBias != null ? (faceBias[f] & 0xFF) : 0;
 			int trans = faceTransparencies != null ? (faceTransparencies[f] & 0xFF) : 0;
 			int packedTexLayer = texLayer | (bias << 16) | (trans << 24);
+			boolean noUv = texLayer == 0;
 
-			writeRotatedVertex(vx[fa[f]], vy[fa[f]], vz[fa[f]], cos, sin, worldX, worldY, worldZ, col1, u0, v0, packedTexLayer);
-			writeRotatedVertex(vx[fb[f]], vy[fb[f]], vz[fb[f]], cos, sin, worldX, worldY, worldZ, col2, u1, v1, packedTexLayer);
-			writeRotatedVertex(vx[fc[f]], vy[fc[f]], vz[fc[f]], cos, sin, worldX, worldY, worldZ, col3, u2, v2, packedTexLayer);
+			int ia = fa[f];
+			int ib = fb[f];
+			int ic = fc[f];
+			if (col1 == col2 && col1 == col3)
+			{
+				int rgbOffset = (col1 & 0xFFFF) * 3;
+				float light = (float) (col1 & 0xFFFF);
+				float r = HSL_RGB[rgbOffset];
+				float g = HSL_RGB[rgbOffset + 1];
+				float b = HSL_RGB[rgbOffset + 2];
+				if (noUv)
+				{
+					writeRotatedVertexRgbNoUv(vx[ia], vy[ia], vz[ia], cos, sin, worldX, worldY, worldZ, light, r, g, b, packedTexLayer);
+					writeRotatedVertexRgbNoUv(vx[ib], vy[ib], vz[ib], cos, sin, worldX, worldY, worldZ, light, r, g, b, packedTexLayer);
+					writeRotatedVertexRgbNoUv(vx[ic], vy[ic], vz[ic], cos, sin, worldX, worldY, worldZ, light, r, g, b, packedTexLayer);
+				}
+				else
+				{
+					writeRotatedVertexRgb(vx[ia], vy[ia], vz[ia], cos, sin, worldX, worldY, worldZ, light, r, g, b, u0, v0, packedTexLayer);
+					writeRotatedVertexRgb(vx[ib], vy[ib], vz[ib], cos, sin, worldX, worldY, worldZ, light, r, g, b, u1, v1, packedTexLayer);
+					writeRotatedVertexRgb(vx[ic], vy[ic], vz[ic], cos, sin, worldX, worldY, worldZ, light, r, g, b, u2, v2, packedTexLayer);
+				}
+			}
+			else
+			{
+				int rgbOffset1 = (col1 & 0xFFFF) * 3;
+				int rgbOffset2 = (col2 & 0xFFFF) * 3;
+				int rgbOffset3 = (col3 & 0xFFFF) * 3;
+				if (noUv)
+				{
+					writeRotatedVertexRgbNoUv(vx[ia], vy[ia], vz[ia], cos, sin, worldX, worldY, worldZ,
+						(float) (col1 & 0xFFFF), HSL_RGB[rgbOffset1], HSL_RGB[rgbOffset1 + 1], HSL_RGB[rgbOffset1 + 2], packedTexLayer);
+					writeRotatedVertexRgbNoUv(vx[ib], vy[ib], vz[ib], cos, sin, worldX, worldY, worldZ,
+						(float) (col2 & 0xFFFF), HSL_RGB[rgbOffset2], HSL_RGB[rgbOffset2 + 1], HSL_RGB[rgbOffset2 + 2], packedTexLayer);
+					writeRotatedVertexRgbNoUv(vx[ic], vy[ic], vz[ic], cos, sin, worldX, worldY, worldZ,
+						(float) (col3 & 0xFFFF), HSL_RGB[rgbOffset3], HSL_RGB[rgbOffset3 + 1], HSL_RGB[rgbOffset3 + 2], packedTexLayer);
+				}
+				else
+				{
+					writeRotatedVertexRgb(vx[ia], vy[ia], vz[ia], cos, sin, worldX, worldY, worldZ,
+						(float) (col1 & 0xFFFF), HSL_RGB[rgbOffset1], HSL_RGB[rgbOffset1 + 1], HSL_RGB[rgbOffset1 + 2], u0, v0, packedTexLayer);
+					writeRotatedVertexRgb(vx[ib], vy[ib], vz[ib], cos, sin, worldX, worldY, worldZ,
+						(float) (col2 & 0xFFFF), HSL_RGB[rgbOffset2], HSL_RGB[rgbOffset2 + 1], HSL_RGB[rgbOffset2 + 2], u1, v1, packedTexLayer);
+					writeRotatedVertexRgb(vx[ic], vy[ic], vz[ic], cos, sin, worldX, worldY, worldZ,
+						(float) (col3 & 0xFFFF), HSL_RGB[rgbOffset3], HSL_RGB[rgbOffset3 + 1], HSL_RGB[rgbOffset3 + 2], u2, v2, packedTexLayer);
+				}
+			}
 			wrote += 3;
 		}
 		vertexCount += wrote;
+		if (detailedStats)
+		{
+			stats.unsortedModels.incrementAndGet();
+			stats.unsortedFaces.addAndGet(wrote / 3);
+			long emitNanos = System.nanoTime() - emitStart;
+			stats.modelEmitNanos.addAndGet(emitNanos);
+			stats.modelUnsortedEmitNanos.addAndGet(emitNanos);
+			stats.modelUvNanos.addAndGet(uvNanos);
+			stats.texturedEmitFaces.addAndGet(texturedFaces);
+			stats.overrideEmitFaces.addAndGet(overrideFaces);
+		}
 	}
 
 	/**
@@ -783,15 +865,52 @@ final class SceneRenderer implements AutoCloseable
 	 */
 	void captureModelSorted(Projection proj, Model m, int orient, int worldX, int worldY, int worldZ)
 	{
+		captureModelSorted(proj, m, orient, worldX, worldY, worldZ, Renderable.RENDERMODE_DEFAULT);
+	}
+
+	void captureModelSorted(Projection proj, Model m, int orient, int worldX, int worldY, int worldZ, int renderMode)
+	{
 		if (m == null || proj == null) return;
 		if (!markCaptureSeen(m, worldX, worldZ)) return;
 
-		if (!sorter.sort(proj, m, orient, worldX, worldY, worldZ))
+		boolean detailedStats = stats.isDetailedModelStats();
+		boolean needsFaceSort = renderMode == Renderable.RENDERMODE_SORTED_NO_DEPTH;
+		if (!needsFaceSort && m.getFaceCount() <= OPAQUE_UNSORTED_FACE_THRESHOLD)
+		{
+			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
+			return;
+		}
+
+		if (!needsFaceSort)
+		{
+			if (!captureModelCullOnlyFused(proj, m, orient, worldX, worldY, worldZ))
+			{
+				if (detailedStats)
+				{
+					stats.sortFallbackModels.incrementAndGet();
+				}
+				captureModelUnsorted(m, orient, worldX, worldY, worldZ);
+			}
+			return;
+		}
+
+		long sortStart = detailedStats ? System.nanoTime() : 0L;
+		boolean sorted = sorter.sort(proj, m, orient, worldX, worldY, worldZ);
+		if (detailedStats)
+		{
+			stats.addNanos(stats.modelFullSortNanos, sortStart);
+			stats.addNanos(stats.modelSortNanos, sortStart);
+		}
+		if (!sorted)
 		{
 			// Sorting is a quality pass, not a visibility gate. Some transient
 			// renderables (projectiles / spotanims) have bounds that make the
 			// sorter reject them; keep them visible by falling back to the basic
 			// model emitter.
+			if (detailedStats)
+			{
+				stats.sortFallbackModels.incrementAndGet();
+			}
 			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
 			return;
 		}
@@ -799,6 +918,10 @@ final class SceneRenderer implements AutoCloseable
 		int faces = sorter.sortedCount;
 		if (faces == 0)
 		{
+			if (detailedStats)
+			{
+				stats.sortFallbackModels.incrementAndGet();
+			}
 			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
 			return;
 		}
@@ -839,6 +962,10 @@ final class SceneRenderer implements AutoCloseable
 		float[] lz = sorter.localZ;
 
 		int wrote = 0;
+		long emitStart = detailedStats ? System.nanoTime() : 0L;
+		int texturedFaces = 0;
+		int overrideFaces = 0;
+		long uvNanos = 0;
 		for (int i = 0; i < faces; i++)
 		{
 			int f = sorter.sortedFaces[i];
@@ -861,9 +988,15 @@ final class SceneRenderer implements AutoCloseable
 			float u0 = 0, v0 = 0, u1 = 0, v1 = 0, u2 = 0, v2 = 0;
 			if (faceTextures != null && faceTextures[f] != -1)
 			{
+				long uvStart = detailedStats ? System.nanoTime() : 0L;
 				texLayer = (faceTextures[f] & 0xFFFF) + 1;
 				computeFaceUvs(uv, vxs, vys, vzs, fa[f], fb[f], fc[f],
 					textureFaces, texIndicesA, texIndicesB, texIndicesC, f);
+				if (detailedStats)
+				{
+					uvNanos += System.nanoTime() - uvStart;
+				}
+				texturedFaces++;
 				u0 = uv[0]; v0 = uv[1];
 				u1 = uv[2]; v1 = uv[3];
 				u2 = uv[4]; v2 = uv[5];
@@ -871,6 +1004,7 @@ final class SceneRenderer implements AutoCloseable
 
 			if (hasOverride && texLayer == 0)
 			{
+				overrideFaces++;
 				col1 = applyHslOverride(col1, overrideHue, overrideSat, overrideLum, overrideAmount);
 				col2 = applyHslOverride(col2, overrideHue, overrideSat, overrideLum, overrideAmount);
 				col3 = applyHslOverride(col3, overrideHue, overrideSat, overrideLum, overrideAmount);
@@ -879,14 +1013,333 @@ final class SceneRenderer implements AutoCloseable
 			int bias = faceBiasArr != null ? (faceBiasArr[f] & 0xFF) : 0;
 			int trans = faceTransparencies != null ? (faceTransparencies[f] & 0xFF) : 0;
 			int packedTexLayer = texLayer | (bias << 16) | (trans << 24);
+			boolean noUv = texLayer == 0;
 
-			// writeHslVert (no rotation) — positions already world-space.
-			writeHslVert(lx[fa[f]], ly[fa[f]], lz[fa[f]], col1, u0, v0, packedTexLayer);
-			writeHslVert(lx[fb[f]], ly[fb[f]], lz[fb[f]], col2, u1, v1, packedTexLayer);
-			writeHslVert(lx[fc[f]], ly[fc[f]], lz[fc[f]], col3, u2, v2, packedTexLayer);
+			int ia = fa[f];
+			int ib = fb[f];
+			int ic = fc[f];
+			if (col1 == col2 && col1 == col3)
+			{
+				int rgbOffset = (col1 & 0xFFFF) * 3;
+				float light = (float) (col1 & 0xFFFF);
+				float r = HSL_RGB[rgbOffset];
+				float g = HSL_RGB[rgbOffset + 1];
+				float b = HSL_RGB[rgbOffset + 2];
+				if (noUv)
+				{
+					writePackedTriangleRgbNoUv(
+						lx[ia], ly[ia], lz[ia],
+						lx[ib], ly[ib], lz[ib],
+						lx[ic], ly[ic], lz[ic],
+						light, r, g, b, packedTexLayer);
+				}
+				else
+				{
+					writePackedVertexRgb(lx[ia], ly[ia], lz[ia], light, r, g, b, u0, v0, packedTexLayer);
+					writePackedVertexRgb(lx[ib], ly[ib], lz[ib], light, r, g, b, u1, v1, packedTexLayer);
+					writePackedVertexRgb(lx[ic], ly[ic], lz[ic], light, r, g, b, u2, v2, packedTexLayer);
+				}
+			}
+			else
+			{
+				int rgbOffset1 = (col1 & 0xFFFF) * 3;
+				int rgbOffset2 = (col2 & 0xFFFF) * 3;
+				int rgbOffset3 = (col3 & 0xFFFF) * 3;
+				if (noUv)
+				{
+					writePackedVertexRgbNoUv(lx[ia], ly[ia], lz[ia],
+						(float) (col1 & 0xFFFF), HSL_RGB[rgbOffset1], HSL_RGB[rgbOffset1 + 1], HSL_RGB[rgbOffset1 + 2], packedTexLayer);
+					writePackedVertexRgbNoUv(lx[ib], ly[ib], lz[ib],
+						(float) (col2 & 0xFFFF), HSL_RGB[rgbOffset2], HSL_RGB[rgbOffset2 + 1], HSL_RGB[rgbOffset2 + 2], packedTexLayer);
+					writePackedVertexRgbNoUv(lx[ic], ly[ic], lz[ic],
+						(float) (col3 & 0xFFFF), HSL_RGB[rgbOffset3], HSL_RGB[rgbOffset3 + 1], HSL_RGB[rgbOffset3 + 2], packedTexLayer);
+				}
+				else
+				{
+					writePackedVertexRgb(lx[ia], ly[ia], lz[ia],
+						(float) (col1 & 0xFFFF), HSL_RGB[rgbOffset1], HSL_RGB[rgbOffset1 + 1], HSL_RGB[rgbOffset1 + 2], u0, v0, packedTexLayer);
+					writePackedVertexRgb(lx[ib], ly[ib], lz[ib],
+						(float) (col2 & 0xFFFF), HSL_RGB[rgbOffset2], HSL_RGB[rgbOffset2 + 1], HSL_RGB[rgbOffset2 + 2], u1, v1, packedTexLayer);
+					writePackedVertexRgb(lx[ic], ly[ic], lz[ic],
+						(float) (col3 & 0xFFFF), HSL_RGB[rgbOffset3], HSL_RGB[rgbOffset3 + 1], HSL_RGB[rgbOffset3 + 2], u2, v2, packedTexLayer);
+				}
+			}
 			wrote += 3;
 		}
 		vertexCount += wrote;
+		if (detailedStats)
+		{
+			stats.sortedModels.incrementAndGet();
+			if (needsFaceSort)
+			{
+				stats.fullSortModels.incrementAndGet();
+				stats.fullSortTransparentFaces.addAndGet(countTransparentFaces(m));
+			}
+			else
+			{
+				stats.cullOnlyModels.incrementAndGet();
+			}
+			stats.sortedFaces.addAndGet(wrote / 3);
+			long emitNanos = System.nanoTime() - emitStart;
+			stats.modelEmitNanos.addAndGet(emitNanos);
+			stats.modelSortedEmitNanos.addAndGet(emitNanos);
+			stats.modelUvNanos.addAndGet(uvNanos);
+			stats.texturedEmitFaces.addAndGet(texturedFaces);
+			stats.overrideEmitFaces.addAndGet(overrideFaces);
+		}
+	}
+
+	private boolean captureModelCullOnlyFused(Projection proj, Model m, int orientation, int wx, int wy, int wz)
+	{
+		boolean detailedStats = stats.isDetailedModelStats();
+		final int modelVertexCount = m.getVerticesCount();
+		if (modelVertexCount > ModelSorter.MAX_VERTEX_COUNT)
+		{
+			return false;
+		}
+
+		final float[] vxs = m.getVerticesX();
+		final float[] vys = m.getVerticesY();
+		final float[] vzs = m.getVerticesZ();
+		if (vxs == null || vys == null || vzs == null)
+		{
+			return false;
+		}
+
+		final int faceCount = Math.min(m.getFaceCount(), ModelSorter.MAX_FACE_COUNT);
+		final int[] fa = m.getFaceIndices1();
+		final int[] fb = m.getFaceIndices2();
+		final int[] fc = m.getFaceIndices3();
+		if (fa == null || fb == null || fc == null)
+		{
+			return false;
+		}
+
+		float orientSine = 0f;
+		float orientCosine = 0f;
+		if (orientation != 0)
+		{
+			orientSine = Perspective.SINE[orientation & 0x7FF] / 65536f;
+			orientCosine = Perspective.COSINE[orientation & 0x7FF] / 65536f;
+		}
+
+		long cullStart = detailedStats ? System.nanoTime() : 0L;
+		for (int v = 0; v < modelVertexCount; v++)
+		{
+			float vx = vxs[v];
+			float vy = vys[v];
+			float vz = vzs[v];
+
+			if (orientation != 0)
+			{
+				float x0 = vx;
+				vx = vz * orientSine + x0 * orientCosine;
+				vz = vz * orientCosine - x0 * orientSine;
+			}
+
+			vx += wx;
+			vy += wy;
+			vz += wz;
+
+			cullLocalX[v] = vx;
+			cullLocalY[v] = vy;
+			cullLocalZ[v] = vz;
+
+			float[] p = proj.project(vx, vy, vz, cullProjectScratch);
+			if (p[2] < 50f)
+			{
+				return false;
+			}
+
+			cullProjX[v] = p[0] / p[2];
+			cullProjY[v] = p[1] / p[2];
+		}
+		if (detailedStats)
+		{
+			long cullNanos = System.nanoTime() - cullStart;
+			stats.modelCullOnlyNanos.addAndGet(cullNanos);
+			stats.modelSortNanos.addAndGet(cullNanos);
+		}
+
+		int[] c1 = m.getFaceColors1();
+		int[] c2 = m.getFaceColors2();
+		int[] c3 = m.getFaceColors3();
+		short[] faceTextures = m.getFaceTextures();
+		byte[] textureFaces = m.getTextureFaces();
+		int[] texIndicesA = m.getTexIndices1();
+		int[] texIndicesB = m.getTexIndices2();
+		int[] texIndicesC = m.getTexIndices3();
+		byte[] faceTransparencies = m.getFaceTransparencies();
+		byte[] faceBiasArr = m.getFaceBias();
+
+		final byte overrideAmount = m.getOverrideAmount();
+		final byte overrideHue = m.getOverrideHue();
+		final byte overrideSat = m.getOverrideSaturation();
+		final byte overrideLum = m.getOverrideLuminance();
+		final boolean hasOverride = (overrideAmount & 0xFF) != 0;
+		float[] uv = uvScratch;
+
+		int wrote = 0;
+		int texturedFaces = 0;
+		int overrideFaces = 0;
+		long uvNanos = 0;
+		long emitStart = detailedStats ? System.nanoTime() : 0L;
+		for (int f = 0; f < faceCount; f++)
+		{
+			if (c3 != null && c3[f] == -2)
+			{
+				continue;
+			}
+
+			final int ia = fa[f];
+			final int ib = fb[f];
+			final int ic = fc[f];
+
+			final float aX = cullProjX[ia], aY = cullProjY[ia];
+			final float bX = cullProjX[ib], bY = cullProjY[ib];
+			final float cX = cullProjX[ic], cY = cullProjY[ic];
+
+			if ((aX - bX) * (cY - bY) - (cX - bX) * (aY - bY) <= 0)
+			{
+				continue;
+			}
+
+			if (vertexCount + wrote + 3 > MAX_VERTICES)
+			{
+				overflow();
+				break;
+			}
+
+			int col1 = c1 != null ? c1[f] : 0;
+			int col2 = col1;
+			int col3 = col1;
+			if (c3 != null)
+			{
+				int raw3 = c3[f];
+				if (raw3 != -1)
+				{
+					col2 = c2[f];
+					col3 = raw3;
+				}
+			}
+
+			int texLayer = 0;
+			float u0 = 0, v0 = 0, u1 = 0, v1 = 0, u2 = 0, v2 = 0;
+			if (faceTextures != null && faceTextures[f] != -1)
+			{
+				long uvStart = detailedStats ? System.nanoTime() : 0L;
+				texLayer = (faceTextures[f] & 0xFFFF) + 1;
+				computeFaceUvs(uv, vxs, vys, vzs, ia, ib, ic, textureFaces, texIndicesA, texIndicesB, texIndicesC, f);
+				if (detailedStats)
+				{
+					uvNanos += System.nanoTime() - uvStart;
+				}
+				texturedFaces++;
+				u0 = uv[0]; v0 = uv[1];
+				u1 = uv[2]; v1 = uv[3];
+				u2 = uv[4]; v2 = uv[5];
+			}
+
+			if (hasOverride && texLayer == 0)
+			{
+				overrideFaces++;
+				col1 = applyHslOverride(col1, overrideHue, overrideSat, overrideLum, overrideAmount);
+				col2 = applyHslOverride(col2, overrideHue, overrideSat, overrideLum, overrideAmount);
+				col3 = applyHslOverride(col3, overrideHue, overrideSat, overrideLum, overrideAmount);
+			}
+
+			int bias = faceBiasArr != null ? (faceBiasArr[f] & 0xFF) : 0;
+			int trans = faceTransparencies != null ? (faceTransparencies[f] & 0xFF) : 0;
+			int packedTexLayer = texLayer | (bias << 16) | (trans << 24);
+			boolean noUv = texLayer == 0;
+
+			if (col1 == col2 && col1 == col3)
+			{
+				int rgbOffset = (col1 & 0xFFFF) * 3;
+				float light = (float) (col1 & 0xFFFF);
+				float r = HSL_RGB[rgbOffset];
+				float g = HSL_RGB[rgbOffset + 1];
+				float b = HSL_RGB[rgbOffset + 2];
+				if (noUv)
+				{
+					writePackedTriangleRgbNoUv(
+						cullLocalX[ia], cullLocalY[ia], cullLocalZ[ia],
+						cullLocalX[ib], cullLocalY[ib], cullLocalZ[ib],
+						cullLocalX[ic], cullLocalY[ic], cullLocalZ[ic],
+						light, r, g, b, packedTexLayer);
+				}
+				else
+				{
+					writePackedVertexRgb(cullLocalX[ia], cullLocalY[ia], cullLocalZ[ia], light, r, g, b, u0, v0, packedTexLayer);
+					writePackedVertexRgb(cullLocalX[ib], cullLocalY[ib], cullLocalZ[ib], light, r, g, b, u1, v1, packedTexLayer);
+					writePackedVertexRgb(cullLocalX[ic], cullLocalY[ic], cullLocalZ[ic], light, r, g, b, u2, v2, packedTexLayer);
+				}
+			}
+			else
+			{
+				int rgbOffset1 = (col1 & 0xFFFF) * 3;
+				int rgbOffset2 = (col2 & 0xFFFF) * 3;
+				int rgbOffset3 = (col3 & 0xFFFF) * 3;
+				if (noUv)
+				{
+					writePackedVertexRgbNoUv(cullLocalX[ia], cullLocalY[ia], cullLocalZ[ia],
+						(float) (col1 & 0xFFFF), HSL_RGB[rgbOffset1], HSL_RGB[rgbOffset1 + 1], HSL_RGB[rgbOffset1 + 2], packedTexLayer);
+					writePackedVertexRgbNoUv(cullLocalX[ib], cullLocalY[ib], cullLocalZ[ib],
+						(float) (col2 & 0xFFFF), HSL_RGB[rgbOffset2], HSL_RGB[rgbOffset2 + 1], HSL_RGB[rgbOffset2 + 2], packedTexLayer);
+					writePackedVertexRgbNoUv(cullLocalX[ic], cullLocalY[ic], cullLocalZ[ic],
+						(float) (col3 & 0xFFFF), HSL_RGB[rgbOffset3], HSL_RGB[rgbOffset3 + 1], HSL_RGB[rgbOffset3 + 2], packedTexLayer);
+				}
+				else
+				{
+					writePackedVertexRgb(cullLocalX[ia], cullLocalY[ia], cullLocalZ[ia],
+						(float) (col1 & 0xFFFF), HSL_RGB[rgbOffset1], HSL_RGB[rgbOffset1 + 1], HSL_RGB[rgbOffset1 + 2], u0, v0, packedTexLayer);
+					writePackedVertexRgb(cullLocalX[ib], cullLocalY[ib], cullLocalZ[ib],
+						(float) (col2 & 0xFFFF), HSL_RGB[rgbOffset2], HSL_RGB[rgbOffset2 + 1], HSL_RGB[rgbOffset2 + 2], u1, v1, packedTexLayer);
+					writePackedVertexRgb(cullLocalX[ic], cullLocalY[ic], cullLocalZ[ic],
+						(float) (col3 & 0xFFFF), HSL_RGB[rgbOffset3], HSL_RGB[rgbOffset3 + 1], HSL_RGB[rgbOffset3 + 2], u2, v2, packedTexLayer);
+				}
+			}
+			wrote += 3;
+		}
+
+		if (wrote == 0)
+		{
+			return true;
+		}
+
+		vertexCount += wrote;
+		if (detailedStats)
+		{
+			stats.sortedModels.incrementAndGet();
+			stats.cullOnlyModels.incrementAndGet();
+			stats.sortedFaces.addAndGet(wrote / 3);
+			long emitNanos = System.nanoTime() - emitStart;
+			stats.modelEmitNanos.addAndGet(emitNanos);
+			stats.modelSortedEmitNanos.addAndGet(emitNanos);
+			stats.modelUvNanos.addAndGet(uvNanos);
+			stats.texturedEmitFaces.addAndGet(texturedFaces);
+			stats.overrideEmitFaces.addAndGet(overrideFaces);
+		}
+		return true;
+	}
+
+	private static int countTransparentFaces(Model m)
+	{
+		byte[] transparencies = m.getFaceTransparencies();
+		if (transparencies == null)
+		{
+			return 0;
+		}
+		int transparent = 0;
+		int faces = Math.min(m.getFaceCount(), transparencies.length);
+		for (int i = 0; i < faces; i++)
+		{
+			if (transparencies[i] != 0)
+			{
+				transparent++;
+			}
+		}
+		return transparent;
 	}
 
 	private final float[] uvScratch = new float[6];
@@ -1201,42 +1654,118 @@ final class SceneRenderer implements AutoCloseable
 	{
 		float rx = lx * cos + lz * sin;
 		float rz = -lx * sin + lz * cos;
-		float[] rgb = hslToRgb(hsl16);
+		writePackedVertex(rx + wx, ly + wy, rz + wz, hsl16, u, v, texLayer);
+	}
+
+	private void writeRotatedVertexRgb(float lx, float ly, float lz,
+									   float cos, float sin,
+									   int wx, int wy, int wz,
+									   float light, float r, float g, float b,
+									   float u, float v, int texLayer)
+	{
+		float rx = lx * cos + lz * sin;
+		float rz = -lx * sin + lz * cos;
+		writePackedVertexRgb(rx + wx, ly + wy, rz + wz, light, r, g, b, u, v, texLayer);
+	}
+
+	private void writeRotatedVertexRgbNoUv(float lx, float ly, float lz,
+										   float cos, float sin,
+										   int wx, int wy, int wz,
+										   float light, float r, float g, float b,
+										   int texLayer)
+	{
+		float rx = lx * cos + lz * sin;
+		float rz = -lx * sin + lz * cos;
+		writePackedVertexRgbNoUv(rx + wx, ly + wy, rz + wz, light, r, g, b, texLayer);
+	}
+
+	private void writeHslVert(float x, float y, float z, int hsl16, float u, float v, int texLayer)
+	{
+		writePackedVertex(x, y, z, hsl16, u, v, texLayer);
+	}
+
+	private void writePackedVertex(float x, float y, float z, int hsl16, float u, float v, int texLayer)
+	{
+		int rgbOffset = (hsl16 & 0xFFFF) * 3;
 		// Raw HSL int as float: the frag shader re-decodes per-pixel for
 		// the banded look (smoothBanding=0); vColor is the pre-decoded
 		// RGB for the smooth look (smoothBanding=1). Vertex layout is
 		// padded to vec4 alignment for MoltenVK — see ScenePipeline.VERTEX_STRIDE.
 		float light = (float) (hsl16 & 0xFFFF);
-		mapped.putFloat(rx + wx);
-		mapped.putFloat(ly + wy);
-		mapped.putFloat(rz + wz);
-		mapped.putFloat(0f);
-		mapped.putFloat(rgb[0]);
-		mapped.putFloat(rgb[1]);
-		mapped.putFloat(rgb[2]);
-		mapped.putFloat(0f);
-		mapped.putFloat(light);
-		mapped.putFloat(u);
-		mapped.putFloat(v);
-		mapped.putInt(texLayer);
+		writePackedVertexRgb(x, y, z, light, HSL_RGB[rgbOffset], HSL_RGB[rgbOffset + 1], HSL_RGB[rgbOffset + 2], u, v, texLayer);
 	}
 
-	private void writeHslVert(float x, float y, float z, int hsl16, float u, float v, int texLayer)
+	private void writePackedVertexRgb(float x, float y, float z,
+									  float light, float r, float g, float b,
+									  float u, float v, int texLayer)
 	{
-		float[] rgb = hslToRgb(hsl16);
-		float light = (float) (hsl16 & 0xFFFF);
-		mapped.putFloat(x);
-		mapped.putFloat(y);
-		mapped.putFloat(z);
-		mapped.putFloat(0f);
-		mapped.putFloat(rgb[0]);
-		mapped.putFloat(rgb[1]);
-		mapped.putFloat(rgb[2]);
-		mapped.putFloat(0f);
-		mapped.putFloat(light);
-		mapped.putFloat(u);
-		mapped.putFloat(v);
-		mapped.putInt(texLayer);
+		long p = writePtr;
+		MemoryUtil.memPutFloat(p, x);
+		MemoryUtil.memPutFloat(p + 4, y);
+		MemoryUtil.memPutFloat(p + 8, z);
+		MemoryUtil.memPutFloat(p + 12, 0f);
+		MemoryUtil.memPutFloat(p + 16, r);
+		MemoryUtil.memPutFloat(p + 20, g);
+		MemoryUtil.memPutFloat(p + 24, b);
+		MemoryUtil.memPutFloat(p + 28, 0f);
+		MemoryUtil.memPutFloat(p + 32, light);
+		MemoryUtil.memPutFloat(p + 36, u);
+		MemoryUtil.memPutFloat(p + 40, v);
+		MemoryUtil.memPutInt(p + 44, texLayer);
+		writePtr = p + ScenePipeline.VERTEX_STRIDE;
+	}
+
+	private void writePackedVertexRgbNoUv(float x, float y, float z,
+										  float light, float r, float g, float b,
+										  int texLayer)
+	{
+		long p = writePtr;
+		MemoryUtil.memPutFloat(p, x);
+		MemoryUtil.memPutFloat(p + 4, y);
+		MemoryUtil.memPutFloat(p + 8, z);
+		MemoryUtil.memPutFloat(p + 12, 0f);
+		MemoryUtil.memPutFloat(p + 16, r);
+		MemoryUtil.memPutFloat(p + 20, g);
+		MemoryUtil.memPutFloat(p + 24, b);
+		MemoryUtil.memPutFloat(p + 28, 0f);
+		MemoryUtil.memPutFloat(p + 32, light);
+		MemoryUtil.memPutFloat(p + 36, 0f);
+		MemoryUtil.memPutFloat(p + 40, 0f);
+		MemoryUtil.memPutInt(p + 44, texLayer);
+		writePtr = p + ScenePipeline.VERTEX_STRIDE;
+	}
+
+	private void writePackedTriangleRgbNoUv(float x0, float y0, float z0,
+											float x1, float y1, float z1,
+											float x2, float y2, float z2,
+											float light, float r, float g, float b,
+											int texLayer)
+	{
+		long p = writePtr;
+		writePackedVertexRgbNoUvAt(p, x0, y0, z0, light, r, g, b, texLayer);
+		p += ScenePipeline.VERTEX_STRIDE;
+		writePackedVertexRgbNoUvAt(p, x1, y1, z1, light, r, g, b, texLayer);
+		p += ScenePipeline.VERTEX_STRIDE;
+		writePackedVertexRgbNoUvAt(p, x2, y2, z2, light, r, g, b, texLayer);
+		writePtr = p + ScenePipeline.VERTEX_STRIDE;
+	}
+
+	private static void writePackedVertexRgbNoUvAt(long p, float x, float y, float z,
+												   float light, float r, float g, float b,
+												   int texLayer)
+	{
+		MemoryUtil.memPutFloat(p, x);
+		MemoryUtil.memPutFloat(p + 4, y);
+		MemoryUtil.memPutFloat(p + 8, z);
+		MemoryUtil.memPutFloat(p + 12, 0f);
+		MemoryUtil.memPutFloat(p + 16, r);
+		MemoryUtil.memPutFloat(p + 20, g);
+		MemoryUtil.memPutFloat(p + 24, b);
+		MemoryUtil.memPutFloat(p + 28, 0f);
+		MemoryUtil.memPutFloat(p + 32, light);
+		MemoryUtil.memPutFloat(p + 36, 0f);
+		MemoryUtil.memPutFloat(p + 40, 0f);
+		MemoryUtil.memPutInt(p + 44, texLayer);
 	}
 
 	/**
@@ -1268,21 +1797,25 @@ final class SceneRenderer implements AutoCloseable
 		return (h << 10) | (s << 7) | l;
 	}
 
-	private static float[] hslToRgb(int hsl16)
+	private static float[] buildHslRgbTable()
 	{
-		int h = (hsl16 >> 10) & 0x3F;
-		int s = (hsl16 >>  7) & 0x07;
-		int l =  hsl16        & 0x7F;
-		float hue = h / 64f + 0.0078125f;
-		float sat = s / 8f  + 0.0625f;
-		float lum = l / 128f;
-		float q = lum < 0.5f ? lum * (1f + sat) : lum + sat - lum * sat;
-		float p = 2f * lum - q;
-		return new float[] {
-			hueToChannel(p, q, hue + 1f / 3f),
-			hueToChannel(p, q, hue),
-			hueToChannel(p, q, hue - 1f / 3f),
-		};
+		float[] table = new float[0x10000 * 3];
+		for (int hsl16 = 0; hsl16 < 0x10000; hsl16++)
+		{
+			int h = (hsl16 >> 10) & 0x3F;
+			int s = (hsl16 >>  7) & 0x07;
+			int l =  hsl16        & 0x7F;
+			float hue = h / 64f + 0.0078125f;
+			float sat = s / 8f  + 0.0625f;
+			float lum = l / 128f;
+			float q = lum < 0.5f ? lum * (1f + sat) : lum + sat - lum * sat;
+			float p = 2f * lum - q;
+			int offset = hsl16 * 3;
+			table[offset] = hueToChannel(p, q, hue + 1f / 3f);
+			table[offset + 1] = hueToChannel(p, q, hue);
+			table[offset + 2] = hueToChannel(p, q, hue - 1f / 3f);
+		}
+		return table;
 	}
 
 	private static float hueToChannel(float p, float q, float t)

@@ -19,6 +19,8 @@ import net.runelite.api.Model;
 @Slf4j
 final class DrawCallbackStats
 {
+	private volatile boolean detailedModelStats;
+
 	// Per-method call counters
 	final AtomicLong drawScene = new AtomicLong();
 	final AtomicLong preSceneDraw = new AtomicLong();
@@ -41,6 +43,40 @@ final class DrawCallbackStats
 	final AtomicLong totalDynamicFaces = new AtomicLong();
 	final AtomicInteger maxDynamicFaces = new AtomicInteger();
 
+	// CPU timing buckets. Aggregated once per stats log interval.
+	final AtomicLong frames = new AtomicLong();
+	final AtomicLong drawFrameNanos = new AtomicLong();
+	final AtomicLong fenceWaitNanos = new AtomicLong();
+	final AtomicLong uiUploadNanos = new AtomicLong();
+	final AtomicLong acquireNanos = new AtomicLong();
+	final AtomicLong commandRecordNanos = new AtomicLong();
+	final AtomicLong beforeRenderPassNanos = new AtomicLong();
+	final AtomicLong renderPassNanos = new AtomicLong();
+	final AtomicLong submitNanos = new AtomicLong();
+	final AtomicLong presentNanos = new AtomicLong();
+	final AtomicLong customDrawableNanos = new AtomicLong();
+	final AtomicLong beginFrameNanos = new AtomicLong();
+	final AtomicLong actorCaptureNanos = new AtomicLong();
+	final AtomicLong pendingCaptureNanos = new AtomicLong();
+	final AtomicLong sceneCaptureNanos = new AtomicLong();
+	final AtomicLong modelSortNanos = new AtomicLong();
+	final AtomicLong modelFullSortNanos = new AtomicLong();
+	final AtomicLong modelCullOnlyNanos = new AtomicLong();
+	final AtomicLong modelEmitNanos = new AtomicLong();
+	final AtomicLong modelSortedEmitNanos = new AtomicLong();
+	final AtomicLong modelUnsortedEmitNanos = new AtomicLong();
+	final AtomicLong modelUvNanos = new AtomicLong();
+	final AtomicLong sortedModels = new AtomicLong();
+	final AtomicLong fullSortModels = new AtomicLong();
+	final AtomicLong cullOnlyModels = new AtomicLong();
+	final AtomicLong unsortedModels = new AtomicLong();
+	final AtomicLong sortFallbackModels = new AtomicLong();
+	final AtomicLong sortedFaces = new AtomicLong();
+	final AtomicLong unsortedFaces = new AtomicLong();
+	final AtomicLong fullSortTransparentFaces = new AtomicLong();
+	final AtomicLong texturedEmitFaces = new AtomicLong();
+	final AtomicLong overrideEmitFaces = new AtomicLong();
+
 	// Sample fields — last-write-wins, fine for "what's the camera at"
 	volatile double lastCamX;
 	volatile double lastCamY;
@@ -49,9 +85,27 @@ final class DrawCallbackStats
 
 	private long nextLogNanos = System.nanoTime() + 1_000_000_000L;
 
+	boolean isDetailedModelStats()
+	{
+		return detailedModelStats;
+	}
+
+	void setDetailedModelStats(boolean enabled)
+	{
+		if (detailedModelStats == enabled)
+		{
+			return;
+		}
+		detailedModelStats = enabled;
+		if (!enabled)
+		{
+			resetDetailedModelStats();
+		}
+	}
+
 	void recordModel(Model m)
 	{
-		if (m == null) return;
+		if (!detailedModelStats || m == null) return;
 		int verts = m.getVerticesCount();
 		int[] fa = m.getFaceIndices1();
 		int faces = fa == null ? 0 : fa.length;
@@ -62,14 +116,101 @@ final class DrawCallbackStats
 		do { prev = maxDynamicFaces.get(); } while (faces > prev && !maxDynamicFaces.compareAndSet(prev, faces));
 	}
 
+	void addNanos(AtomicLong bucket, long startNanos)
+	{
+		bucket.addAndGet(System.nanoTime() - startNanos);
+	}
+
+	private static double avgMs(long nanos, long count)
+	{
+		return count == 0 ? 0.0 : (nanos / 1_000_000.0) / count;
+	}
+
+	private static double totalMs(long nanos)
+	{
+		return nanos / 1_000_000.0;
+	}
+
 	void maybeLog()
 	{
 		long now = System.nanoTime();
 		if (now < nextLogNanos) return;
 		nextLogNanos = now + 1_000_000_000L;
+
+		long frameCount = frames.getAndSet(0);
+		long drawFrame = drawFrameNanos.getAndSet(0);
+		long fenceWait = fenceWaitNanos.getAndSet(0);
+		long uiUpload = uiUploadNanos.getAndSet(0);
+		long acquire = acquireNanos.getAndSet(0);
+		long commandRecord = commandRecordNanos.getAndSet(0);
+		long beforePass = beforeRenderPassNanos.getAndSet(0);
+		long renderPass = renderPassNanos.getAndSet(0);
+		long submit = submitNanos.getAndSet(0);
+		long present = presentNanos.getAndSet(0);
+		long customDrawable = customDrawableNanos.getAndSet(0);
+		long drawSceneCount = drawScene.getAndSet(0);
+		long beginFrame = beginFrameNanos.getAndSet(0);
+		long actorCapture = actorCaptureNanos.getAndSet(0);
+		long pendingCapture = pendingCaptureNanos.getAndSet(0);
+		long sceneCapture = sceneCaptureNanos.getAndSet(0);
+		if (!detailedModelStats)
+		{
+			log.info(String.format(
+				"recon | scene=%d preSD=%d postSD=%d swap=%d load=%d | paint=%d tileModel=%d | zoneOpq=%d zoneAlpha=%d | dyn=%d temp=%d pass=%d single=%d | cam=(%.1f, %.1f, %.1f) plane=%d | anim=%d | cpu/frame avg ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f | scene avg ms: begin=%.2f actors=%.2f pending=%.2f staticCaptureTotal=%.2f",
+				drawSceneCount,
+				preSceneDraw.getAndSet(0),
+				postDrawScene.getAndSet(0),
+				swapScene.getAndSet(0),
+				loadScene.getAndSet(0),
+				drawScenePaint.getAndSet(0),
+				drawSceneTileModel.getAndSet(0),
+				drawZoneOpaque.getAndSet(0),
+				drawZoneAlpha.getAndSet(0),
+				drawDynamic.getAndSet(0),
+				drawTemp.getAndSet(0),
+				drawPass.getAndSet(0),
+				drawSingle.getAndSet(0),
+				lastCamX, lastCamY, lastCamZ, lastCamPlane,
+				animate.getAndSet(0),
+				avgMs(drawFrame, frameCount),
+				avgMs(fenceWait, frameCount),
+				avgMs(uiUpload, frameCount),
+				avgMs(acquire, frameCount),
+				avgMs(commandRecord, frameCount),
+				avgMs(beforePass, frameCount),
+				avgMs(renderPass, frameCount),
+				avgMs(submit, frameCount),
+				avgMs(present, frameCount),
+				avgMs(customDrawable, frameCount),
+				avgMs(beginFrame, drawSceneCount),
+				avgMs(actorCapture, drawSceneCount),
+				avgMs(pendingCapture, drawSceneCount),
+				totalMs(sceneCapture)
+			));
+			return;
+		}
+
+		long sort = modelSortNanos.getAndSet(0);
+		long fullSort = modelFullSortNanos.getAndSet(0);
+		long cullOnly = modelCullOnlyNanos.getAndSet(0);
+		long emit = modelEmitNanos.getAndSet(0);
+		long sortedEmit = modelSortedEmitNanos.getAndSet(0);
+		long unsortedEmit = modelUnsortedEmitNanos.getAndSet(0);
+		long uv = modelUvNanos.getAndSet(0);
+		long sortedModelCount = sortedModels.getAndSet(0);
+		long fullSortModelCount = fullSortModels.getAndSet(0);
+		long cullOnlyModelCount = cullOnlyModels.getAndSet(0);
+		long unsortedModelCount = unsortedModels.getAndSet(0);
+		long fallbackModelCount = sortFallbackModels.getAndSet(0);
+		long sortedFaceCount = sortedFaces.getAndSet(0);
+		long unsortedFaceCount = unsortedFaces.getAndSet(0);
+		long transparentFaceCount = fullSortTransparentFaces.getAndSet(0);
+		long texturedFaceCount = texturedEmitFaces.getAndSet(0);
+		long overrideFaceCount = overrideEmitFaces.getAndSet(0);
+
 		log.info(String.format(
-			"recon | scene=%d preSD=%d postSD=%d swap=%d load=%d | paint=%d tileModel=%d | zoneOpq=%d zoneAlpha=%d | dyn=%d temp=%d pass=%d single=%d | dynVerts=%d dynFaces=%d maxF=%d | cam=(%.1f, %.1f, %.1f) plane=%d | anim=%d",
-			drawScene.getAndSet(0),
+			"recon | scene=%d preSD=%d postSD=%d swap=%d load=%d | paint=%d tileModel=%d | zoneOpq=%d zoneAlpha=%d | dyn=%d temp=%d pass=%d single=%d | dynVerts=%d dynFaces=%d maxF=%d | cam=(%.1f, %.1f, %.1f) plane=%d | anim=%d | cpu/frame avg ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f | scene avg ms: begin=%.2f actors=%.2f pending=%.2f staticCaptureTotal=%.2f | model ms: sort=%.2f full=%.2f cull=%.2f emit=%.2f sortedEmit=%.2f unsortedEmit=%.2f uv=%.2f | models sorted=%d full=%d cull=%d unsorted=%d fallback=%d | faces sorted=%d unsorted=%d tex=%d override=%d fullTrans=%d",
+			drawSceneCount,
 			preSceneDraw.getAndSet(0),
 			postDrawScene.getAndSet(0),
 			swapScene.getAndSet(0),
@@ -86,8 +227,63 @@ final class DrawCallbackStats
 			totalDynamicFaces.getAndSet(0),
 			maxDynamicFaces.getAndSet(0),
 			lastCamX, lastCamY, lastCamZ, lastCamPlane,
-			animate.getAndSet(0)
+			animate.getAndSet(0),
+			avgMs(drawFrame, frameCount),
+			avgMs(fenceWait, frameCount),
+			avgMs(uiUpload, frameCount),
+			avgMs(acquire, frameCount),
+			avgMs(commandRecord, frameCount),
+			avgMs(beforePass, frameCount),
+			avgMs(renderPass, frameCount),
+			avgMs(submit, frameCount),
+			avgMs(present, frameCount),
+			avgMs(customDrawable, frameCount),
+			avgMs(beginFrame, drawSceneCount),
+			avgMs(actorCapture, drawSceneCount),
+			avgMs(pendingCapture, drawSceneCount),
+			totalMs(sceneCapture),
+			totalMs(sort),
+			totalMs(fullSort),
+			totalMs(cullOnly),
+			totalMs(emit),
+			totalMs(sortedEmit),
+			totalMs(unsortedEmit),
+			totalMs(uv),
+			sortedModelCount,
+			fullSortModelCount,
+			cullOnlyModelCount,
+			unsortedModelCount,
+			fallbackModelCount,
+			sortedFaceCount,
+			unsortedFaceCount,
+			texturedFaceCount,
+			overrideFaceCount,
+			transparentFaceCount
 		));
+	}
+
+	private void resetDetailedModelStats()
+	{
+		totalDynamicVerts.set(0);
+		totalDynamicFaces.set(0);
+		maxDynamicFaces.set(0);
+		modelSortNanos.set(0);
+		modelFullSortNanos.set(0);
+		modelCullOnlyNanos.set(0);
+		modelEmitNanos.set(0);
+		modelSortedEmitNanos.set(0);
+		modelUnsortedEmitNanos.set(0);
+		modelUvNanos.set(0);
+		sortedModels.set(0);
+		fullSortModels.set(0);
+		cullOnlyModels.set(0);
+		unsortedModels.set(0);
+		sortFallbackModels.set(0);
+		sortedFaces.set(0);
+		unsortedFaces.set(0);
+		fullSortTransparentFaces.set(0);
+		texturedEmitFaces.set(0);
+		overrideEmitFaces.set(0);
 	}
 
 	long drawSceneCount() { return drawScene.get(); }

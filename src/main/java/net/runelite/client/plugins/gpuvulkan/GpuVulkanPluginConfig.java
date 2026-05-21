@@ -135,6 +135,16 @@ public interface GpuVulkanPluginConfig extends Config
 	default boolean smoothBanding() { return true; }
 
 	@ConfigItem(
+		keyName = "detailedModelStats",
+		name = "Detailed model stats",
+		description = "Log and time per-model Vulkan capture work. Useful while profiling, but it adds CPU overhead."
+	)
+	default boolean detailedModelStats()
+	{
+		return Boolean.parseBoolean(System.getProperty("vkgpu.modelStats", "false"));
+	}
+
+	@ConfigItem(
 		keyName = "colorBlindMode",
 		name = "Colour-blind mode",
 		description = "Apply Daltonization for red-deficient (protanope), green-deficient (deuteranope), or blue-deficient (tritanope) viewers. Matches stock GPU's colour-blind option."

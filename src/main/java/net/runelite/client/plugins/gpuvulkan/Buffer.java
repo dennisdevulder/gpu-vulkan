@@ -6,6 +6,7 @@ import java.nio.LongBuffer;
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VkBufferCreateInfo;
+import org.lwjgl.vulkan.VkMappedMemoryRange;
 import org.lwjgl.vulkan.VkMemoryAllocateInfo;
 import org.lwjgl.vulkan.VkMemoryRequirements;
 import org.lwjgl.vulkan.VkPhysicalDeviceMemoryProperties;
@@ -25,14 +26,21 @@ final class Buffer implements AutoCloseable
 	private final long handle;
 	private final long memory;
 	private final long size;
+	private final int memoryPropertyFlags;
 	private long mappedAddress;
 	/** Cached ByteBuffer view over the mapped region. Allocated once in
 	 *  {@link #mapPersistent()} so we don't churn a fresh wrapper per write —
 	 *  and so callers can't race on the {@code position/limit} state of two
 	 *  independently-created views over the same memory. */
 	private ByteBuffer mappedView;
+	private IntBuffer mappedIntView;
 
 	Buffer(VulkanDevice device, long size, int usage, int memoryProperties)
+	{
+		this(device, size, usage, memoryProperties, memoryProperties);
+	}
+
+	Buffer(VulkanDevice device, long size, int usage, int requiredMemoryProperties, int preferredMemoryProperties)
 	{
 		this.device = device;
 		this.size = size;
@@ -50,7 +58,9 @@ final class Buffer implements AutoCloseable
 			VkMemoryRequirements memReq = VkMemoryRequirements.calloc(stack);
 			vkGetBufferMemoryRequirements(device.handle(), handle, memReq);
 
-			int memType = findMemoryType(device, memReq.memoryTypeBits(), memoryProperties, stack);
+			int memType = findMemoryType(device, memReq.memoryTypeBits(), requiredMemoryProperties,
+				preferredMemoryProperties, stack);
+			memoryPropertyFlags = memoryTypeFlags(device, memType, stack);
 			VkMemoryAllocateInfo alloc = VkMemoryAllocateInfo.calloc(stack)
 				.sType$Default()
 				.allocationSize(memReq.size())
@@ -85,6 +95,7 @@ final class Buffer implements AutoCloseable
 			Vk.check("vkMapMemory", vkMapMemory(device.handle(), memory, 0, size, 0, pp));
 			mappedAddress = pp.get(0);
 			mappedView = memByteBuffer(mappedAddress, (int) size);
+			mappedIntView = mappedView.asIntBuffer();
 		}
 	}
 
@@ -103,9 +114,34 @@ final class Buffer implements AutoCloseable
 	/** Convenience: copy an int[] (one pixel = one int) into the mapped region. */
 	void writeInts(int[] src, int srcOffset, int count)
 	{
-		ByteBuffer view = mappedByteBuffer();
-		view.clear();
-		view.asIntBuffer().put(src, srcOffset, count);
+		writeIntsUnflushed(src, srcOffset, 0, count);
+		flushIfNeeded();
+	}
+
+	/** Copy an int[] into the mapped region at an int offset. Caller must flush when batching writes. */
+	void writeIntsUnflushed(int[] src, int srcOffset, int dstOffset, int count)
+	{
+		if (mappedAddress == 0L) throw new IllegalStateException("buffer not mapped");
+		mappedIntView.clear();
+		mappedIntView.position(dstOffset);
+		mappedIntView.put(src, srcOffset, count);
+	}
+
+	void flushIfNeeded()
+	{
+		if ((memoryPropertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0)
+		{
+			return;
+		}
+		try (MemoryStack stack = stackPush())
+		{
+			VkMappedMemoryRange.Buffer range = VkMappedMemoryRange.calloc(1, stack)
+				.sType$Default()
+				.memory(memory)
+				.offset(0)
+				.size(VK_WHOLE_SIZE);
+			Vk.check("vkFlushMappedMemoryRanges", vkFlushMappedMemoryRanges(device.handle(), range));
+		}
 	}
 
 	@Override
@@ -115,6 +151,8 @@ final class Buffer implements AutoCloseable
 		{
 			vkUnmapMemory(device.handle(), memory);
 			mappedAddress = 0L;
+			mappedIntView = null;
+			mappedView = null;
 		}
 		vkDestroyBuffer(device.handle(), handle, null);
 		vkFreeMemory(device.handle(), memory, null);
@@ -122,17 +160,41 @@ final class Buffer implements AutoCloseable
 
 	static int findMemoryType(VulkanDevice device, int typeBits, int properties, MemoryStack stack)
 	{
+		return findMemoryType(device, typeBits, properties, properties, stack);
+	}
+
+	static int findMemoryType(VulkanDevice device, int typeBits, int requiredProperties, int preferredProperties, MemoryStack stack)
+	{
 		VkPhysicalDeviceMemoryProperties memProps = VkPhysicalDeviceMemoryProperties.calloc(stack);
 		vkGetPhysicalDeviceMemoryProperties(device.physicalDevice(), memProps);
 		for (int i = 0; i < memProps.memoryTypeCount(); i++)
 		{
+			int flags = memProps.memoryTypes(i).propertyFlags();
 			boolean typeOk = (typeBits & (1 << i)) != 0;
-			boolean propsOk = (memProps.memoryTypes(i).propertyFlags() & properties) == properties;
+			boolean propsOk = (flags & requiredProperties) == requiredProperties;
+			boolean preferredOk = (flags & preferredProperties) == preferredProperties;
+			if (typeOk && propsOk && preferredOk)
+			{
+				return i;
+			}
+		}
+		for (int i = 0; i < memProps.memoryTypeCount(); i++)
+		{
+			int flags = memProps.memoryTypes(i).propertyFlags();
+			boolean typeOk = (typeBits & (1 << i)) != 0;
+			boolean propsOk = (flags & requiredProperties) == requiredProperties;
 			if (typeOk && propsOk)
 			{
 				return i;
 			}
 		}
-		throw new RuntimeException("No memory type matches typeBits=" + typeBits + " props=" + properties);
+		throw new RuntimeException("No memory type matches typeBits=" + typeBits + " props=" + requiredProperties);
+	}
+
+	private static int memoryTypeFlags(VulkanDevice device, int memoryTypeIndex, MemoryStack stack)
+	{
+		VkPhysicalDeviceMemoryProperties memProps = VkPhysicalDeviceMemoryProperties.calloc(stack);
+		vkGetPhysicalDeviceMemoryProperties(device.physicalDevice(), memProps);
+		return memProps.memoryTypes(memoryTypeIndex).propertyFlags();
 	}
 }

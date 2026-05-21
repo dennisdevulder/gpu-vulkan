@@ -36,7 +36,6 @@
  */
 package net.runelite.client.plugins.gpuvulkan;
 
-import java.util.Arrays;
 import net.runelite.api.Model;
 import net.runelite.api.Perspective;
 import net.runelite.api.Projection;
@@ -55,11 +54,14 @@ final class ModelSorter
 	private final float[] projX = new float[MAX_VERTEX_COUNT];
 	private final float[] projY = new float[MAX_VERTEX_COUNT];
 	private final int[] distances = new int[MAX_VERTEX_COUNT];
+	private final float[] projectScratch = new float[3];
 
 	// --- per-face Z bucket linked list ---
 	private final char[] zsortHead = new char[MAX_DIAMETER];
 	private final char[] zsortTail = new char[MAX_DIAMETER];
 	private final char[] zsortNext = new char[MAX_FACE_COUNT];
+	private final int[] zsortStamp = new int[MAX_DIAMETER];
+	private int currentStamp;
 
 	// --- output: face indices in back-to-front draw order ---
 	final int[] sortedFaces = new int[MAX_FACE_COUNT];
@@ -126,7 +128,7 @@ final class ModelSorter
 		// Anchor depth at the model's centre — `distances[v]` then holds the
 		// depth delta from centre, matching stock so the bucket index fits
 		// in [0, diameter).
-		float[] p = proj.project(wx, wy, wz);
+		float[] p = proj.project(wx, wy, wz, projectScratch);
 		int zero = (int) p[2];
 
 		for (int v = 0; v < vertexCount; v++)
@@ -150,7 +152,7 @@ final class ModelSorter
 			localY[v] = vy;
 			localZ[v] = vz;
 
-			p = proj.project(vx, vy, vz);
+			p = proj.project(vx, vy, vz, projectScratch);
 			if (p[2] < 50f)
 			{
 				// Near-plane reject. Stock drops the whole model — mirror that.
@@ -169,8 +171,12 @@ final class ModelSorter
 			return false;
 		}
 
-		Arrays.fill(zsortHead, 0, diameter, (char) -1);
-		Arrays.fill(zsortTail, 0, diameter, (char) -1);
+		int stamp = ++currentStamp;
+		if (stamp == 0)
+		{
+			java.util.Arrays.fill(zsortStamp, 0);
+			stamp = ++currentStamp;
+		}
 
 		int minFz = diameter;
 		int maxFz = 0;
@@ -207,8 +213,9 @@ final class ModelSorter
 				distance = diameter - 1;
 			}
 
-			if (zsortTail[distance] == (char) -1)
+			if (zsortStamp[distance] != stamp)
 			{
+				zsortStamp[distance] = stamp;
 				zsortHead[distance] = f;
 				zsortNext[f] = (char) -1;
 			}
@@ -224,14 +231,114 @@ final class ModelSorter
 		}
 
 		// Walk far → near, mirroring stock's `for (int i = maxFz; i >= minFz; --i)`.
-		int out = 0;
-		for (int i = maxFz; i >= minFz; i--)
-		{
-			for (char f = zsortHead[i]; f != (char) -1; f = zsortNext[f])
+			int out = 0;
+			for (int i = maxFz; i >= minFz; i--)
 			{
-				sortedFaces[out++] = f;
+				if (zsortStamp[i] != stamp)
+				{
+					continue;
+				}
+				for (char f = zsortHead[i]; f != (char) -1; f = zsortNext[f])
+				{
+					sortedFaces[out++] = f;
 			}
 		}
+		sortedCount = out;
+		return true;
+	}
+
+	boolean cullOnly(Projection proj, Model m, int orientation, int wx, int wy, int wz)
+	{
+		sortedCount = 0;
+
+		final int vertexCount = m.getVerticesCount();
+		if (vertexCount > MAX_VERTEX_COUNT)
+		{
+			return false;
+		}
+
+		final float[] vxs = m.getVerticesX();
+		final float[] vys = m.getVerticesY();
+		final float[] vzs = m.getVerticesZ();
+		if (vxs == null || vys == null || vzs == null)
+		{
+			return false;
+		}
+
+		final int faceCount = Math.min(m.getFaceCount(), MAX_FACE_COUNT);
+		final int[] fa = m.getFaceIndices1();
+		final int[] fb = m.getFaceIndices2();
+		final int[] fc = m.getFaceIndices3();
+		if (fa == null || fb == null || fc == null)
+		{
+			return false;
+		}
+
+		final int[] faceColors3 = m.getFaceColors3();
+
+		float orientSine = 0f;
+		float orientCosine = 0f;
+		if (orientation != 0)
+		{
+			orientSine = Perspective.SINE[orientation & 0x7FF] / 65536f;
+			orientCosine = Perspective.COSINE[orientation & 0x7FF] / 65536f;
+		}
+
+		for (int v = 0; v < vertexCount; v++)
+		{
+			float vx = vxs[v];
+			float vy = vys[v];
+			float vz = vzs[v];
+
+			if (orientation != 0)
+			{
+				float x0 = vx;
+				vx = vz * orientSine + x0 * orientCosine;
+				vz = vz * orientCosine - x0 * orientSine;
+			}
+
+			vx += wx;
+			vy += wy;
+			vz += wz;
+
+			localX[v] = vx;
+			localY[v] = vy;
+			localZ[v] = vz;
+
+			float[] p = proj.project(vx, vy, vz, projectScratch);
+			if (p[2] < 50f)
+			{
+				return false;
+			}
+
+			projX[v] = p[0] / p[2];
+			projY[v] = p[1] / p[2];
+		}
+
+		int out = 0;
+		for (int f = 0; f < faceCount; f++)
+		{
+			if (faceColors3 != null && faceColors3[f] == -2)
+			{
+				continue;
+			}
+
+			final int v1 = fa[f];
+			final int v2 = fb[f];
+			final int v3 = fc[f];
+
+			final float aX = projX[v1], aY = projY[v1];
+			final float bX = projX[v2], bY = projY[v2];
+			final float cX = projX[v3], cY = projY[v3];
+
+			if ((aX - bX) * (cY - bY) - (cX - bX) * (aY - bY) <= 0)
+			{
+				continue;
+			}
+
+			sortedFaces[out++] = f;
+		}
+
 		sortedCount = out;
 		return true;
 	}

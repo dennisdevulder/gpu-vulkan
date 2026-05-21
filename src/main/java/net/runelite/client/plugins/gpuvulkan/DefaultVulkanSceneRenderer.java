@@ -10,9 +10,10 @@ final class DefaultVulkanSceneRenderer implements VulkanSceneRenderer
 	private final SceneRenderer sceneRenderer;
 
 	DefaultVulkanSceneRenderer(VulkanDevice device, FrameSync sync,
-		RenderPass renderPass, TextureArray textureArray)
+		RenderPass renderPass, TextureArray textureArray,
+		DrawCallbackStats stats)
 	{
-		this.sceneRenderer = new SceneRenderer(device, sync, renderPass, textureArray);
+		this.sceneRenderer = new SceneRenderer(device, sync, renderPass, textureArray, stats);
 	}
 
 	@Override
@@ -49,6 +50,12 @@ final class DefaultVulkanSceneRenderer implements VulkanSceneRenderer
 	public void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ)
 	{
 		sceneRenderer.captureModelSorted(projection, model, orientation, worldX, worldY, worldZ);
+	}
+
+	@Override
+	public void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ, int renderMode)
+	{
+		sceneRenderer.captureModelSorted(projection, model, orientation, worldX, worldY, worldZ, renderMode);
 	}
 
 	@Override
