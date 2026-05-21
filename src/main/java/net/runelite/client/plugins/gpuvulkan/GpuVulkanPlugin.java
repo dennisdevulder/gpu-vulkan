@@ -737,7 +737,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		}
 		if (renderExtensions != null)
 		{
-			renderExtensions.setLevelRange(minLevel, maxLevel);
+			renderExtensions.setLevelRange(minLevel, level, maxLevel);
 		}
 		lastCamX = cameraX;
 		lastCamY = cameraY;

@@ -24,6 +24,11 @@ public interface VulkanSceneRenderer extends AutoCloseable
 
 	void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ);
 
+	default void setLevelRange(int minLevel, int currentLevel, int maxLevel)
+	{
+		setLevelRange(minLevel, maxLevel);
+	}
+
 	void setLevelRange(int minLevel, int maxLevel);
 
 	void setHideRoofIds(Set<Integer> hideRoofIds);

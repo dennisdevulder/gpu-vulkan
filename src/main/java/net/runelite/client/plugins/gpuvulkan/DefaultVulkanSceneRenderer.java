@@ -58,6 +58,12 @@ final class DefaultVulkanSceneRenderer implements VulkanSceneRenderer
 	}
 
 	@Override
+	public void setLevelRange(int minLevel, int currentLevel, int maxLevel)
+	{
+		sceneRenderer.setLevelRange(minLevel, currentLevel, maxLevel);
+	}
+
+	@Override
 	public void setHideRoofIds(Set<Integer> hideRoofIds)
 	{
 		sceneRenderer.setHideRoofIds(hideRoofIds);

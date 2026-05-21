@@ -91,6 +91,11 @@ final class RenderExtensions implements AutoCloseable
 		forEachExtension("setLevelRange", extension -> extension.setLevelRange(minLevel, maxLevel));
 	}
 
+	void setLevelRange(int minLevel, int currentLevel, int maxLevel)
+	{
+		forEachExtension("setLevelRange", extension -> extension.setLevelRange(minLevel, currentLevel, maxLevel));
+	}
+
 	void setHideRoofIds(Set<Integer> hideRoofIds)
 	{
 		forEachExtension("setHideRoofIds", extension -> extension.setHideRoofIds(hideRoofIds));

@@ -36,6 +36,11 @@ public interface VulkanRenderExtension extends AutoCloseable
 		captureModel(model, orientation, worldX, worldY, worldZ);
 	}
 
+	default void setLevelRange(int minLevel, int currentLevel, int maxLevel)
+	{
+		setLevelRange(minLevel, maxLevel);
+	}
+
 	default void setLevelRange(int minLevel, int maxLevel) {}
 
 	default void setHideRoofIds(Set<Integer> hideRoofIds) {}
