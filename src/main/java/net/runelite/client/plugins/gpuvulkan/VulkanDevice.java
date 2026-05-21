@@ -4,9 +4,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.KHRSwapchain;
-import org.lwjgl.vulkan.KHRVideoEncodeAV1;
-import org.lwjgl.vulkan.KHRVideoEncodeH264;
-import org.lwjgl.vulkan.KHRVideoEncodeH265;
 import org.lwjgl.vulkan.KHRVideoEncodeQueue;
 import org.lwjgl.vulkan.KHRVideoQueue;
 import org.lwjgl.vulkan.VkDevice;
@@ -66,6 +63,9 @@ final class VulkanDevice implements AutoCloseable
 	 *  on this to pick between the KHR_swapchain present path (Linux) and
 	 *  the custom MTLCommandQueue present path (macOS). */
 	private final boolean supportsMetalObjects;
+	private static final String VK_KHR_VIDEO_ENCODE_H264_EXTENSION_NAME = "VK_KHR_video_encode_h264";
+	private static final String VK_KHR_VIDEO_ENCODE_H265_EXTENSION_NAME = "VK_KHR_video_encode_h265";
+	private static final String VK_KHR_VIDEO_ENCODE_AV1_EXTENSION_NAME = "VK_KHR_video_encode_av1";
 	/** {@code id<MTLCommandQueue>} pointer the custom present path uses to
 	 *  schedule {@code [drawable present]} after our Vulkan render. Extracted
 	 *  via vkExportMetalObjectsEXT in {@link #extractMetalCommandQueue}.
@@ -137,9 +137,9 @@ final class VulkanDevice implements AutoCloseable
 			this.supportsMetalObjects = hasMetalObjects;
 			this.supportsVideoQueue = deviceExtensions.contains(KHRVideoQueue.VK_KHR_VIDEO_QUEUE_EXTENSION_NAME);
 			this.supportsVideoEncodeQueue = deviceExtensions.contains(KHRVideoEncodeQueue.VK_KHR_VIDEO_ENCODE_QUEUE_EXTENSION_NAME);
-			this.supportsVideoEncodeH264 = deviceExtensions.contains(KHRVideoEncodeH264.VK_KHR_VIDEO_ENCODE_H264_EXTENSION_NAME);
-			this.supportsVideoEncodeH265 = deviceExtensions.contains(KHRVideoEncodeH265.VK_KHR_VIDEO_ENCODE_H265_EXTENSION_NAME);
-			this.supportsVideoEncodeAv1 = deviceExtensions.contains(KHRVideoEncodeAV1.VK_KHR_VIDEO_ENCODE_AV1_EXTENSION_NAME);
+			this.supportsVideoEncodeH264 = deviceExtensions.contains(VK_KHR_VIDEO_ENCODE_H264_EXTENSION_NAME);
+			this.supportsVideoEncodeH265 = deviceExtensions.contains(VK_KHR_VIDEO_ENCODE_H265_EXTENSION_NAME);
+			this.supportsVideoEncodeAv1 = deviceExtensions.contains(VK_KHR_VIDEO_ENCODE_AV1_EXTENSION_NAME);
 			this.videoEncodeQueueFamily = findVideoEncodeQueueFamily(physicalDevice, stack);
 
 			int extCount = 1

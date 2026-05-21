@@ -137,7 +137,7 @@ final class VulkanRenderer implements AutoCloseable
 				   int drawDistanceTiles, int fogDepthTiles, int gameTick,
 				   float smoothBanding, int overlayColor)
 	{
-		long frameStart = System.nanoTime();
+		long frameStart = stats.startNanos();
 		stats.frames.incrementAndGet();
 		// Lazy rebuild: only rebuild when the swap-chain itself reports it's
 		// out-of-date (via SUBOPTIMAL/OUT_OF_DATE from acquire or present).
@@ -189,7 +189,7 @@ final class VulkanRenderer implements AutoCloseable
 			// from FRAMES_IN_FLIGHT frames ago, producing the half-old, half-new
 			// UI texture that reads as the UI/scene "layer" intermittently
 			// covering and uncovering.
-			long start = System.nanoTime();
+			long start = stats.startNanos();
 			if (vkGetFenceStatus(device.handle(), sync.inFlightFence()) == VK_NOT_READY)
 			{
 				vkWaitForFences(device.handle(), sync.inFlightFence(), true, Long.MAX_VALUE);
@@ -198,7 +198,7 @@ final class VulkanRenderer implements AutoCloseable
 
 			// CPU-side memcpy into the persistently-mapped staging buffer. Done
 			// before recording the command buffer so the GPU read sees it.
-			start = System.nanoTime();
+			start = stats.startNanos();
 			renderExtensions.uploadUiPixels(uiPixels, uiWidth, uiHeight);
 			stats.addNanos(stats.uiUploadNanos, start);
 
@@ -226,7 +226,7 @@ final class VulkanRenderer implements AutoCloseable
 	private void drawFrameSwapchain(MemoryStack stack, int desiredWidth, int desiredHeight)
 	{
 		IntBuffer pImageIdx = stack.mallocInt(1);
-		long start = System.nanoTime();
+		long start = stats.startNanos();
 		int acq = KHRSwapchain.vkAcquireNextImageKHR(device.handle(), swapchain.handle(),
 			Long.MAX_VALUE, sync.imageAvailable(), VK_NULL_HANDLE, pImageIdx);
 		stats.addNanos(stats.acquireNanos, start);
@@ -250,15 +250,15 @@ final class VulkanRenderer implements AutoCloseable
 
 		VkCommandBuffer cmd = commandBuffers[sync.currentFrame()];
 		vkResetCommandBuffer(cmd, 0);
-		start = System.nanoTime();
+		start = stats.startNanos();
 		recordClearPass(stack, cmd, framebuffers.get(imageIdx),
 			swapchain.width(), swapchain.height());
 		stats.addNanos(stats.commandRecordNanos, start);
 
-		start = System.nanoTime();
+		start = stats.startNanos();
 		submit(stack, cmd, imageIdx);
 		stats.addNanos(stats.submitNanos, start);
-		start = System.nanoTime();
+		start = stats.startNanos();
 		int present = present(stack, imageIdx);
 		stats.addNanos(stats.presentNanos, start);
 		if (present == VK_ERROR_OUT_OF_DATE_KHR || present == VK_SUBOPTIMAL_KHR)
@@ -287,7 +287,7 @@ final class VulkanRenderer implements AutoCloseable
 	 */
 	private void drawFrameCustomPresent(MemoryStack stack, int desiredWidth, int desiredHeight)
 	{
-		long start = System.nanoTime();
+		long start = stats.startNanos();
 		long[] d = MacOSMetalHelper.nextDrawable();
 		if (d == null)
 		{
@@ -329,15 +329,15 @@ final class VulkanRenderer implements AutoCloseable
 
 		VkCommandBuffer cmd = commandBuffers[sync.currentFrame()];
 		vkResetCommandBuffer(cmd, 0);
-		start = System.nanoTime();
+		start = stats.startNanos();
 		recordClearPass(stack, cmd, entry.framebuffer, width, height);
 		stats.addNanos(stats.commandRecordNanos, start);
 
-		start = System.nanoTime();
+		start = stats.startNanos();
 		submitNoSemaphores(stack, cmd);
 		stats.addNanos(stats.submitNanos, start);
 
-		start = System.nanoTime();
+		start = stats.startNanos();
 		MacOSMetalHelper.presentDrawable(drawable, device.metalCommandQueue());
 		stats.addNanos(stats.presentNanos, start);
 	}
@@ -388,7 +388,7 @@ final class VulkanRenderer implements AutoCloseable
 
 		// UI texture upload + transitions happen OUTSIDE the render pass —
 		// vkCmdCopyBufferToImage isn't allowed inside one.
-		long start = System.nanoTime();
+		long start = stats.startNanos();
 		renderExtensions.recordBeforeRenderPass(cmd);
 		stats.addNanos(stats.beforeRenderPassNanos, start);
 
@@ -479,7 +479,7 @@ final class VulkanRenderer implements AutoCloseable
 			gameTick, textureLightMode,
 			colorBlindMode, colorBlindIntensity,
 			smoothBanding, overlayColor);
-		start = System.nanoTime();
+		start = stats.startNanos();
 		renderExtensions.recordRenderPass(frame);
 		stats.addNanos(stats.renderPassNanos, start);
 

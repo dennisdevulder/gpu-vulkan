@@ -690,16 +690,16 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		// projection MVP, so don't overwrite them here.
 		if (renderExtensions != null)
 		{
-			long start = System.nanoTime();
+			long start = stats.startNanos();
 			renderExtensions.beginFrame();
 			stats.addNanos(stats.beginFrameNanos, start);
 			if (config.manualActorCapture())
 			{
-				start = System.nanoTime();
+				start = stats.startNanos();
 				captureActors();
 				stats.addNanos(stats.actorCaptureNanos, start);
 			}
-			start = System.nanoTime();
+			start = stats.startNanos();
 			renderExtensions.captureDynamicPending();
 			stats.addNanos(stats.pendingCaptureNanos, start);
 		}
@@ -830,7 +830,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	{
 		if (renderExtensions == null) return;
 		prepareScene(scene);
-		long start = System.nanoTime();
+		long start = stats.startNanos();
 		renderExtensions.captureScene(scene);
 		stats.addNanos(stats.sceneCaptureNanos, start);
 	}

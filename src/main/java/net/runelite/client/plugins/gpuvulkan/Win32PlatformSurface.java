@@ -69,9 +69,7 @@ final class Win32PlatformSurface implements PlatformSurface
 						JAWTWin32DrawingSurfaceInfo win = JAWTWin32DrawingSurfaceInfo.create(dsi.platformInfo());
 						long hwnd = win.hwnd();
 						// GetModuleHandle(NULL) → HMODULE of the process EXE. The
-						// nXxx form skips the error-buffer argument; we don't
-						// need GetLastError detail here, just the handle.
-						long hinstance = WinBase.nGetModuleHandle(org.lwjgl.system.MemoryUtil.NULL, org.lwjgl.system.MemoryUtil.NULL);
+						long hinstance = WinBase.nGetModuleHandle(org.lwjgl.system.MemoryUtil.NULL);
 						try (MemoryStack stack = stackPush())
 						{
 							VkWin32SurfaceCreateInfoKHR info = VkWin32SurfaceCreateInfoKHR.calloc(stack)

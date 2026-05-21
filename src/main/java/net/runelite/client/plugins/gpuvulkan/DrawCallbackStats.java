@@ -124,7 +124,16 @@ final class DrawCallbackStats
 
 	void addNanos(Counter bucket, long startNanos)
 	{
+		if (startNanos == 0L)
+		{
+			return;
+		}
 		bucket.addAndGet(System.nanoTime() - startNanos);
+	}
+
+	long startNanos()
+	{
+		return isEnabled() ? System.nanoTime() : 0L;
 	}
 
 	private static double avgMs(long nanos, long count)

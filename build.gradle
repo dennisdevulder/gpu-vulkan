@@ -32,7 +32,7 @@ java {
 def runeLiteVersion = 'latest.release'
 def pluginMainClass = 'net.runelite.client.plugins.gpuvulkan.GpuVulkanPluginTest'
 def lwjglVersion = '3.3.2'
-def lwjglVulkanVersion = '3.3.6'
+def lwjglVulkanVersion = '3.3.2'
 def lombokVersion = '1.18.34'
 
 dependencies {
