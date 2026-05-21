@@ -83,12 +83,11 @@ final class VulkanRenderer implements AutoCloseable
 		this.msaaColor = msaaColor;
 		this.framebuffers = framebuffers;
 		this.sync = sync;
-		// On macOS the swapchain is still created (we need its surface
-		// capabilities for format selection and its initial extent), but
-		// vkAcquireNextImageKHR / vkQueuePresentKHR are bypassed — we
-		// acquire the CAMetalDrawable ourselves and present via Metal.
-		this.useCustomPresent = device.supportsMetalObjects();
-		this.metalDrawables = useCustomPresent ? new MetalDrawableSet(device) : null;
+		// Keep macOS on the normal Vulkan swapchain path. The experimental
+		// imported-CAMetalDrawable custom-present path crashes inside MoltenVK
+		// on vkQueueSubmit with recent runtimes.
+		this.useCustomPresent = false;
+		this.metalDrawables = null;
 		this.customPresentWidth = swapchain.width();
 		this.customPresentHeight = swapchain.height();
 
