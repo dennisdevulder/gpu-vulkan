@@ -119,8 +119,8 @@ final class SceneRenderer implements AutoCloseable
 	private final int[][] planeEnds = new int[LAYER_COUNT][MAX_PLANES];
 
 	/** Per (layer, plane, zone) vertex ranges within the static region.
-	 *  Populated by {@link #captureScene}; currently unused but reserved
-	 *  for future per-zone re-emission. */
+	 *  Populated by {@link #captureScene}; used to avoid submitting static
+	 *  geometry outside the configured scene/fog radius. */
 	private final int[][][] zoneVertexStart = new int[LAYER_COUNT][MAX_PLANES][ZONE_COUNT];
 	private final int[][][] zoneVertexCount = new int[LAYER_COUNT][MAX_PLANES][ZONE_COUNT];
 
@@ -199,16 +199,18 @@ final class SceneRenderer implements AutoCloseable
 
 	SceneRenderer(VulkanDevice device, FrameSync sync,
 		RenderPass renderPass, TextureArray textureArray,
-		DrawCallbackStats stats)
+		DrawCallbackStats stats, boolean alphaToCoverage)
 	{
 		this.device = device;
 		this.sync = sync;
 		this.stats = stats;
-		this.fillPipeline = new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL, true, renderPass.samples());
+		this.fillPipeline = new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL, true,
+			renderPass.samples(), alphaToCoverage);
 		// fillModeNonSolid is required for VK_POLYGON_MODE_LINE; without it
 		// (llvmpipe, some embedded SoCs) wireframe collapses to FILL.
 		this.linePipeline = device.supportsFillModeNonSolid()
-			? new ScenePipeline(device, renderPass, VK_POLYGON_MODE_LINE, true, renderPass.samples())
+			? new ScenePipeline(device, renderPass, VK_POLYGON_MODE_LINE, true,
+				renderPass.samples(), alphaToCoverage)
 			: null;
 		this.vbuf = new SceneVertexBuffer(device, BUFFER_BYTES, FrameSync.FRAMES_IN_FLIGHT,
 			fillPipeline.descriptorSetLayout(), textureArray);
@@ -882,7 +884,7 @@ final class SceneRenderer implements AutoCloseable
 
 		boolean detailedStats = stats.isDetailedModelStats();
 		boolean prioritySort = renderMode == Renderable.RENDERMODE_SORTED_NO_DEPTH;
-		boolean needsFaceSort = prioritySort || m.getFaceTransparencies() != null;
+		boolean needsFaceSort = prioritySort || hasTransparentFaces(m);
 		if (!needsFaceSort && m.getFaceCount() <= OPAQUE_UNSORTED_FACE_THRESHOLD)
 		{
 			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
@@ -1350,6 +1352,24 @@ final class SceneRenderer implements AutoCloseable
 		return transparent;
 	}
 
+	private static boolean hasTransparentFaces(Model m)
+	{
+		byte[] transparencies = m.getFaceTransparencies();
+		if (transparencies == null)
+		{
+			return false;
+		}
+		int faces = Math.min(m.getFaceCount(), transparencies.length);
+		for (int i = 0; i < faces; i++)
+		{
+			if (transparencies[i] != 0)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
 	private final float[] uvScratch = new float[6];
 
 	/**
@@ -1508,16 +1528,66 @@ final class SceneRenderer implements AutoCloseable
 					// chopped when their roof id is hidden.
 					for (int p = loMin; p <= loMax; p++)
 					{
-						int drawStart = (p == 0) ? layerStart : planeEnds[i][p - 1];
-						int drawEnd = planeEnds[i][p];
-						if (drawEnd <= drawStart) continue;
-						drawRange(cmd, drawStart, drawEnd, skipScratch, skipPairs, p > loCur,
+						drawStaticPlane(cmd, i, p, layerStart, cameraX, cameraZ,
+							drawDistanceTiles, fogDepthTiles, skipScratch, skipPairs, p > loCur,
 							slotFirstVertex, want.layout(), vertPush, fragPush);
 					}
 				}
 				layerStart = regionEnd;
 			}
 		}
+	}
+
+	private void drawStaticPlane(VkCommandBuffer cmd, int layer, int plane, int layerStart,
+								 float cameraX, float cameraZ, float drawDistanceTiles, float fogDepthTiles,
+								 int[] skips, int skipPairs, boolean applySkips,
+								 int slotFirstVertex, long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
+	{
+		int planeStart = plane == 0 ? layerStart : planeEnds[layer][plane - 1];
+		int planeEnd = planeEnds[layer][plane];
+		if (planeEnd <= planeStart)
+		{
+			return;
+		}
+
+		int radiusTiles = (int) Math.ceil(drawDistanceTiles + fogDepthTiles + 2f);
+		int radiusZones = Math.max(1, (radiusTiles + ZONE_SIZE - 1) / ZONE_SIZE);
+		if (radiusZones >= ZONES_PER_SIDE)
+		{
+			drawRange(cmd, planeStart, planeEnd, skips, skipPairs, applySkips,
+				slotFirstVertex, pipelineLayout, vertPush, fragPush);
+			return;
+		}
+
+		int camTileX = clamp((int) Math.floor(cameraX / 128f), 0, Constants.SCENE_SIZE - 1);
+		int camTileZ = clamp((int) Math.floor(cameraZ / 128f), 0, Constants.SCENE_SIZE - 1);
+		int camZoneX = camTileX / ZONE_SIZE;
+		int camZoneZ = camTileZ / ZONE_SIZE;
+		int minZoneX = Math.max(0, camZoneX - radiusZones);
+		int maxZoneX = Math.min(ZONES_PER_SIDE - 1, camZoneX + radiusZones);
+		int minZoneZ = Math.max(0, camZoneZ - radiusZones);
+		int maxZoneZ = Math.min(ZONES_PER_SIDE - 1, camZoneZ + radiusZones);
+
+		for (int zx = minZoneX; zx <= maxZoneX; zx++)
+		{
+			for (int zz = minZoneZ; zz <= maxZoneZ; zz++)
+			{
+				int zoneIdx = zx * ZONES_PER_SIDE + zz;
+				int count = zoneVertexCount[layer][plane][zoneIdx];
+				if (count <= 0)
+				{
+					continue;
+				}
+				int start = zoneVertexStart[layer][plane][zoneIdx];
+				drawRange(cmd, start, start + count, skips, skipPairs, applySkips,
+					slotFirstVertex, pipelineLayout, vertPush, fragPush);
+			}
+		}
+	}
+
+	private static int clamp(int value, int min, int max)
+	{
+		return value < min ? min : (value > max ? max : value);
 	}
 
 	private static int tileRoofIdAt(int[][][] roofs, int p, int sx, int sy)

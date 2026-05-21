@@ -141,6 +141,8 @@ final class Swapchain implements AutoCloseable
 			{
 				imageCount = caps.maxImageCount();
 			}
+			log.info("Vulkan swapchain: {}x{} images={} presentMode={}",
+				width, height, imageCount, presentModeName(presentMode));
 
 			VkSwapchainCreateInfoKHR info = VkSwapchainCreateInfoKHR.calloc(stack)
 				.sType$Default()
@@ -265,6 +267,23 @@ final class Swapchain implements AutoCloseable
 			case VSYNC:
 			default:
 				return KHRSurface.VK_PRESENT_MODE_FIFO_KHR;
+		}
+	}
+
+	private static String presentModeName(int presentMode)
+	{
+		switch (presentMode)
+		{
+			case KHRSurface.VK_PRESENT_MODE_IMMEDIATE_KHR:
+				return "IMMEDIATE";
+			case KHRSurface.VK_PRESENT_MODE_MAILBOX_KHR:
+				return "MAILBOX";
+			case KHRSurface.VK_PRESENT_MODE_FIFO_RELAXED_KHR:
+				return "FIFO_RELAXED";
+			case KHRSurface.VK_PRESENT_MODE_FIFO_KHR:
+				return "FIFO";
+			default:
+				return "unknown(" + presentMode + ")";
 		}
 	}
 

@@ -1,7 +1,7 @@
 package net.runelite.client.plugins.gpuvulkan;
 
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.LongAdder;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Model;
 
@@ -19,63 +19,64 @@ import net.runelite.api.Model;
 @Slf4j
 final class DrawCallbackStats
 {
+	private final boolean statsEnabled = Boolean.parseBoolean(System.getProperty("vkgpu.stats", "false"));
 	private volatile boolean detailedModelStats;
 
 	// Per-method call counters
-	final AtomicLong drawScene = new AtomicLong();
-	final AtomicLong preSceneDraw = new AtomicLong();
-	final AtomicLong postDrawScene = new AtomicLong();
+	final Counter drawScene = new Counter();
+	final Counter preSceneDraw = new Counter();
+	final Counter postDrawScene = new Counter();
 	volatile int lastHideRoofSize;
-	final AtomicLong swapScene = new AtomicLong();
-	final AtomicLong loadScene = new AtomicLong();
-	final AtomicLong drawScenePaint = new AtomicLong();
-	final AtomicLong drawSceneTileModel = new AtomicLong();
-	final AtomicLong drawZoneOpaque = new AtomicLong();
-	final AtomicLong drawZoneAlpha = new AtomicLong();
-	final AtomicLong drawDynamic = new AtomicLong();
-	final AtomicLong drawTemp = new AtomicLong();
-	final AtomicLong drawPass = new AtomicLong();
-	final AtomicLong drawSingle = new AtomicLong();   // draw(Projection, Scene, Renderable, ...)
-	final AtomicLong animate = new AtomicLong();
+	final Counter swapScene = new Counter();
+	final Counter loadScene = new Counter();
+	final Counter drawScenePaint = new Counter();
+	final Counter drawSceneTileModel = new Counter();
+	final Counter drawZoneOpaque = new Counter();
+	final Counter drawZoneAlpha = new Counter();
+	final Counter drawDynamic = new Counter();
+	final Counter drawTemp = new Counter();
+	final Counter drawPass = new Counter();
+	final Counter drawSingle = new Counter();   // draw(Projection, Scene, Renderable, ...)
+	final Counter animate = new Counter();
 
 	// Aggregate model stats (for the methods carrying a Model)
-	final AtomicLong totalDynamicVerts = new AtomicLong();
-	final AtomicLong totalDynamicFaces = new AtomicLong();
+	final Counter totalDynamicVerts = new Counter();
+	final Counter totalDynamicFaces = new Counter();
 	final AtomicInteger maxDynamicFaces = new AtomicInteger();
 
 	// CPU timing buckets. Aggregated once per stats log interval.
-	final AtomicLong frames = new AtomicLong();
-	final AtomicLong drawFrameNanos = new AtomicLong();
-	final AtomicLong fenceWaitNanos = new AtomicLong();
-	final AtomicLong uiUploadNanos = new AtomicLong();
-	final AtomicLong acquireNanos = new AtomicLong();
-	final AtomicLong commandRecordNanos = new AtomicLong();
-	final AtomicLong beforeRenderPassNanos = new AtomicLong();
-	final AtomicLong renderPassNanos = new AtomicLong();
-	final AtomicLong submitNanos = new AtomicLong();
-	final AtomicLong presentNanos = new AtomicLong();
-	final AtomicLong customDrawableNanos = new AtomicLong();
-	final AtomicLong beginFrameNanos = new AtomicLong();
-	final AtomicLong actorCaptureNanos = new AtomicLong();
-	final AtomicLong pendingCaptureNanos = new AtomicLong();
-	final AtomicLong sceneCaptureNanos = new AtomicLong();
-	final AtomicLong modelSortNanos = new AtomicLong();
-	final AtomicLong modelFullSortNanos = new AtomicLong();
-	final AtomicLong modelCullOnlyNanos = new AtomicLong();
-	final AtomicLong modelEmitNanos = new AtomicLong();
-	final AtomicLong modelSortedEmitNanos = new AtomicLong();
-	final AtomicLong modelUnsortedEmitNanos = new AtomicLong();
-	final AtomicLong modelUvNanos = new AtomicLong();
-	final AtomicLong sortedModels = new AtomicLong();
-	final AtomicLong fullSortModels = new AtomicLong();
-	final AtomicLong cullOnlyModels = new AtomicLong();
-	final AtomicLong unsortedModels = new AtomicLong();
-	final AtomicLong sortFallbackModels = new AtomicLong();
-	final AtomicLong sortedFaces = new AtomicLong();
-	final AtomicLong unsortedFaces = new AtomicLong();
-	final AtomicLong fullSortTransparentFaces = new AtomicLong();
-	final AtomicLong texturedEmitFaces = new AtomicLong();
-	final AtomicLong overrideEmitFaces = new AtomicLong();
+	final Counter frames = new Counter();
+	final Counter drawFrameNanos = new Counter();
+	final Counter fenceWaitNanos = new Counter();
+	final Counter uiUploadNanos = new Counter();
+	final Counter acquireNanos = new Counter();
+	final Counter commandRecordNanos = new Counter();
+	final Counter beforeRenderPassNanos = new Counter();
+	final Counter renderPassNanos = new Counter();
+	final Counter submitNanos = new Counter();
+	final Counter presentNanos = new Counter();
+	final Counter customDrawableNanos = new Counter();
+	final Counter beginFrameNanos = new Counter();
+	final Counter actorCaptureNanos = new Counter();
+	final Counter pendingCaptureNanos = new Counter();
+	final Counter sceneCaptureNanos = new Counter();
+	final Counter modelSortNanos = new Counter();
+	final Counter modelFullSortNanos = new Counter();
+	final Counter modelCullOnlyNanos = new Counter();
+	final Counter modelEmitNanos = new Counter();
+	final Counter modelSortedEmitNanos = new Counter();
+	final Counter modelUnsortedEmitNanos = new Counter();
+	final Counter modelUvNanos = new Counter();
+	final Counter sortedModels = new Counter();
+	final Counter fullSortModels = new Counter();
+	final Counter cullOnlyModels = new Counter();
+	final Counter unsortedModels = new Counter();
+	final Counter sortFallbackModels = new Counter();
+	final Counter sortedFaces = new Counter();
+	final Counter unsortedFaces = new Counter();
+	final Counter fullSortTransparentFaces = new Counter();
+	final Counter texturedEmitFaces = new Counter();
+	final Counter overrideEmitFaces = new Counter();
 
 	// Sample fields — last-write-wins, fine for "what's the camera at"
 	volatile double lastCamX;
@@ -84,6 +85,11 @@ final class DrawCallbackStats
 	volatile int lastCamPlane;
 
 	private long nextLogNanos = System.nanoTime() + 1_000_000_000L;
+
+	boolean isEnabled()
+	{
+		return statsEnabled || detailedModelStats;
+	}
 
 	boolean isDetailedModelStats()
 	{
@@ -116,7 +122,7 @@ final class DrawCallbackStats
 		do { prev = maxDynamicFaces.get(); } while (faces > prev && !maxDynamicFaces.compareAndSet(prev, faces));
 	}
 
-	void addNanos(AtomicLong bucket, long startNanos)
+	void addNanos(Counter bucket, long startNanos)
 	{
 		bucket.addAndGet(System.nanoTime() - startNanos);
 	}
@@ -133,6 +139,10 @@ final class DrawCallbackStats
 
 	void maybeLog()
 	{
+		if (!isEnabled())
+		{
+			return;
+		}
 		long now = System.nanoTime();
 		if (now < nextLogNanos) return;
 		nextLogNanos = now + 1_000_000_000L;
@@ -296,4 +306,49 @@ final class DrawCallbackStats
 	long totalDynamicVertsCount() { return totalDynamicVerts.get(); }
 	long totalDynamicFacesCount() { return totalDynamicFaces.get(); }
 	int maxDynamicFacesCount() { return maxDynamicFaces.get(); }
+
+	final class Counter
+	{
+		private final LongAdder value = new LongAdder();
+
+		void incrementAndGet()
+		{
+			if (isEnabled())
+			{
+				value.increment();
+			}
+		}
+
+		void addAndGet(long delta)
+		{
+			if (isEnabled())
+			{
+				value.add(delta);
+			}
+		}
+
+		long getAndSet(long next)
+		{
+			long current = value.sumThenReset();
+			if (next != 0L && isEnabled())
+			{
+				value.add(next);
+			}
+			return current;
+		}
+
+		void set(long next)
+		{
+			value.reset();
+			if (next != 0L && isEnabled())
+			{
+				value.add(next);
+			}
+		}
+
+		long get()
+		{
+			return value.sum();
+		}
+	}
 }

@@ -25,6 +25,7 @@ final class BaseRenderer implements VulkanRenderExtension
 	@Override
 	public void uploadUiPixels(int[] pixels, int width, int height)
 	{
+		if (config != null && config.benchmarkSkipUi()) return;
 		if (interfaceRenderer == null) return;
 		interfaceRenderer.uploadPixels(pixels, width, height);
 	}
@@ -48,6 +49,7 @@ final class BaseRenderer implements VulkanRenderExtension
 	@Override
 	public void captureDynamicPending()
 	{
+		if (config != null && config.benchmarkSkipDynamicCapture()) return;
 		if (sceneRenderer == null) return;
 		sceneRenderer.captureDynamicPending();
 	}
@@ -69,6 +71,7 @@ final class BaseRenderer implements VulkanRenderExtension
 	@Override
 	public void captureModel(Model model, int orientation, int worldX, int worldY, int worldZ)
 	{
+		if (config != null && config.benchmarkSkipDynamicCapture()) return;
 		if (sceneRenderer == null) return;
 		sceneRenderer.captureModel(model, orientation, worldX, worldY, worldZ);
 	}
@@ -76,6 +79,7 @@ final class BaseRenderer implements VulkanRenderExtension
 	@Override
 	public void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ)
 	{
+		if (config != null && config.benchmarkSkipDynamicCapture()) return;
 		if (sceneRenderer == null) return;
 		sceneRenderer.captureModel(projection, model, orientation, worldX, worldY, worldZ);
 	}
@@ -83,6 +87,7 @@ final class BaseRenderer implements VulkanRenderExtension
 	@Override
 	public void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ, int renderMode)
 	{
+		if (config != null && config.benchmarkSkipDynamicCapture()) return;
 		if (sceneRenderer == null) return;
 		sceneRenderer.captureModel(projection, model, orientation, worldX, worldY, worldZ, renderMode);
 	}
@@ -118,6 +123,7 @@ final class BaseRenderer implements VulkanRenderExtension
 	@Override
 	public void recordBeforeRenderPass(VkCommandBuffer commandBuffer)
 	{
+		if (config != null && config.benchmarkSkipUi()) return;
 		if (interfaceRenderer == null) return;
 		interfaceRenderer.recordCopyToImage(commandBuffer);
 	}
@@ -127,9 +133,12 @@ final class BaseRenderer implements VulkanRenderExtension
 	{
 		if (sceneRenderer != null)
 		{
-			sceneRenderer.recordDraw(frame);
+			if (config == null || !config.benchmarkSkipScene())
+			{
+				sceneRenderer.recordDraw(frame);
+			}
 		}
-		if (interfaceRenderer != null)
+		if (interfaceRenderer != null && (config == null || !config.benchmarkSkipUi()))
 		{
 			interfaceRenderer.recordDraw(frame);
 		}

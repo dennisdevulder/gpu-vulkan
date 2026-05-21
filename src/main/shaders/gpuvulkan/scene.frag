@@ -111,8 +111,6 @@ void main() {
     // alpha-to-coverage write zero samples (cheaper, skips depth write).
     if (vTrans == 255u) discard;
     int hsl = int(vHslPacked);
-    int hue = (hsl >> 10) & 0x3F;
-    int sat = (hsl >> 7)  & 0x07;
     int lum =  hsl        & 0x7F;
 
     vec3 rgb;
@@ -120,8 +118,13 @@ void main() {
         // smoothBanding mixes per-fragment HSL decode (faceted, stock's
         // default-off look) with rasterizer-interpolated per-vertex RGB
         // (smooth gradients, stock's default-on look).
-        vec3 perFragment = hslToRgb(hue, sat, lum);
-        rgb = mix(perFragment, vColor, push.fragExtras.w);
+        if (push.fragExtras.w >= 0.5) {
+            rgb = vColor;
+        } else {
+            int hue = (hsl >> 10) & 0x3F;
+            int sat = (hsl >> 7)  & 0x07;
+            rgb = hslToRgb(hue, sat, lum);
+        }
     } else {
         // Sampler is NEAREST-mag / LINEAR-min with mipmaps + anisotropy.
         // Threshold 0.5 lets partial-alpha mip texels render; level 0
@@ -132,17 +135,22 @@ void main() {
         // textureLightMode: 0 = lightness-only tint (stock default),
         // 1 = full HSL→RGB tint (stock's "Bright textures").
         float light = float(lum) / 127.0;
-        vec3 fullColor = hslToRgb(hue, sat, lum);
-        vec3 mulRgb = mix(vec3(light), fullColor, push.fragExtras.x);
+        vec3 mulRgb;
+        if (push.fragExtras.x >= 0.5) {
+            mulRgb = vColor;
+        } else {
+            mulRgb = vec3(light);
+        }
         rgb = tex * mulRgb;
     }
-    // Brightness gamma applies to both branches so untextured terrain
-    // responds to the brightness slider too.
+    // Keep brightness behavior identical to the previous Vulkan shader.
     rgb = pow(rgb, vec3(push.fogFrag.a));
     rgb = mix(rgb, push.fogFrag.rgb, vFogAmount);
     // Colour-blind correction runs after fog so the fog tint is also
     // Daltonized (matches stock ordering).
-    rgb = applyColorBlind(rgb, int(push.fragExtras.y), push.fragExtras.z);
+    if (push.fragExtras.y > 0.5) {
+        rgb = applyColorBlind(rgb, int(push.fragExtras.y), push.fragExtras.z);
+    }
     // alpha = 1 - vTrans/255; drives MSAA coverage via the pipeline's
     // alphaToCoverageEnable.
     float alpha = 1.0 - float(vTrans) / 255.0;

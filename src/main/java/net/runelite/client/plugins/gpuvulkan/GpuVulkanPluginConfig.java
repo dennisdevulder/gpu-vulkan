@@ -19,6 +19,14 @@ public interface GpuVulkanPluginConfig extends Config
 	)
 	String DEBUG_SECTION = "debug";
 
+	@ConfigSection(
+		name = "Benchmark",
+		description = "Temporary switches for isolating Vulkan CPU/GPU costs.",
+		position = 3,
+		closedByDefault = true
+	)
+	String BENCHMARK_SECTION = "benchmark";
+
 	@ConfigItem(
 		keyName = "validation",
 		name = "Validation layers",
@@ -96,6 +104,49 @@ public interface GpuVulkanPluginConfig extends Config
 		description = "Strip scene zones that belong to a different game region than the player's, so neighbouring maps don't bleed into the horizon. No effect inside instances. Matches stock GPU's option."
 	)
 	default boolean hideUnrelatedMaps() { return true; }
+
+	@ConfigItem(
+		keyName = "manualActorCapture",
+		name = "Manual actor capture",
+		description = "Fallback path that walks every player/NPC each frame to avoid actor flicker. Higher CPU cost; leave off unless actors flicker."
+	)
+	default boolean manualActorCapture() { return false; }
+
+	@ConfigItem(
+		keyName = "benchmarkSkipUi",
+		name = "Skip UI upload",
+		description = "Benchmark only: skip UI texture upload/draw to isolate scene renderer cost.",
+		section = BENCHMARK_SECTION,
+		position = 0
+	)
+	default boolean benchmarkSkipUi() { return false; }
+
+	@ConfigItem(
+		keyName = "benchmarkSkipScene",
+		name = "Skip scene draw",
+		description = "Benchmark only: skip 3D scene draw to isolate UI and present cost.",
+		section = BENCHMARK_SECTION,
+		position = 1
+	)
+	default boolean benchmarkSkipScene() { return false; }
+
+	@ConfigItem(
+		keyName = "benchmarkSkipDynamicCapture",
+		name = "Skip dynamic capture",
+		description = "Benchmark only: skip dynamic model capture while keeping static scene/UI.",
+		section = BENCHMARK_SECTION,
+		position = 2
+	)
+	default boolean benchmarkSkipDynamicCapture() { return false; }
+
+	@ConfigItem(
+		keyName = "benchmarkDisableAlphaCoverage",
+		name = "Disable alpha coverage",
+		description = "Benchmark only: disables MSAA alpha-to-coverage for the scene. Transparent faces may render incorrectly; use only to isolate scene pipeline cost. Plugin must be re-enabled to take effect.",
+		section = BENCHMARK_SECTION,
+		position = 3
+	)
+	default boolean benchmarkDisableAlphaCoverage() { return false; }
 
 	@ConfigItem(
 		keyName = "fogDepth",

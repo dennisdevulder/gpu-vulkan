@@ -11,9 +11,9 @@ final class DefaultVulkanSceneRenderer implements VulkanSceneRenderer
 
 	DefaultVulkanSceneRenderer(VulkanDevice device, FrameSync sync,
 		RenderPass renderPass, TextureArray textureArray,
-		DrawCallbackStats stats)
+		DrawCallbackStats stats, boolean alphaToCoverage)
 	{
-		this.sceneRenderer = new SceneRenderer(device, sync, renderPass, textureArray, stats);
+		this.sceneRenderer = new SceneRenderer(device, sync, renderPass, textureArray, stats, alphaToCoverage);
 	}
 
 	@Override

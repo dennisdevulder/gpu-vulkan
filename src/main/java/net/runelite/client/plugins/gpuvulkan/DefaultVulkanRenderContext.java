@@ -53,7 +53,8 @@ final class DefaultVulkanRenderContext implements VulkanRenderContext
 	@Override
 	public VulkanSceneRenderer createSceneRenderer()
 	{
-		return new DefaultVulkanSceneRenderer(device, sync, renderPass, textureArray, stats);
+		return new DefaultVulkanSceneRenderer(device, sync, renderPass, textureArray, stats,
+			!config.benchmarkDisableAlphaCoverage());
 	}
 
 	@Override

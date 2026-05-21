@@ -693,9 +693,12 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			long start = System.nanoTime();
 			renderExtensions.beginFrame();
 			stats.addNanos(stats.beginFrameNanos, start);
-			start = System.nanoTime();
-			captureActors();
-			stats.addNanos(stats.actorCaptureNanos, start);
+			if (config.manualActorCapture())
+			{
+				start = System.nanoTime();
+				captureActors();
+				stats.addNanos(stats.actorCaptureNanos, start);
+			}
 			start = System.nanoTime();
 			renderExtensions.captureDynamicPending();
 			stats.addNanos(stats.pendingCaptureNanos, start);
@@ -966,11 +969,14 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	{
 		stats.drawDynamic.incrementAndGet();
 		stats.recordModel(m);
-		// Null tileObject + Actor renderable = the engine's actor pipeline
-		// emission; captureActors() handles those. Without the skip the
-		// local player renders twice.
-		if (tileObject == null) return;
-		if (r instanceof net.runelite.api.Actor) return;
+		if (config.manualActorCapture())
+		{
+			// Null tileObject + Actor renderable = the engine's actor pipeline
+			// emission; captureActors() handles those in manual mode. Without
+			// the skip the local player renders twice.
+			if (tileObject == null) return;
+			if (r instanceof net.runelite.api.Actor) return;
+		}
 		lastWorldProjection = worldProjection;
 		if (renderExtensions != null) renderExtensions.captureModel(worldProjection, m, orient, x, y, z, renderModeOf(r));
 	}
@@ -980,11 +986,15 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	{
 		stats.drawTemp.incrementAndGet();
 		stats.recordModel(m);
-		// Null gameObject = engine emitting an actor via the temp pipeline;
-		// captureActors() already drew it.
-		if (gameObject == null) return;
+		if (config.manualActorCapture())
+		{
+			// Null gameObject = engine emitting an actor via the temp pipeline;
+			// captureActors() already drew it in manual mode.
+			if (gameObject == null) return;
+		}
 		lastWorldProjection = worldProjection;
-		if (renderExtensions != null) renderExtensions.captureModel(worldProjection, m, orient, x, y, z, renderModeOf(gameObject.getRenderable()));
+		if (renderExtensions != null) renderExtensions.captureModel(worldProjection, m, orient, x, y, z,
+			gameObject == null ? Renderable.RENDERMODE_DEFAULT : renderModeOf(gameObject.getRenderable()));
 	}
 
 	private static int renderModeOf(Renderable renderable)

@@ -190,8 +190,11 @@ final class VulkanRenderer implements AutoCloseable
 			// UI texture that reads as the UI/scene "layer" intermittently
 			// covering and uncovering.
 			long start = System.nanoTime();
-			vkWaitForFences(device.handle(), sync.inFlightFence(), true, Long.MAX_VALUE);
-			stats.addNanos(stats.fenceWaitNanos, start);
+			if (vkGetFenceStatus(device.handle(), sync.inFlightFence()) == VK_NOT_READY)
+			{
+				vkWaitForFences(device.handle(), sync.inFlightFence(), true, Long.MAX_VALUE);
+				stats.addNanos(stats.fenceWaitNanos, start);
+			}
 
 			// CPU-side memcpy into the persistently-mapped staging buffer. Done
 			// before recording the command buffer so the GPU read sees it.

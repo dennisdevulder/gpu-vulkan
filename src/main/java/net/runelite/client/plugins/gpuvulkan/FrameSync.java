@@ -24,7 +24,7 @@ import static org.lwjgl.vulkan.VK13.*;
  */
 final class FrameSync implements AutoCloseable
 {
-	static final int FRAMES_IN_FLIGHT = 2;
+	static final int FRAMES_IN_FLIGHT = 3;
 
 	private final VulkanDevice device;
 	private final long[] imageAvailable = new long[FRAMES_IN_FLIGHT];

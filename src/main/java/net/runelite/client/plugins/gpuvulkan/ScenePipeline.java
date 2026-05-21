@@ -60,7 +60,8 @@ final class ScenePipeline implements AutoCloseable
 	private final long pipelineLayout;
 	private final long pipeline;
 
-	ScenePipeline(VulkanDevice device, RenderPass renderPass, int polygonMode, boolean depthTest, int samples)
+	ScenePipeline(VulkanDevice device, RenderPass renderPass, int polygonMode, boolean depthTest,
+				  int samples, boolean alphaToCoverage)
 	{
 		this.device = device;
 		Disposables tmp = new Disposables();
@@ -124,7 +125,7 @@ final class ScenePipeline implements AutoCloseable
 					// "glow tip" faces (transparency 252+) from rendering as
 					// opaque red blobs while still keeping translucent geometry
 					// (tent drapes, banners, water surfaces) visible.
-					.alphaToCoverageEnable(samples != VK_SAMPLE_COUNT_1_BIT);
+					.alphaToCoverageEnable(alphaToCoverage && samples != VK_SAMPLE_COUNT_1_BIT);
 
 			// When MSAA is on, alpha-to-coverage above handles translucency
 			// via sample-mask dithering, so the blend stage stays disabled
