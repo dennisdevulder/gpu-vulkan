@@ -24,6 +24,9 @@ import static org.lwjgl.vulkan.VK13.vkDeviceWaitIdle;
 @Slf4j
 final class GfxStreamingImage implements StreamingImage
 {
+	private static final int FULL_UPLOAD_DIRTY_ROW_PERCENT = 50;
+	private static final int FULL_UPLOAD_RANGE_LIMIT = 64;
+
 	private final VulkanDevice device;
 	private final FrameSync frameSync;
 	private final int width;
@@ -90,13 +93,8 @@ final class GfxStreamingImage implements StreamingImage
 		if (needsFullUpload[slot])
 		{
 			int rowInts = rows * width;
-			staging.writeIntsUnflushed(pixels, 0, 0, rowInts);
-			System.arraycopy(pixels, 0, previous, 0, rowInts);
-			dirtyRowStarts[slot][0] = 0;
-			dirtyRowHeights[slot][0] = rows;
-			dirtyRangeCounts[slot] = 1;
+			fullUpload(slot, staging, pixels, previous, rows, rowInts);
 			needsFullUpload[slot] = false;
-			staging.flushIfNeeded();
 			recordDirtyUploadStats(rows, rows, 1, true);
 			return;
 		}
@@ -104,6 +102,8 @@ final class GfxStreamingImage implements StreamingImage
 		int rangeCount = 0;
 		int dirtyRows = 0;
 		int rowInts = rows * width;
+		int flushStart = rowInts;
+		int flushEnd = 0;
 		for (int searchOffset = 0; searchOffset < rowInts; )
 		{
 			int mismatch = Arrays.mismatch(pixels, searchOffset, rowInts, previous, searchOffset, rowInts);
@@ -126,18 +126,44 @@ final class GfxStreamingImage implements StreamingImage
 			dirtyRows += rowCount;
 			int intOffset = startRow * width;
 			staging.writeIntsUnflushed(previous, intOffset, intOffset, rowCount * width);
+			flushStart = Math.min(flushStart, intOffset);
+			flushEnd = Math.max(flushEnd, intOffset + rowCount * width);
 			dirtyRowStarts[slot][rangeCount] = startRow;
 			dirtyRowHeights[slot][rangeCount] = rowCount;
 			rangeCount++;
 			searchOffset = y * width;
 		}
 
+		if (shouldFullUpload(rows, dirtyRows, rangeCount))
+		{
+			fullUpload(slot, staging, pixels, previous, rows, rowInts);
+			recordDirtyUploadStats(rows, rows, 1, true);
+			return;
+		}
+
 		dirtyRangeCounts[slot] = rangeCount;
 		if (rangeCount > 0)
 		{
-			staging.flushIfNeeded();
+			staging.flushRangeIfNeeded((long) flushStart * Integer.BYTES,
+				(long) (flushEnd - flushStart) * Integer.BYTES);
 		}
 		recordDirtyUploadStats(rows, dirtyRows, rangeCount, false);
+	}
+
+	private void fullUpload(int slot, Buffer staging, int[] pixels, int[] previous, int rows, int rowInts)
+	{
+		staging.writeIntsUnflushed(pixels, 0, 0, rowInts);
+		System.arraycopy(pixels, 0, previous, 0, rowInts);
+		dirtyRowStarts[slot][0] = 0;
+		dirtyRowHeights[slot][0] = rows;
+		dirtyRangeCounts[slot] = 1;
+		staging.flushRangeIfNeeded(0, (long) rowInts * Integer.BYTES);
+	}
+
+	private static boolean shouldFullUpload(int totalRows, int dirtyRows, int dirtyRanges)
+	{
+		return dirtyRanges > FULL_UPLOAD_RANGE_LIMIT
+			|| dirtyRows * 100 >= totalRows * FULL_UPLOAD_DIRTY_ROW_PERCENT;
 	}
 
 	/** Records the staging→image copy + the layout transitions around it,

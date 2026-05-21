@@ -159,6 +159,8 @@ final class SceneRenderer implements AutoCloseable
 	{
 		final Renderable r;
 		final int orient, x, y, z;
+		Model model;
+
 		PendingRenderable(Renderable r, int orient, int x, int y, int z)
 		{
 			this.r = r;
@@ -591,8 +593,13 @@ final class SceneRenderer implements AutoCloseable
 		for (int i = 0, n = pendingRenderables.size(); i < n; i++)
 		{
 			PendingRenderable pr = pendingRenderables.get(i);
-			Model m = resolveModel(pr.r);
-			if (m == null) continue;
+			Model m = pr.model;
+			if (m == null)
+			{
+				m = resolveModel(pr.r);
+				if (m == null) continue;
+				pr.model = m;
+			}
 			captureModel(m, pr.orient, pr.x, pr.y, pr.z);
 		}
 	}

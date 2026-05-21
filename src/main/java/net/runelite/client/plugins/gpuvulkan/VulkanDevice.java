@@ -60,6 +60,7 @@ final class VulkanDevice implements AutoCloseable
 	 *  either one. */
 	private final boolean supportsFillModeNonSolid;
 	private final boolean supportsSamplerAnisotropy;
+	private final long nonCoherentAtomSize;
 	/** {@code true} when VK_EXT_metal_objects is enabled (macOS only).
 	 *  Populated at the device-extension-enable step. Other code branches
 	 *  on this to pick between the KHR_swapchain present path (Linux) and
@@ -82,6 +83,7 @@ final class VulkanDevice implements AutoCloseable
 			VkPhysicalDeviceProperties props = VkPhysicalDeviceProperties.calloc(stack);
 			vkGetPhysicalDeviceProperties(physicalDevice, props);
 			this.deviceName = props.deviceNameString();
+			this.nonCoherentAtomSize = props.limits().nonCoherentAtomSize();
 
 			// Query what the device actually offers BEFORE asking for any
 			// feature. Requesting an unsupported feature is a spec violation
@@ -297,6 +299,11 @@ final class VulkanDevice implements AutoCloseable
 	boolean supportsSamplerAnisotropy()
 	{
 		return supportsSamplerAnisotropy;
+	}
+
+	long nonCoherentAtomSize()
+	{
+		return nonCoherentAtomSize;
 	}
 
 	/** Highest {@code VK_SAMPLE_COUNT_*_BIT} the device supports for both
