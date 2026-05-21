@@ -227,6 +227,17 @@ final class SceneRenderer implements AutoCloseable
 		hideRoofIds = ids != null ? ids : java.util.Collections.emptySet();
 	}
 
+	void collectDebugMetrics(GpuVulkanDebugMetrics metrics)
+	{
+		metrics.sceneVertices += regionEnds[LAST_STATIC.ordinal()];
+		metrics.totalVertices += vertexCount;
+		metrics.maxVertices += MAX_VERTICES;
+		metrics.roofRanges += tileRoofCount;
+		metrics.pendingRenderables += pendingRenderables.size();
+		metrics.overflowed |= overflowed;
+		metrics.sceneBufferBytes += BUFFER_BYTES * FrameSync.FRAMES_IN_FLIGHT;
+	}
+
 	/** Per-frame (Model identity, worldX, worldZ) dedupe — collapses the
 	 *  "two heads on the player" case where multiple capture paths emit
 	 *  the same actor model at the same position. */

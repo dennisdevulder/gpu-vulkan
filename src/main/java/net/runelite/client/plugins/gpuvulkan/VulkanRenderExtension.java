@@ -45,6 +45,8 @@ public interface VulkanRenderExtension extends AutoCloseable
 
 	default void setHideRoofIds(Set<Integer> hideRoofIds) {}
 
+	default void collectDebugMetrics(GpuVulkanDebugMetrics metrics) {}
+
 	default void uploadUiPixels(int[] pixels, int width, int height) {}
 
 	/**

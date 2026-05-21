@@ -33,6 +33,8 @@ public interface VulkanSceneRenderer extends AutoCloseable
 
 	void setHideRoofIds(Set<Integer> hideRoofIds);
 
+	void collectDebugMetrics(GpuVulkanDebugMetrics metrics);
+
 	void setWireframeTerrain(boolean enabled);
 
 	void setWireframeWalls(boolean enabled);

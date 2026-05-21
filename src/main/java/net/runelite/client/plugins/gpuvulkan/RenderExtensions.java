@@ -101,6 +101,11 @@ final class RenderExtensions implements AutoCloseable
 		forEachExtension("setHideRoofIds", extension -> extension.setHideRoofIds(hideRoofIds));
 	}
 
+	void collectDebugMetrics(GpuVulkanDebugMetrics metrics)
+	{
+		forEachExtension("collectDebugMetrics", extension -> extension.collectDebugMetrics(metrics));
+	}
+
 	void uploadUiPixels(int[] pixels, int width, int height)
 	{
 		forEachExtension("uploadUiPixels", extension -> extension.uploadUiPixels(pixels, width, height));

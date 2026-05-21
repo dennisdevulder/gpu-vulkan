@@ -89,4 +89,15 @@ final class DrawCallbackStats
 			animate.getAndSet(0)
 		));
 	}
+
+	long drawSceneCount() { return drawScene.get(); }
+	long preSceneDrawCount() { return preSceneDraw.get(); }
+	long postDrawSceneCount() { return postDrawScene.get(); }
+	long drawDynamicCount() { return drawDynamic.get(); }
+	long drawTempCount() { return drawTemp.get(); }
+	long drawPassCount() { return drawPass.get(); }
+	long drawSingleCount() { return drawSingle.get(); }
+	long totalDynamicVertsCount() { return totalDynamicVerts.get(); }
+	long totalDynamicFacesCount() { return totalDynamicFaces.get(); }
+	int maxDynamicFacesCount() { return maxDynamicFaces.get(); }
 }
