@@ -30,9 +30,7 @@
  * Adapted to Vulkan: stock writes pre-shuffled vertex bytes into an
  * {@code IntBuffer}; we return ordered face indices via {@link #sortedFaces}
  * and let {@link SceneRenderer#captureModelSorted} emit each face into the
- * shared vertex buffer. The per-priority interleave (stock's
- * {@code prioritySort = true} path) is not ported — it only fires for the
- * rare {@code RENDERMODE_SORTED_NO_DEPTH} renderables.
+ * shared vertex buffer.
  */
 package net.runelite.client.plugins.gpuvulkan;
 
@@ -46,6 +44,7 @@ final class ModelSorter
 	static final int MAX_VERTEX_COUNT = 6500;
 	static final int MAX_FACE_COUNT = 8192;
 	static final int MAX_DIAMETER = 6000;
+	private static final int MAX_FACES_PER_PRIORITY = 4000;
 
 	// --- per-vertex scratch (filled by sort, read by SceneRenderer when emitting) ---
 	final float[] localX = new float[MAX_VERTEX_COUNT];
@@ -67,6 +66,12 @@ final class ModelSorter
 	final int[] sortedFaces = new int[MAX_FACE_COUNT];
 	int sortedCount;
 
+	private final int[] numOfPriority = new int[12];
+	private final int[] eq10 = new int[MAX_FACES_PER_PRIORITY];
+	private final int[] eq11 = new int[MAX_FACES_PER_PRIORITY];
+	private final int[] lt10 = new int[12];
+	private final int[][] orderedFaces = new int[12][MAX_FACES_PER_PRIORITY];
+
 	/**
 	 * Project the model, bucket its faces by camera depth, and write the
 	 * back-to-front face order into {@link #sortedFaces} (length
@@ -87,6 +92,11 @@ final class ModelSorter
 	 * and back-face-culled faces are dropped here.
 	 */
 	boolean sort(Projection proj, Model m, int orientation, int wx, int wy, int wz)
+	{
+		return sort(proj, m, orientation, wx, wy, wz, false);
+	}
+
+	boolean sort(Projection proj, Model m, int orientation, int wx, int wy, int wz, boolean prioritySort)
 	{
 		sortedCount = 0;
 
@@ -114,6 +124,7 @@ final class ModelSorter
 		}
 
 		final int[] faceColors3 = m.getFaceColors3();
+		final byte[] faceRenderPriorities = m.getFaceRenderPriorities();
 
 		float orientSine = 0f;
 		float orientCosine = 0f;
@@ -230,21 +241,183 @@ final class ModelSorter
 			if (distance > maxFz) maxFz = distance;
 		}
 
-		// Walk far → near, mirroring stock's `for (int i = maxFz; i >= minFz; --i)`.
-			int out = 0;
-			for (int i = maxFz; i >= minFz; i--)
+		if (faceRenderPriorities == null || !prioritySort)
+		{
+			writeBasicOrder(stamp, minFz, maxFz);
+		}
+		else if (!writePriorityOrder(faceRenderPriorities, stamp, minFz, maxFz))
+		{
+			writeBasicOrder(stamp, minFz, maxFz);
+		}
+		return true;
+	}
+
+	private void writeBasicOrder(int stamp, int minFz, int maxFz)
+	{
+		int out = 0;
+		for (int i = maxFz; i >= minFz; i--)
+		{
+			if (zsortStamp[i] != stamp)
 			{
-				if (zsortStamp[i] != stamp)
-				{
-					continue;
-				}
-				for (char f = zsortHead[i]; f != (char) -1; f = zsortNext[f])
-				{
-					sortedFaces[out++] = f;
+				continue;
+			}
+			for (char f = zsortHead[i]; f != (char) -1; f = zsortNext[f])
+			{
+				sortedFaces[out++] = f;
 			}
 		}
 		sortedCount = out;
+	}
+
+	private boolean writePriorityOrder(byte[] faceRenderPriorities, int stamp, int minFz, int maxFz)
+	{
+		java.util.Arrays.fill(numOfPriority, 0);
+		java.util.Arrays.fill(lt10, 0);
+
+		for (int i = maxFz; i >= minFz; i--)
+		{
+			if (zsortStamp[i] != stamp)
+			{
+				continue;
+			}
+			for (char face = zsortHead[i]; face != (char) -1; face = zsortNext[face])
+			{
+				if (face >= faceRenderPriorities.length)
+				{
+					return false;
+				}
+
+				int pri = faceRenderPriorities[face] & 0xFF;
+				if (pri >= orderedFaces.length)
+				{
+					return false;
+				}
+
+				int distIdx = numOfPriority[pri]++;
+				if (distIdx >= MAX_FACES_PER_PRIORITY)
+				{
+					return false;
+				}
+
+				orderedFaces[pri][distIdx] = face;
+				if (pri < 10)
+				{
+					lt10[pri] += i;
+				}
+				else if (pri == 10)
+				{
+					eq10[distIdx] = i;
+				}
+				else
+				{
+					eq11[distIdx] = i;
+				}
+			}
+		}
+
+		int avg12 = 0;
+		if (numOfPriority[1] > 0 || numOfPriority[2] > 0)
+		{
+			avg12 = (lt10[1] + lt10[2]) / (numOfPriority[1] + numOfPriority[2]);
+		}
+
+		int avg34 = 0;
+		if (numOfPriority[3] > 0 || numOfPriority[4] > 0)
+		{
+			avg34 = (lt10[3] + lt10[4]) / (numOfPriority[3] + numOfPriority[4]);
+		}
+
+		int avg68 = 0;
+		if (numOfPriority[6] > 0 || numOfPriority[8] > 0)
+		{
+			avg68 = (lt10[8] + lt10[6]) / (numOfPriority[8] + numOfPriority[6]);
+		}
+
+		int out = 0;
+		int drawnFaces = 0;
+		int numDynFaces = numOfPriority[10];
+		int[] dynFaces = orderedFaces[10];
+		int[] dynFaceDistances = eq10;
+		if (drawnFaces == numDynFaces)
+		{
+			drawnFaces = 0;
+			numDynFaces = numOfPriority[11];
+			dynFaces = orderedFaces[11];
+			dynFaceDistances = eq11;
+		}
+
+		int currFaceDistance = drawnFaces < numDynFaces ? dynFaceDistances[drawnFaces] : -1000;
+
+		for (int pri = 0; pri < 10; pri++)
+		{
+			while (pri == 0 && currFaceDistance > avg12)
+			{
+				out = appendDynamicFace(out, dynFaces, drawnFaces++);
+				if (drawnFaces == numDynFaces && dynFaces != orderedFaces[11])
+				{
+					drawnFaces = 0;
+					numDynFaces = numOfPriority[11];
+					dynFaces = orderedFaces[11];
+					dynFaceDistances = eq11;
+				}
+				currFaceDistance = drawnFaces < numDynFaces ? dynFaceDistances[drawnFaces] : -1000;
+			}
+
+			while (pri == 3 && currFaceDistance > avg34)
+			{
+				out = appendDynamicFace(out, dynFaces, drawnFaces++);
+				if (drawnFaces == numDynFaces && dynFaces != orderedFaces[11])
+				{
+					drawnFaces = 0;
+					numDynFaces = numOfPriority[11];
+					dynFaces = orderedFaces[11];
+					dynFaceDistances = eq11;
+				}
+				currFaceDistance = drawnFaces < numDynFaces ? dynFaceDistances[drawnFaces] : -1000;
+			}
+
+			while (pri == 5 && currFaceDistance > avg68)
+			{
+				out = appendDynamicFace(out, dynFaces, drawnFaces++);
+				if (drawnFaces == numDynFaces && dynFaces != orderedFaces[11])
+				{
+					drawnFaces = 0;
+					numDynFaces = numOfPriority[11];
+					dynFaces = orderedFaces[11];
+					dynFaceDistances = eq11;
+				}
+				currFaceDistance = drawnFaces < numDynFaces ? dynFaceDistances[drawnFaces] : -1000;
+			}
+
+			int priNum = numOfPriority[pri];
+			int[] priFaces = orderedFaces[pri];
+			for (int faceIdx = 0; faceIdx < priNum; faceIdx++)
+			{
+				sortedFaces[out++] = priFaces[faceIdx];
+			}
+		}
+
+		while (currFaceDistance != -1000)
+		{
+			out = appendDynamicFace(out, dynFaces, drawnFaces++);
+			if (drawnFaces == numDynFaces && dynFaces != orderedFaces[11])
+			{
+				drawnFaces = 0;
+				dynFaces = orderedFaces[11];
+				numDynFaces = numOfPriority[11];
+				dynFaceDistances = eq11;
+			}
+			currFaceDistance = drawnFaces < numDynFaces ? dynFaceDistances[drawnFaces] : -1000;
+		}
+
+		sortedCount = out;
 		return true;
+	}
+
+	private int appendDynamicFace(int out, int[] dynFaces, int faceIdx)
+	{
+		sortedFaces[out++] = dynFaces[faceIdx];
+		return out;
 	}
 
 	boolean cullOnly(Projection proj, Model m, int orientation, int wx, int wy, int wz)

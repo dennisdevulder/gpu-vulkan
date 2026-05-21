@@ -881,7 +881,8 @@ final class SceneRenderer implements AutoCloseable
 		if (!markCaptureSeen(m, worldX, worldZ)) return;
 
 		boolean detailedStats = stats.isDetailedModelStats();
-		boolean needsFaceSort = renderMode == Renderable.RENDERMODE_SORTED_NO_DEPTH;
+		boolean prioritySort = renderMode == Renderable.RENDERMODE_SORTED_NO_DEPTH;
+		boolean needsFaceSort = prioritySort || m.getFaceTransparencies() != null;
 		if (!needsFaceSort && m.getFaceCount() <= OPAQUE_UNSORTED_FACE_THRESHOLD)
 		{
 			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
@@ -902,7 +903,7 @@ final class SceneRenderer implements AutoCloseable
 		}
 
 		long sortStart = detailedStats ? System.nanoTime() : 0L;
-		boolean sorted = sorter.sort(proj, m, orient, worldX, worldY, worldZ);
+		boolean sorted = sorter.sort(proj, m, orient, worldX, worldY, worldZ, prioritySort);
 		if (detailedStats)
 		{
 			stats.addNanos(stats.modelFullSortNanos, sortStart);

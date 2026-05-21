@@ -104,6 +104,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	protected void startUp()
 	{
 		log.info("Starting GPU (Vulkan)");
+		shuttingDown = false;
 		// Refuse to coexist with stock GPU — two owners of the rlawt context
 		// corrupt JAWT state and crash the JVM on disable.
 		if (isStockGpuEnabled())
@@ -421,6 +422,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	{
 		log.info("Stopping GPU (Vulkan)");
 		startRequested = false;
+		shuttingDown = true;
 		if (debugOverlay != null)
 		{
 			removeDebugOverlay();
@@ -430,22 +432,11 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		activeInstance = null;
 		clientThread.invoke(() ->
 		{
-			// Teardown order: drain GPU → drop callbacks → close Disposables
+			log.info("GPU (Vulkan) shutdown: detach draw callbacks");
+			// Teardown order: stop callbacks → drain GPU → close Disposables
 			// → destroy AWTContext → resizeCanvas. resizeCanvas with an
 			// attached AWTContext leaves JAWT state stale and the next
 			// plugin enable fails JAWT_DrawingSurface_Lock.
-			if (device != null)
-			{
-				try
-				{
-					org.lwjgl.vulkan.VK13.vkDeviceWaitIdle(device.handle());
-				}
-				catch (RuntimeException e)
-				{
-					log.warn("vkDeviceWaitIdle failed during shutdown: {}", e.getMessage());
-				}
-			}
-
 			client.setGpuFlags(0);
 			client.setDrawCallbacks(null);
 			if (fpsTouched)
@@ -454,28 +445,50 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 				fpsTouched = false;
 			}
 
+			if (device != null)
+			{
+				try
+				{
+					log.info("GPU (Vulkan) shutdown: vkDeviceWaitIdle begin");
+					org.lwjgl.vulkan.VK13.vkDeviceWaitIdle(device.handle());
+					log.info("GPU (Vulkan) shutdown: vkDeviceWaitIdle end");
+				}
+				catch (RuntimeException e)
+				{
+					log.warn("vkDeviceWaitIdle failed during shutdown: {}", e.getMessage());
+				}
+			}
+
 			if (disposables != null)
 			{
+				log.info("GPU (Vulkan) shutdown: close disposables begin");
 				disposables.close();
+				log.info("GPU (Vulkan) shutdown: close disposables end");
 				disposables = null;
 				markExtensionBackendDetached();
 			}
 
 			if (awtContext != null)
 			{
+				log.info("GPU (Vulkan) shutdown: destroy AWT context begin");
 				awtContext.destroy();
+				log.info("GPU (Vulkan) shutdown: destroy AWT context end");
 				awtContext = null;
 			}
 
 			if (platform instanceof MacOSPlatformSurface)
 			{
+				log.info("GPU (Vulkan) shutdown: detach Metal layer");
 				MacOSMetalHelper.detachMetalLayer();
 			}
 			if (canvas != null)
 			{
+				log.info("GPU (Vulkan) shutdown: restore canvas repaint");
 				canvas.setIgnoreRepaint(false);
 			}
+			log.info("GPU (Vulkan) shutdown: resize canvas begin");
 			client.resizeCanvas();
+			log.info("GPU (Vulkan) shutdown: resize canvas end");
 			instance = null;
 			surface = null;
 			device = null;
@@ -737,7 +750,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		net.runelite.api.Projection proj = lastWorldProjection;
 		if (proj != null)
 		{
-			renderExtensions.captureModel(proj, m, actor.getCurrentOrientation(), loc.getX(), tileH, loc.getY());
+			renderExtensions.captureModel(proj, m, actor.getCurrentOrientation(), loc.getX(), tileH, loc.getY(), renderModeOf(actor));
 		}
 		else
 		{
@@ -999,7 +1012,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		Model m = (renderable instanceof Model) ? (Model) renderable : renderable.getModel();
 		if (m == null) return;
 		lastWorldProjection = projection;
-		renderExtensions.captureModel(projection, m, orientation, x, y, z);
+		renderExtensions.captureModel(projection, m, orientation, x, y, z, renderModeOf(renderable));
 	}
 
 	@Override
