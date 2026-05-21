@@ -70,6 +70,12 @@ final class DefaultVulkanSceneRenderer implements VulkanSceneRenderer
 	}
 
 	@Override
+	public void collectDebugMetrics(GpuVulkanDebugMetrics metrics)
+	{
+		sceneRenderer.collectDebugMetrics(metrics);
+	}
+
+	@Override
 	public void setWireframeTerrain(boolean enabled)
 	{
 		sceneRenderer.setWireframe(SceneRenderer.Layer.TERRAIN, enabled);

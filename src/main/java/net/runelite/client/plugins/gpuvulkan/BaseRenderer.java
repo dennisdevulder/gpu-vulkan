@@ -102,6 +102,13 @@ final class BaseRenderer implements VulkanRenderExtension
 	}
 
 	@Override
+	public void collectDebugMetrics(GpuVulkanDebugMetrics metrics)
+	{
+		if (sceneRenderer == null) return;
+		sceneRenderer.collectDebugMetrics(metrics);
+	}
+
+	@Override
 	public void recordBeforeRenderPass(VkCommandBuffer commandBuffer)
 	{
 		if (interfaceRenderer == null) return;

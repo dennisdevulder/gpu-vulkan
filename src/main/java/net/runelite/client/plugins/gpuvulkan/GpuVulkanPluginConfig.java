@@ -11,6 +11,14 @@ public interface GpuVulkanPluginConfig extends Config
 {
 	String GROUP = "gpuvulkan";
 
+	@ConfigSection(
+		name = "Debug",
+		description = "Runtime diagnostics for Vulkan memory and scene capture.",
+		position = 2,
+		closedByDefault = true
+	)
+	String DEBUG_SECTION = "debug";
+
 	@ConfigItem(
 		keyName = "validation",
 		name = "Validation layers",
@@ -140,6 +148,14 @@ public interface GpuVulkanPluginConfig extends Config
 		description = "Strength of the colour-blind correction, 0 = no correction, 100 = full correction. Ignored when mode is NONE."
 	)
 	default int colorBlindIntensity() { return 100; }
+
+	@ConfigItem(
+		keyName = "debugOverlay",
+		name = "Debug overlay",
+		description = "Show Vulkan memory, scene capture, and callback diagnostics on screen.",
+		section = DEBUG_SECTION
+	)
+	default boolean debugOverlay() { return false; }
 
 	@ConfigSection(
 		name = "Wireframe",
