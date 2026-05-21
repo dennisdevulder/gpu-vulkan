@@ -303,8 +303,9 @@ Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nPresentDrawable(
         id<MTLCommandBuffer> cmd = [queue commandBuffer];
         [cmd presentDrawable: drawable];
         [cmd commit];
-        /* Do NOT wait here — Java waits for the Vulkan submit before this
-         * call. Metal handles the actual compositor present asynchronously. */
+        /* Do NOT wait — Metal handles the present asynchronously on the
+         * compositor side. Ordering with our Vulkan render is guaranteed
+         * by both submits running on the same MTLCommandQueue. */
         [drawable release];
     }
 }

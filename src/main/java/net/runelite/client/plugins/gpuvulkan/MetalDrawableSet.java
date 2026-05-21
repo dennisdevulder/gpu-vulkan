@@ -27,10 +27,9 @@ import static org.lwjgl.vulkan.VK13.*;
  * framebuffer (MSAA layout: {@code [msaaColor, depth, this image]} matching
  * {@link RenderPass}); subsequent sights hit the cache.
  *
- * <p>The MoltenVK imports do NOT own the Metal texture's storage. The
- * underlying {@code id<MTLTexture>} belongs to its {@code CAMetalDrawable},
- * so cached entries retain the texture while their imported {@code VkImage}
- * wrapper is alive.
+ * <p>The MoltenVK imports do NOT own the Metal texture's storage — we only
+ * destroy the {@code VkImage} + view + framebuffer wrappers on close. The
+ * underlying {@code id<MTLTexture>} belongs to its {@code CAMetalDrawable}.
  *
  * <p>Resize handling: when an entry's cached width/height no longer matches
  * the supplied dimensions (drawableSize changed on canvas resize), we drop
@@ -53,7 +52,6 @@ final class MetalDrawableSet implements AutoCloseable
 		long image;
 		long view;
 		long framebuffer;
-		long textureHandle;
 		int width;
 		int height;
 	}
@@ -117,8 +115,6 @@ final class MetalDrawableSet implements AutoCloseable
 	{
 		try (MemoryStack stack = stackPush())
 		{
-			MacOSMetalHelper.retainObject(textureHandle);
-			boolean retained = true;
 			// Import the MTLTexture as a VkImage. MoltenVK reads the pointer
 			// out of VkImportMetalTextureInfoEXT and binds it as the image's
 			// Metal backing — no Vulkan-side allocation happens for the
@@ -144,13 +140,7 @@ final class MetalDrawableSet implements AutoCloseable
 				.initialLayout(VK_IMAGE_LAYOUT_UNDEFINED);
 
 			LongBuffer pImage = stack.mallocLong(1);
-			int imageResult = vkCreateImage(device.handle(), imageInfo, null, pImage);
-			if (imageResult != VK_SUCCESS)
-			{
-				MacOSMetalHelper.releaseObject(textureHandle);
-				retained = false;
-				throw new RuntimeException("vkCreateImage (imported MTLTexture) failed: " + imageResult);
-			}
+			Vk.check("vkCreateImage (imported MTLTexture)", vkCreateImage(device.handle(), imageInfo, null, pImage));
 			long image = pImage.get(0);
 
 			// Imported images come pre-bound to the Metal storage. The spec
@@ -170,11 +160,6 @@ final class MetalDrawableSet implements AutoCloseable
 			if (vkCreateImageView(device.handle(), viewInfo, null, pView) != VK_SUCCESS)
 			{
 				vkDestroyImage(device.handle(), image, null);
-				if (retained)
-				{
-					MacOSMetalHelper.releaseObject(textureHandle);
-					retained = false;
-				}
 				throw new RuntimeException("vkCreateImageView (imported MTLTexture) failed");
 			}
 			long view = pView.get(0);
@@ -196,11 +181,6 @@ final class MetalDrawableSet implements AutoCloseable
 			{
 				vkDestroyImageView(device.handle(), view, null);
 				vkDestroyImage(device.handle(), image, null);
-				if (retained)
-				{
-					MacOSMetalHelper.releaseObject(textureHandle);
-					retained = false;
-				}
 				throw new RuntimeException("vkCreateFramebuffer (drawable) failed");
 			}
 
@@ -208,7 +188,6 @@ final class MetalDrawableSet implements AutoCloseable
 			e.image = image;
 			e.view = view;
 			e.framebuffer = pFb.get(0);
-			e.textureHandle = textureHandle;
 			e.width = width;
 			e.height = height;
 			log.debug("MetalDrawableSet: built entry for MTLTexture 0x{} {}x{}",
@@ -230,11 +209,6 @@ final class MetalDrawableSet implements AutoCloseable
 		if (e.image != VK_NULL_HANDLE)
 		{
 			vkDestroyImage(device.handle(), e.image, null);
-		}
-		if (e.textureHandle != 0L)
-		{
-			MacOSMetalHelper.releaseObject(e.textureHandle);
-			e.textureHandle = 0L;
 		}
 	}
 
