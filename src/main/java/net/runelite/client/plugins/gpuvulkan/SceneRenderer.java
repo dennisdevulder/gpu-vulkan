@@ -126,8 +126,10 @@ final class SceneRenderer implements AutoCloseable
 
 	private final boolean[] wireframe = new boolean[LAYER_COUNT];
 	/** Plane range to render this frame, forwarded from preSceneDraw's
-	 *  (minLevel, maxLevel). */
+	 *  (minLevel, level, maxLevel). Roof hiding only applies above the
+	 *  current plane, matching the stock GPU plugin's zone renderer. */
 	private volatile int minPlane = 0;
+	private volatile int currentPlane = 0;
 	private volatile int maxPlane = MAX_PLANES - 1;
 
 	/** Engine-supplied per-frame set of tile-roof IDs (NOT GameObject IDs,
@@ -220,13 +222,33 @@ final class SceneRenderer implements AutoCloseable
 
 	void setLevelRange(int minLevel, int maxLevel)
 	{
-		minPlane = Math.max(0, Math.min(MAX_PLANES - 1, minLevel));
-		maxPlane = Math.max(minPlane, Math.min(MAX_PLANES - 1, maxLevel));
+		setLevelRange(minLevel, minLevel, maxLevel);
+	}
+
+	void setLevelRange(int minLevel, int currentLevel, int maxLevel)
+	{
+		int min = Math.max(0, Math.min(MAX_PLANES - 1, minLevel));
+		int cur = Math.max(min, Math.min(MAX_PLANES - 1, currentLevel));
+		int max = Math.max(cur, Math.min(MAX_PLANES - 1, maxLevel));
+		minPlane = min;
+		currentPlane = cur;
+		maxPlane = max;
 	}
 
 	void setHideRoofIds(java.util.Set<Integer> ids)
 	{
 		hideRoofIds = ids != null ? ids : java.util.Collections.emptySet();
+	}
+
+	void collectDebugMetrics(GpuVulkanDebugMetrics metrics)
+	{
+		metrics.sceneVertices += regionEnds[LAST_STATIC.ordinal()];
+		metrics.totalVertices += vertexCount;
+		metrics.maxVertices += MAX_VERTICES;
+		metrics.roofRanges += tileRoofCount;
+		metrics.pendingRenderables += pendingRenderables.size();
+		metrics.overflowed |= overflowed;
+		metrics.sceneBufferBytes += BUFFER_BYTES * FrameSync.FRAMES_IN_FLIGHT;
 	}
 
 	/** Per-frame (Model identity, worldX, worldZ) dedupe — collapses the
@@ -301,13 +323,14 @@ final class SceneRenderer implements AutoCloseable
 		// not SCENE_SIZE (104) like scene.getTiles(). Instances aren't
 		// extended, so the offset is 0 there.
 		final int[][][] roofs = scene.getRoofs();
+		final byte[][][] tileSettings = scene.getExtendedTileSettings();
 		final int roofOffset = scene.getWorldViewId() == net.runelite.api.WorldView.TOPLEVEL
 			? (Constants.EXTENDED_SCENE_SIZE - Constants.SCENE_SIZE) / 2 : 0;
 
 		// Pass order: emit each layer plane-by-plane so vertices are sorted
 		// (layer-major, plane-minor). recordDraw clips per layer at
 		// planeEnds[layer][visiblePlane] to hide roofs above the player.
-		captureLayer(Layer.TERRAIN, tiles, planes, sceneSize, roofs, roofOffset,
+		captureLayer(Layer.TERRAIN, tiles, planes, sceneSize, roofs, tileSettings, roofOffset,
 			(cur, p, sx, sy) ->
 			{
 				SceneTilePaint paint = cur.getSceneTilePaint();
@@ -316,7 +339,7 @@ final class SceneRenderer implements AutoCloseable
 				if (m != null) captureTileModel(m, sx, sy);
 			});
 
-		captureLayer(Layer.WALLS, tiles, planes, sceneSize, roofs, roofOffset,
+		captureLayer(Layer.WALLS, tiles, planes, sceneSize, roofs, tileSettings, roofOffset,
 			(cur, p, sx, sy) ->
 			{
 				WallObject w = cur.getWallObject();
@@ -325,7 +348,7 @@ final class SceneRenderer implements AutoCloseable
 				captureRenderable(w.getRenderable2(), 0, w.getX(), w.getZ(), w.getY());
 			});
 
-		captureLayer(Layer.DECORATIVE, tiles, planes, sceneSize, roofs, roofOffset,
+		captureLayer(Layer.DECORATIVE, tiles, planes, sceneSize, roofs, tileSettings, roofOffset,
 			(cur, p, sx, sy) ->
 			{
 				DecorativeObject d = cur.getDecorativeObject();
@@ -336,7 +359,7 @@ final class SceneRenderer implements AutoCloseable
 					d.getX() + d.getXOffset2(), d.getZ(), d.getY() + d.getYOffset2());
 			});
 
-		captureLayer(Layer.GROUND, tiles, planes, sceneSize, roofs, roofOffset,
+		captureLayer(Layer.GROUND, tiles, planes, sceneSize, roofs, tileSettings, roofOffset,
 			(cur, p, sx, sy) ->
 			{
 				GroundObject g = cur.getGroundObject();
@@ -344,7 +367,7 @@ final class SceneRenderer implements AutoCloseable
 				captureRenderable(g.getRenderable(), 0, g.getX(), g.getZ(), g.getY());
 			});
 
-		captureGameObjectsLayer(tiles, planes, sceneSize, roofs, roofOffset);
+		captureGameObjectsLayer(tiles, planes, sceneSize, roofs, tileSettings, roofOffset);
 
 		// Pad planeEnds past `planes` so max-plane lookups still draw
 		// everything if requested.
@@ -370,19 +393,19 @@ final class SceneRenderer implements AutoCloseable
 	}
 
 	/**
-	 * Walks every tile of {@code layer} plane-by-plane (zone-major,
-	 * tile-minor within a zone), invoking {@code body} once per tile and
-	 * once per bridge tile underneath. Vertex deltas are recorded into
-	 * the roof-skip table via {@link #recordRoofRange}. Bridge recursion
-	 * picks up stacked structures (arches, decks).
+	 * Walks every tile of {@code layer} in the same effective level order as
+	 * stock GPU's SceneUploader: level 0 contains normal level-0 geometry and
+	 * VIS_BELOW geometry from all upper levels; upper levels contain only their
+	 * non-VIS_BELOW source level. This keeps roof removal from behaving like a
+	 * flat world-space clipping plane.
 	 */
 	private void captureLayer(Layer layer,
 		Tile[][][] tiles, int planes, int sceneSize,
-		int[][][] roofs, int roofOffset,
+		int[][][] roofs, byte[][][] tileSettings, int roofOffset,
 		TileCapture body)
 	{
 		final int L = layer.ordinal();
-		for (int p = 0; p < planes; p++)
+		for (int outputLevel = 0; outputLevel < planes; outputLevel++)
 		{
 			for (int zx = 0; zx < ZONES_PER_SIDE; zx++)
 			{
@@ -391,42 +414,69 @@ final class SceneRenderer implements AutoCloseable
 					int zoneStart = vertexCount;
 					int x0 = zx * ZONE_SIZE, x1 = Math.min(x0 + ZONE_SIZE, sceneSize);
 					int y0 = zy * ZONE_SIZE, y1 = Math.min(y0 + ZONE_SIZE, sceneSize);
-					for (int sx = x0; sx < x1; sx++)
+					if (outputLevel == 0)
 					{
-						for (int sy = y0; sy < y1; sy++)
+						captureLayerPass(tiles, planes, x0, x1, y0, y1, 0, false,
+							roofs, tileSettings, roofOffset, body);
+						for (int sourceLevel = 0; sourceLevel < planes; sourceLevel++)
 						{
-							Tile t = tiles[p][sx][sy];
-							if (t == null) continue;
-							int roofId = tileRoofIdAt(roofs, p, sx + roofOffset, sy + roofOffset);
-							Tile cur = t;
-							while (cur != null)
-							{
-								int before = vertexCount;
-								body.capture(cur, p, sx, sy);
-								if (roofId != 0 && vertexCount > before)
-									recordRoofRange(roofId, before, vertexCount - before);
-								cur = (cur == t) ? t.getBridge() : null;
-							}
+							captureLayerPass(tiles, planes, x0, x1, y0, y1, sourceLevel, true,
+								roofs, tileSettings, roofOffset, body);
 						}
 					}
+					else
+					{
+						captureLayerPass(tiles, planes, x0, x1, y0, y1, outputLevel, false,
+							roofs, tileSettings, roofOffset, body);
+					}
 					int zoneIdx = zx * ZONES_PER_SIDE + zy;
-					zoneVertexStart[L][p][zoneIdx] = zoneStart;
-					zoneVertexCount[L][p][zoneIdx] = vertexCount - zoneStart;
+					zoneVertexStart[L][outputLevel][zoneIdx] = zoneStart;
+					zoneVertexCount[L][outputLevel][zoneIdx] = vertexCount - zoneStart;
 				}
 			}
-			planeEnds[L][p] = vertexCount;
+			planeEnds[L][outputLevel] = vertexCount;
 		}
 		regionEnds[L] = vertexCount;
+	}
+
+	private void captureLayerPass(Tile[][][] tiles, int planes,
+		int x0, int x1, int y0, int y1, int sourceLevel, boolean visbelow,
+		int[][][] roofs, byte[][][] tileSettings, int roofOffset, TileCapture body)
+	{
+		if (sourceLevel < 0 || sourceLevel >= planes) return;
+		for (int sx = x0; sx < x1; sx++)
+		{
+			for (int sy = y0; sy < y1; sy++)
+			{
+				int msx = sx + roofOffset;
+				int msy = sy + roofOffset;
+				RoofInfo roofInfo = roofInfoForTile(roofs, tileSettings, sourceLevel, msx, msy);
+				if (roofInfo.visbelow != visbelow) continue;
+
+				Tile t = tiles[sourceLevel][sx][sy];
+				if (t == null) continue;
+				Tile cur = t;
+				while (cur != null)
+				{
+					int renderLevel = renderLevel(cur, sourceLevel);
+					int before = vertexCount;
+					body.capture(cur, renderLevel, sx, sy);
+					if (roofInfo.roofId != 0 && vertexCount > before)
+						recordRoofRange(roofInfo.roofId, before, vertexCount - before);
+					cur = (cur == t) ? t.getBridge() : null;
+				}
+			}
+		}
 	}
 
 	/** GameObjects emit only on the sceneMinLocation tile (multi-tile
 	 *  objects naturally dedupe), and each gets its own roof-range entry
 	 *  instead of a merged-per-tile range. */
 	private void captureGameObjectsLayer(Tile[][][] tiles, int planes, int sceneSize,
-		int[][][] roofs, int roofOffset)
+		int[][][] roofs, byte[][][] tileSettings, int roofOffset)
 	{
 		final int L = Layer.GAME_OBJECTS.ordinal();
-		for (int p = 0; p < planes; p++)
+		for (int outputLevel = 0; outputLevel < planes; outputLevel++)
 		{
 			for (int zx = 0; zx < ZONES_PER_SIDE; zx++)
 			{
@@ -435,44 +485,70 @@ final class SceneRenderer implements AutoCloseable
 					int zoneStart = vertexCount;
 					int x0 = zx * ZONE_SIZE, x1 = Math.min(x0 + ZONE_SIZE, sceneSize);
 					int y0 = zy * ZONE_SIZE, y1 = Math.min(y0 + ZONE_SIZE, sceneSize);
-					for (int sx = x0; sx < x1; sx++)
+					if (outputLevel == 0)
 					{
-						for (int sy = y0; sy < y1; sy++)
+						captureGameObjectsPass(tiles, planes, x0, x1, y0, y1, 0, false,
+							roofs, tileSettings, roofOffset);
+						for (int sourceLevel = 0; sourceLevel < planes; sourceLevel++)
 						{
-							Tile t = tiles[p][sx][sy];
-							if (t == null) continue;
-							int roofId = tileRoofIdAt(roofs, p, sx + roofOffset, sy + roofOffset);
-							Tile cur = t;
-							while (cur != null)
-							{
-								GameObject[] objs = cur.getGameObjects();
-								if (objs == null) { cur = (cur == t) ? t.getBridge() : null; continue; }
-								net.runelite.api.Point tilePoint = cur.getSceneLocation();
-								for (GameObject o : objs)
-								{
-									if (o == null) continue;
-									net.runelite.api.Point min = o.getSceneMinLocation();
-									if (min == null || !min.equals(tilePoint)) continue;
-									int before = vertexCount;
-									// getModelOrientation(), not getOrientation() — the latter folds
-									// in animation orient and rotates static arches / walls / fences.
-									captureRenderable(o.getRenderable(), o.getModelOrientation(),
-										o.getX(), o.getZ(), o.getY());
-									if (roofId != 0 && vertexCount > before)
-										recordRoofRange(roofId, before, vertexCount - before);
-								}
-								cur = (cur == t) ? t.getBridge() : null;
-							}
+							captureGameObjectsPass(tiles, planes, x0, x1, y0, y1, sourceLevel, true,
+								roofs, tileSettings, roofOffset);
 						}
 					}
+					else
+					{
+						captureGameObjectsPass(tiles, planes, x0, x1, y0, y1, outputLevel, false,
+							roofs, tileSettings, roofOffset);
+					}
 					int zoneIdx = zx * ZONES_PER_SIDE + zy;
-					zoneVertexStart[L][p][zoneIdx] = zoneStart;
-					zoneVertexCount[L][p][zoneIdx] = vertexCount - zoneStart;
+					zoneVertexStart[L][outputLevel][zoneIdx] = zoneStart;
+					zoneVertexCount[L][outputLevel][zoneIdx] = vertexCount - zoneStart;
 				}
 			}
-			planeEnds[L][p] = vertexCount;
+			planeEnds[L][outputLevel] = vertexCount;
 		}
 		regionEnds[L] = vertexCount;
+	}
+
+	private void captureGameObjectsPass(Tile[][][] tiles, int planes,
+		int x0, int x1, int y0, int y1, int sourceLevel, boolean visbelow,
+		int[][][] roofs, byte[][][] tileSettings, int roofOffset)
+	{
+		if (sourceLevel < 0 || sourceLevel >= planes) return;
+		for (int sx = x0; sx < x1; sx++)
+		{
+			for (int sy = y0; sy < y1; sy++)
+			{
+				int msx = sx + roofOffset;
+				int msy = sy + roofOffset;
+				RoofInfo roofInfo = roofInfoForTile(roofs, tileSettings, sourceLevel, msx, msy);
+				if (roofInfo.visbelow != visbelow) continue;
+
+				Tile t = tiles[sourceLevel][sx][sy];
+				if (t == null) continue;
+				Tile cur = t;
+				while (cur != null)
+				{
+					GameObject[] objs = cur.getGameObjects();
+					if (objs == null) { cur = (cur == t) ? t.getBridge() : null; continue; }
+					net.runelite.api.Point tilePoint = cur.getSceneLocation();
+					for (GameObject o : objs)
+					{
+						if (o == null) continue;
+						net.runelite.api.Point min = o.getSceneMinLocation();
+						if (min == null || !min.equals(tilePoint)) continue;
+						int before = vertexCount;
+						// getModelOrientation(), not getOrientation() — the latter folds
+						// in animation orient and rotates static arches / walls / fences.
+						captureRenderable(o.getRenderable(), o.getModelOrientation(),
+							o.getX(), o.getZ(), o.getY());
+						if (roofInfo.roofId != 0 && vertexCount > before)
+							recordRoofRange(roofInfo.roofId, before, vertexCount - before);
+					}
+					cur = (cur == t) ? t.getBridge() : null;
+				}
+			}
+		}
 	}
 
 	private void captureRenderable(Renderable r, int orient, int x, int y, int z)
@@ -1390,51 +1466,45 @@ final class SceneRenderer implements AutoCloseable
 
 			ScenePipeline boundPipeline = null;
 			final int loMin = minPlane;
+			final int loCur = currentPlane;
 			final int loMax = maxPlane;
 			int layerStart = 0;
 			for (int i = 0; i < LAYER_COUNT; i++)
 			{
 				int regionEnd = i == LAYER_COUNT - 1 ? vertexCount : regionEnds[i];
-				// Static layers emit plane-major, so
-				// [planeEnds[i][loMin-1], planeEnds[i][loMax]) is the run for
-				// planes [loMin..loMax]. DYNAMIC renders whole.
-				int drawStart, drawEnd;
+				if (regionEnd <= layerStart)
+				{
+					layerStart = regionEnd;
+					continue;
+				}
+
+				ScenePipeline want = (wireframe[i] && linePipeline != null) ? linePipeline : fillPipeline;
+				if (want != boundPipeline)
+				{
+					vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, want.handle());
+					vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+						want.layout(), 0, stack.longs(descriptorSet), null);
+					boundPipeline = want;
+				}
+
 				if (LAYERS[i] == Layer.DYNAMIC)
 				{
-					drawStart = layerStart;
-					drawEnd = regionEnd;
+					drawRange(cmd, layerStart, regionEnd, skipScratch, skipPairs, false, slotFirstVertex,
+						want.layout(), vertPush, fragPush);
 				}
 				else
 				{
-					int layerLo = (loMin == 0) ? layerStart : planeEnds[i][loMin - 1];
-					int layerHi = planeEnds[i][loMax];
-					drawStart = layerLo;
-					drawEnd = layerHi;
-				}
-				int count = drawEnd - drawStart;
-				if (count > 0)
-				{
-					ScenePipeline want = (wireframe[i] && linePipeline != null) ? linePipeline : fillPipeline;
-					if (want != boundPipeline)
+					// Static layers emit plane-major. Draw one plane at a time
+					// so roof skips only affect planes above the player; current
+					// and lower planes must remain intact or buildings get
+					// chopped when their roof id is hidden.
+					for (int p = loMin; p <= loMax; p++)
 					{
-						vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, want.handle());
-						vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-							want.layout(), 0, stack.longs(descriptorSet), null);
-						boundPipeline = want;
-					}
-					// LANDMINE (MoltenVK #2483): re-push every draw. Push
-					// constants can go undefined across consecutive draws
-					// without it, producing macOS-only stale MVP glitches.
-					vkCmdPushConstants(cmd, want.layout(), VK_SHADER_STAGE_VERTEX_BIT,   0,  vertPush);
-					vkCmdPushConstants(cmd, want.layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
-					if (skipPairs > 0)
-					{
-						drawWithSkips(cmd, drawStart, drawEnd, skipScratch, skipPairs, slotFirstVertex,
-							want.layout(), vertPush, fragPush);
-					}
-					else
-					{
-						vkCmdDraw(cmd, count, 1, slotFirstVertex + drawStart, 0);
+						int drawStart = (p == 0) ? layerStart : planeEnds[i][p - 1];
+						int drawEnd = planeEnds[i][p];
+						if (drawEnd <= drawStart) continue;
+						drawRange(cmd, drawStart, drawEnd, skipScratch, skipPairs, p > loCur,
+							slotFirstVertex, want.layout(), vertPush, fragPush);
 					}
 				}
 				layerStart = regionEnd;
@@ -1452,6 +1522,53 @@ final class SceneRenderer implements AutoCloseable
 		return row[sy];
 	}
 
+	private static final class RoofInfo
+	{
+		final boolean visbelow;
+		final int roofId;
+
+		private RoofInfo(boolean visbelow, int roofId)
+		{
+			this.visbelow = visbelow;
+			this.roofId = roofId;
+		}
+	}
+
+	private static RoofInfo roofInfoForTile(int[][][] roofs, byte[][][] tileSettings,
+											int sourceLevel, int msx, int msy)
+	{
+		int mapLevel = sourceLevel;
+		if (isBridge(tileSettings, msx, msy))
+		{
+			mapLevel++;
+		}
+
+		boolean visbelow = mapLevel < MAX_PLANES && hasTileFlag(tileSettings, mapLevel, msx, msy,
+			Constants.TILE_FLAG_VIS_BELOW);
+		int roofId = visbelow || mapLevel == 0 ? 0 : tileRoofIdAt(roofs, mapLevel - 1, msx, msy);
+		return new RoofInfo(visbelow, roofId);
+	}
+
+	private static boolean isBridge(byte[][][] tileSettings, int msx, int msy)
+	{
+		return hasTileFlag(tileSettings, 1, msx, msy, Constants.TILE_FLAG_BRIDGE);
+	}
+
+	private static boolean hasTileFlag(byte[][][] tileSettings, int plane, int x, int y, int flag)
+	{
+		if (tileSettings == null || plane < 0 || plane >= tileSettings.length) return false;
+		byte[][] planeSettings = tileSettings[plane];
+		if (planeSettings == null || x < 0 || x >= planeSettings.length) return false;
+		byte[] row = planeSettings[x];
+		return row != null && y >= 0 && y < row.length && (row[y] & flag) != 0;
+	}
+
+	private static int renderLevel(Tile tile, int fallbackLevel)
+	{
+		if (tile == null) return fallbackLevel;
+		return Math.max(0, Math.min(MAX_PLANES - 1, tile.getRenderLevel()));
+	}
+
 	private void recordRoofRange(int roofId, int vertexStart, int vertexCount)
 	{
 		if (tileRoofCount == tileRoofIds.length)
@@ -1465,6 +1582,25 @@ final class SceneRenderer implements AutoCloseable
 		tileRoofStarts[tileRoofCount] = vertexStart;
 		tileRoofCounts[tileRoofCount] = vertexCount;
 		tileRoofCount++;
+	}
+
+	private static void drawRange(VkCommandBuffer cmd, int start, int end, int[] skips, int pairCount,
+								  boolean applySkips, int slotFirstVertex,
+								  long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
+	{
+		if (end <= start) return;
+		if (applySkips && pairCount > 0)
+		{
+			drawWithSkips(cmd, start, end, skips, pairCount, slotFirstVertex,
+				pipelineLayout, vertPush, fragPush);
+			return;
+		}
+
+		// LANDMINE (MoltenVK #2483): re-push every draw. Push constants can
+		// go undefined across consecutive draws without it.
+		vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,   0,  vertPush);
+		vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
+		vkCmdDraw(cmd, end - start, 1, slotFirstVertex + start, 0);
 	}
 
 	/** Issue {@code vkCmdDraw} calls covering [start, end) but skipping each

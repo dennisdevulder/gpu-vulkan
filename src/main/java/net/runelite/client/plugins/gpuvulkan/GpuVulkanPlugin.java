@@ -30,6 +30,7 @@ import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.plugins.PluginManager;
+import net.runelite.client.ui.overlay.OverlayManager;
 
 @PluginDescriptor(
 	name = "GPU (Vulkan)",
@@ -53,6 +54,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	@Inject
 	private PluginManager pluginManager;
 
+	@Inject
+	private OverlayManager overlayManager;
+
 	private Disposables disposables;
 	private VulkanInstance instance;
 	private VulkanSurface surface;
@@ -69,6 +73,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	private Framebuffers framebuffers;
 	private FrameSync sync;
 	private VulkanRenderer renderer;
+	private GpuVulkanDebugOverlay debugOverlay;
+	private boolean debugOverlayRegistered;
+	private volatile List<String> debugOverlaySnapshot = List.of("GPU Vulkan", "status: starting");
 	private Canvas canvas;
 	private PlatformSurface platform;
 	/** Tracks whether startup actually flipped {@code setUnlockedFps(true)},
@@ -104,6 +111,11 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			log.warn("Stock 'GPU' plugin is enabled — GPU (Vulkan) will not start. Disable 'GPU' first.");
 			return;
 		}
+		if (debugOverlay == null)
+		{
+			debugOverlay = new GpuVulkanDebugOverlay(this, config);
+		}
+		updateDebugOverlayRegistration();
 		startRequested = true;
 		boolean wantVsync = config.fpsMode() != GpuVulkanPluginConfig.FpsMode.UNCAPPED;
 		platform = PlatformSurface.current(wantVsync);
@@ -409,6 +421,10 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	{
 		log.info("Stopping GPU (Vulkan)");
 		startRequested = false;
+		if (debugOverlay != null)
+		{
+			removeDebugOverlay();
+		}
 		// Unpublish first so a concurrent shutdown hook sees null and bails,
 		// avoiding double-destroy from two threads.
 		activeInstance = null;
@@ -483,6 +499,10 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	public void onConfigChanged(ConfigChanged ev)
 	{
 		if (!GpuVulkanPluginConfig.GROUP.equals(ev.getGroup())) return;
+		if ("debugOverlay".equals(ev.getKey()))
+		{
+			updateDebugOverlayRegistration();
+		}
 		if (renderExtensions != null)
 		{
 			renderExtensions.onConfigChanged(ev);
@@ -637,6 +657,10 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			client.getGameCycle() & 127,
 			config.smoothBanding() ? 1f : 0f,
 			overlayColor);
+		if (debugOverlayRegistered)
+		{
+			updateDebugOverlaySnapshot();
+		}
 		stats.maybeLog();
 	}
 
@@ -744,7 +768,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		}
 		if (renderExtensions != null)
 		{
-			renderExtensions.setLevelRange(minLevel, maxLevel);
+			renderExtensions.setLevelRange(minLevel, level, maxLevel);
 		}
 		lastCamX = cameraX;
 		lastCamY = cameraY;
@@ -793,6 +817,97 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		long start = System.nanoTime();
 		renderExtensions.captureScene(scene);
 		stats.addNanos(stats.sceneCaptureNanos, start);
+	}
+
+	List<String> debugOverlayLines()
+	{
+		return debugOverlaySnapshot;
+	}
+
+	private void updateDebugOverlaySnapshot()
+	{
+		ArrayList<String> lines = new ArrayList<>(16);
+		Runtime rt = Runtime.getRuntime();
+		long heapUsed = rt.totalMemory() - rt.freeMemory();
+		long heapMax = rt.maxMemory();
+		GpuVulkanDebugMetrics metrics = new GpuVulkanDebugMetrics();
+		if (renderExtensions != null)
+		{
+			renderExtensions.collectDebugMetrics(metrics);
+		}
+
+		lines.add("GPU Vulkan");
+		lines.add("device: " + compactDeviceName(device == null ? "not ready" : device.deviceName()));
+		lines.add("swap: " + (swapchain == null ? "-" :
+			swapchain.width() + "x" + swapchain.height() + " x" + swapchain.imageCount()));
+		lines.add("heap: " + mib(heapUsed) + " / " + mib(heapMax) + " MiB");
+		lines.add("scene buf: " + mib(metrics.sceneBufferBytes) + " MiB native");
+		lines.add("verts: " + compactCount(metrics.totalVertices) + " / " + compactCount(metrics.maxVertices));
+		lines.add("static: " + compactCount(metrics.sceneVertices));
+		lines.add("roofs: " + metrics.roofRanges);
+		lines.add("pending: " + metrics.pendingRenderables);
+		lines.add("overflow: " + (metrics.overflowed ? "yes" : "no"));
+		lines.add("scene/pre/post: " + stats.drawSceneCount() + " / "
+			+ stats.preSceneDrawCount() + " / " + stats.postDrawSceneCount());
+		lines.add("dyn calls: " + stats.drawDynamicCount());
+		lines.add("dyn temp/pass: " + stats.drawTempCount() + " / " + stats.drawPassCount());
+		lines.add("dyn single: " + stats.drawSingleCount());
+		lines.add("dyn faces: " + compactCount(stats.totalDynamicFacesCount()));
+		lines.add("dyn max: " + stats.maxDynamicFacesCount());
+		debugOverlaySnapshot = List.copyOf(lines);
+	}
+
+	private void updateDebugOverlayRegistration()
+	{
+		if (debugOverlay == null)
+		{
+			return;
+		}
+		if (config.debugOverlay())
+		{
+			if (!debugOverlayRegistered)
+			{
+				overlayManager.add(debugOverlay);
+				debugOverlayRegistered = true;
+			}
+		}
+		else
+		{
+			removeDebugOverlay();
+		}
+	}
+
+	private void removeDebugOverlay()
+	{
+		if (debugOverlayRegistered)
+		{
+			overlayManager.remove(debugOverlay);
+			debugOverlayRegistered = false;
+		}
+	}
+
+	private static String compactDeviceName(String name)
+	{
+		return name.startsWith("Apple ") ? name.substring("Apple ".length()) : name;
+	}
+
+	private static String compactCount(long value)
+	{
+		if (value >= 1_000_000L)
+		{
+			long tenths = value / 100_000L;
+			return (tenths / 10L) + "." + (tenths % 10L) + "M";
+		}
+		if (value >= 10_000L)
+		{
+			return (value / 1_000L) + "k";
+		}
+		return Long.toString(value);
+	}
+
+	private static long mib(long bytes)
+	{
+		return (bytes + 1024L * 1024L - 1L) / (1024L * 1024L);
 	}
 
 	@Override
