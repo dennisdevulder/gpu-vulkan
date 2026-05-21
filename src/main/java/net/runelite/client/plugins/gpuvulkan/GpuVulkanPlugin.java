@@ -812,23 +812,44 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			renderExtensions.collectDebugMetrics(metrics);
 		}
 
-		lines.add("GPU Vulkan Debug");
-		lines.add("device: " + (device == null ? "not ready" : device.deviceName()));
-		lines.add("swapchain: " + (swapchain == null ? "-" :
+		lines.add("GPU Vulkan");
+		lines.add("device: " + compactDeviceName(device == null ? "not ready" : device.deviceName()));
+		lines.add("swap: " + (swapchain == null ? "-" :
 			swapchain.width() + "x" + swapchain.height() + " x" + swapchain.imageCount()));
 		lines.add("heap: " + mib(heapUsed) + " / " + mib(heapMax) + " MiB");
-		lines.add("scene buffer: " + mib(metrics.sceneBufferBytes) + " MiB native");
-		lines.add("vertices: " + metrics.totalVertices + " / " + metrics.maxVertices);
-		lines.add("static verts: " + metrics.sceneVertices);
-		lines.add("roof ranges: " + metrics.roofRanges);
-		lines.add("pending models: " + metrics.pendingRenderables);
-		lines.add("overflow: " + metrics.overflowed);
-		lines.add("callbacks: scene " + stats.drawSceneCount() + " pre " + stats.preSceneDrawCount()
-			+ " post " + stats.postDrawSceneCount());
-		lines.add("dynamic: calls " + stats.drawDynamicCount() + " temp " + stats.drawTempCount()
-			+ " pass " + stats.drawPassCount() + " single " + stats.drawSingleCount());
-		lines.add("dyn faces: " + stats.totalDynamicFacesCount() + " max " + stats.maxDynamicFacesCount());
+		lines.add("scene buf: " + mib(metrics.sceneBufferBytes) + " MiB native");
+		lines.add("verts: " + compactCount(metrics.totalVertices) + " / " + compactCount(metrics.maxVertices));
+		lines.add("static: " + compactCount(metrics.sceneVertices));
+		lines.add("roofs: " + metrics.roofRanges);
+		lines.add("pending: " + metrics.pendingRenderables);
+		lines.add("overflow: " + (metrics.overflowed ? "yes" : "no"));
+		lines.add("scene/pre/post: " + stats.drawSceneCount() + " / "
+			+ stats.preSceneDrawCount() + " / " + stats.postDrawSceneCount());
+		lines.add("dyn calls: " + stats.drawDynamicCount());
+		lines.add("dyn temp/pass: " + stats.drawTempCount() + " / " + stats.drawPassCount());
+		lines.add("dyn single: " + stats.drawSingleCount());
+		lines.add("dyn faces: " + compactCount(stats.totalDynamicFacesCount()));
+		lines.add("dyn max: " + stats.maxDynamicFacesCount());
 		return lines;
+	}
+
+	private static String compactDeviceName(String name)
+	{
+		return name.startsWith("Apple ") ? name.substring("Apple ".length()) : name;
+	}
+
+	private static String compactCount(long value)
+	{
+		if (value >= 1_000_000L)
+		{
+			long tenths = value / 100_000L;
+			return (tenths / 10L) + "." + (tenths % 10L) + "M";
+		}
+		if (value >= 10_000L)
+		{
+			return (value / 1_000L) + "k";
+		}
+		return Long.toString(value);
 	}
 
 	private static long mib(long bytes)

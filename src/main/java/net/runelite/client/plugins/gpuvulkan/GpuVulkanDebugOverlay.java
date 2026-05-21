@@ -18,6 +18,7 @@ final class GpuVulkanDebugOverlay extends OverlayPanel
 		this.config = config;
 		setPosition(OverlayPosition.TOP_LEFT);
 		setPriority(PRIORITY_LOW);
+		panelComponent.setPreferredSize(new Dimension(220, 0));
 	}
 
 	@Override
