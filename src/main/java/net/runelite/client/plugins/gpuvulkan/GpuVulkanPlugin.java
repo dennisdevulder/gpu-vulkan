@@ -74,6 +74,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	private FrameSync sync;
 	private VulkanRenderer renderer;
 	private GpuVulkanDebugOverlay debugOverlay;
+	private boolean debugOverlayRegistered;
+	private volatile List<String> debugOverlaySnapshot = List.of("GPU Vulkan", "status: starting");
 	private Canvas canvas;
 	private PlatformSurface platform;
 	/** Tracks whether startup actually flipped {@code setUnlockedFps(true)},
@@ -113,7 +115,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		{
 			debugOverlay = new GpuVulkanDebugOverlay(this, config);
 		}
-		overlayManager.add(debugOverlay);
+		updateDebugOverlayRegistration();
 		startRequested = true;
 		boolean wantVsync = config.fpsMode() != GpuVulkanPluginConfig.FpsMode.UNCAPPED;
 		platform = PlatformSurface.current(wantVsync);
@@ -421,7 +423,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		startRequested = false;
 		if (debugOverlay != null)
 		{
-			overlayManager.remove(debugOverlay);
+			removeDebugOverlay();
 		}
 		// Unpublish first so a concurrent shutdown hook sees null and bails,
 		// avoiding double-destroy from two threads.
@@ -497,6 +499,10 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	public void onConfigChanged(ConfigChanged ev)
 	{
 		if (!GpuVulkanPluginConfig.GROUP.equals(ev.getGroup())) return;
+		if ("debugOverlay".equals(ev.getKey()))
+		{
+			updateDebugOverlayRegistration();
+		}
 		if (renderExtensions != null)
 		{
 			renderExtensions.onConfigChanged(ev);
@@ -650,6 +656,10 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			client.getGameCycle() & 127,
 			config.smoothBanding() ? 1f : 0f,
 			overlayColor);
+		if (debugOverlayRegistered)
+		{
+			updateDebugOverlaySnapshot();
+		}
 		stats.maybeLog();
 	}
 
@@ -802,6 +812,11 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 
 	List<String> debugOverlayLines()
 	{
+		return debugOverlaySnapshot;
+	}
+
+	private void updateDebugOverlaySnapshot()
+	{
 		ArrayList<String> lines = new ArrayList<>(16);
 		Runtime rt = Runtime.getRuntime();
 		long heapUsed = rt.totalMemory() - rt.freeMemory();
@@ -830,7 +845,36 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		lines.add("dyn single: " + stats.drawSingleCount());
 		lines.add("dyn faces: " + compactCount(stats.totalDynamicFacesCount()));
 		lines.add("dyn max: " + stats.maxDynamicFacesCount());
-		return lines;
+		debugOverlaySnapshot = List.copyOf(lines);
+	}
+
+	private void updateDebugOverlayRegistration()
+	{
+		if (debugOverlay == null)
+		{
+			return;
+		}
+		if (config.debugOverlay())
+		{
+			if (!debugOverlayRegistered)
+			{
+				overlayManager.add(debugOverlay);
+				debugOverlayRegistered = true;
+			}
+		}
+		else
+		{
+			removeDebugOverlay();
+		}
+	}
+
+	private void removeDebugOverlay()
+	{
+		if (debugOverlayRegistered)
+		{
+			overlayManager.remove(debugOverlay);
+			debugOverlayRegistered = false;
+		}
 	}
 
 	private static String compactDeviceName(String name)
