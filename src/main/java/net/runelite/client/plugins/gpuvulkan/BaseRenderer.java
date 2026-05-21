@@ -88,6 +88,13 @@ final class BaseRenderer implements VulkanRenderExtension
 	}
 
 	@Override
+	public void setLevelRange(int minLevel, int currentLevel, int maxLevel)
+	{
+		if (sceneRenderer == null) return;
+		sceneRenderer.setLevelRange(minLevel, currentLevel, maxLevel);
+	}
+
+	@Override
 	public void setHideRoofIds(Set<Integer> hideRoofIds)
 	{
 		if (sceneRenderer == null) return;
