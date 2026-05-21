@@ -306,6 +306,7 @@ final class VulkanRenderer implements AutoCloseable
 		recordClearPass(stack, cmd, entry.framebuffer, width, height);
 
 		submitNoSemaphores(stack, cmd);
+		metalDrawables.markSubmitted(entry, sync.inFlightFence());
 
 		MacOSMetalHelper.presentDrawable(drawable, device.metalCommandQueue());
 	}
