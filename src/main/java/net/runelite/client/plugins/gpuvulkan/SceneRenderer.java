@@ -92,6 +92,9 @@ final class SceneRenderer implements AutoCloseable
 	private final FrameSync sync;
 	private final ScenePipeline fillPipeline;
 	private final ScenePipeline linePipeline;
+	private final ScenePipeline alphaPipeline;
+	private final ScenePipeline priorityColorPipeline;
+	private final ScenePipeline priorityDepthPipeline;
 	private final SceneVertexBuffer vbuf;
 	private final ByteBuffer mapped;
 	private final long descriptorSet;
@@ -125,6 +128,10 @@ final class SceneRenderer implements AutoCloseable
 	private final int[][][] zoneVertexCount = new int[LAYER_COUNT][MAX_PLANES][ZONE_COUNT];
 
 	private final boolean[] wireframe = new boolean[LAYER_COUNT];
+	private int[] priorityRangeStarts = new int[1024];
+	private int[] priorityRangeEnds = new int[1024];
+	private int[] prioritySkipPairs = new int[2048];
+	private int priorityRangeCount;
 	/** Plane range to render this frame, forwarded from preSceneDraw's
 	 *  (minLevel, level, maxLevel). Roof hiding only applies above the
 	 *  current plane, matching the stock GPU plugin's zone renderer. */
@@ -206,6 +213,12 @@ final class SceneRenderer implements AutoCloseable
 		this.stats = stats;
 		this.fillPipeline = new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL, true,
 			renderPass.samples(), alphaToCoverage);
+		this.alphaPipeline = new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL,
+			true, false, true, renderPass.samples(), false, true);
+		this.priorityColorPipeline = new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL,
+			true, false, true, renderPass.samples(), alphaToCoverage);
+		this.priorityDepthPipeline = new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL,
+			true, true, false, renderPass.samples(), alphaToCoverage);
 		// fillModeNonSolid is required for VK_POLYGON_MODE_LINE; without it
 		// (llvmpipe, some embedded SoCs) wireframe collapses to FILL.
 		this.linePipeline = device.supportsFillModeNonSolid()
@@ -279,6 +292,7 @@ final class SceneRenderer implements AutoCloseable
 			+ (long) vertexCount * ScenePipeline.VERTEX_STRIDE;
 		overflowed = false;
 		seenCaptures.clear();
+		priorityRangeCount = 0;
 	}
 
 	/** Visits one tile (including any bridge tile underneath) within a layer pass. */
@@ -884,10 +898,12 @@ final class SceneRenderer implements AutoCloseable
 
 		boolean detailedStats = stats.isDetailedModelStats();
 		boolean prioritySort = renderMode == Renderable.RENDERMODE_SORTED_NO_DEPTH;
+		int priorityStart = prioritySort ? vertexCount : -1;
 		boolean needsFaceSort = prioritySort || hasTransparentFaces(m);
 		if (!needsFaceSort && m.getFaceCount() <= OPAQUE_UNSORTED_FACE_THRESHOLD)
 		{
 			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
+			recordPriorityRange(priorityStart);
 			return;
 		}
 
@@ -901,6 +917,7 @@ final class SceneRenderer implements AutoCloseable
 				}
 				captureModelUnsorted(m, orient, worldX, worldY, worldZ);
 			}
+			recordPriorityRange(priorityStart);
 			return;
 		}
 
@@ -922,6 +939,7 @@ final class SceneRenderer implements AutoCloseable
 				stats.sortFallbackModels.incrementAndGet();
 			}
 			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
+			recordPriorityRange(priorityStart);
 			return;
 		}
 
@@ -933,6 +951,7 @@ final class SceneRenderer implements AutoCloseable
 				stats.sortFallbackModels.incrementAndGet();
 			}
 			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
+			recordPriorityRange(priorityStart);
 			return;
 		}
 		if (vertexCount + faces * 3 > MAX_VERTICES) { overflow(); return; }
@@ -1097,6 +1116,27 @@ final class SceneRenderer implements AutoCloseable
 			stats.texturedEmitFaces.addAndGet(texturedFaces);
 			stats.overrideEmitFaces.addAndGet(overrideFaces);
 		}
+		recordPriorityRange(priorityStart);
+	}
+
+	private void recordPriorityRange(int start)
+	{
+		if (start < 0 || vertexCount <= start)
+		{
+			return;
+		}
+		if (priorityRangeCount == priorityRangeStarts.length)
+		{
+			int newSize = priorityRangeStarts.length * 2;
+			priorityRangeStarts = java.util.Arrays.copyOf(priorityRangeStarts, newSize);
+			priorityRangeEnds = java.util.Arrays.copyOf(priorityRangeEnds, newSize);
+			prioritySkipPairs = java.util.Arrays.copyOf(prioritySkipPairs, newSize * 2);
+		}
+		priorityRangeStarts[priorityRangeCount] = start;
+		priorityRangeEnds[priorityRangeCount] = vertexCount;
+		prioritySkipPairs[priorityRangeCount * 2] = start;
+		prioritySkipPairs[priorityRangeCount * 2 + 1] = vertexCount;
+		priorityRangeCount++;
 	}
 
 	private boolean captureModelCullOnlyFused(Projection proj, Model m, int orientation, int wx, int wy, int wz)
@@ -1470,6 +1510,14 @@ final class SceneRenderer implements AutoCloseable
 			fragPush.putFloat(smoothBanding);
 			fragPush.flip();
 
+			ByteBuffer alphaFragPush = stack.malloc(32);
+			alphaFragPush.putFloat(fogR).putFloat(fogG).putFloat(fogB).putFloat(brightness);
+			alphaFragPush.putFloat(textureLightMode);
+			alphaFragPush.putFloat((float) colorBlindMode);
+			alphaFragPush.putFloat(colorBlindIntensity);
+			alphaFragPush.putFloat(10f + smoothBanding);
+			alphaFragPush.flip();
+
 			// Skip-list of tile-roof ranges the engine wants hidden.
 			// recordRoofRange is called in captureScene order, so
 			// tileRoofStarts is already sorted by start.
@@ -1517,7 +1565,7 @@ final class SceneRenderer implements AutoCloseable
 
 				if (LAYERS[i] == Layer.DYNAMIC)
 				{
-					drawRange(cmd, layerStart, regionEnd, skipScratch, skipPairs, false, slotFirstVertex,
+					drawRange(cmd, layerStart, regionEnd, prioritySkipPairs, priorityRangeCount, priorityRangeCount > 0, slotFirstVertex,
 						want.layout(), vertPush, fragPush);
 				}
 				else
@@ -1535,6 +1583,71 @@ final class SceneRenderer implements AutoCloseable
 				}
 				layerStart = regionEnd;
 			}
+
+			if (priorityRangeCount > 0)
+			{
+				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, priorityColorPipeline.handle());
+				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+					priorityColorPipeline.layout(), 0, stack.longs(descriptorSet), null);
+				drawPriorityRanges(cmd, slotFirstVertex, priorityColorPipeline.layout(), vertPush, fragPush);
+
+				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, priorityDepthPipeline.handle());
+				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+					priorityDepthPipeline.layout(), 0, stack.longs(descriptorSet), null);
+				drawPriorityRanges(cmd, slotFirstVertex, priorityDepthPipeline.layout(), vertPush, fragPush);
+			}
+
+			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, alphaPipeline.handle());
+			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+				alphaPipeline.layout(), 0, stack.longs(descriptorSet), null);
+			drawAlphaPass(cmd, loMin, loMax, cameraX, cameraZ,
+				drawDistanceTiles, fogDepthTiles, skipScratch, skipPairs, loCur,
+				slotFirstVertex, alphaPipeline.layout(), vertPush, alphaFragPush);
+		}
+	}
+
+	private int layerStartFor(int layer)
+	{
+		return layer == 0 ? 0 : regionEnds[layer - 1];
+	}
+
+	private void drawAlphaPass(VkCommandBuffer cmd, int loMin, int loMax,
+							   float cameraX, float cameraZ, float drawDistanceTiles, float fogDepthTiles,
+							   int[] skips, int skipPairs, int currentPlane,
+							   int slotFirstVertex, long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
+	{
+		for (int i = 0; i < LAYER_COUNT; i++)
+		{
+			int layerStart = layerStartFor(i);
+			int regionEnd = i == LAYER_COUNT - 1 ? vertexCount : regionEnds[i];
+			if (regionEnd <= layerStart)
+			{
+				continue;
+			}
+			if (LAYERS[i] == Layer.DYNAMIC)
+			{
+				drawRange(cmd, layerStart, regionEnd, prioritySkipPairs, priorityRangeCount,
+					false, slotFirstVertex, pipelineLayout, vertPush, fragPush);
+			}
+			else
+			{
+				for (int p = loMin; p <= loMax; p++)
+				{
+					drawStaticPlane(cmd, i, p, layerStart, cameraX, cameraZ,
+						drawDistanceTiles, fogDepthTiles, skips, skipPairs, p > currentPlane,
+						slotFirstVertex, pipelineLayout, vertPush, fragPush);
+				}
+			}
+		}
+	}
+
+	private void drawPriorityRanges(VkCommandBuffer cmd, int slotFirstVertex,
+									long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
+	{
+		for (int i = 0; i < priorityRangeCount; i++)
+		{
+			drawRange(cmd, priorityRangeStarts[i], priorityRangeEnds[i], skipScratch, 0, false,
+				slotFirstVertex, pipelineLayout, vertPush, fragPush);
 		}
 	}
 
@@ -1722,6 +1835,9 @@ final class SceneRenderer implements AutoCloseable
 		vkDeviceWaitIdle(device.handle());
 		vbuf.close();
 		fillPipeline.close();
+		alphaPipeline.close();
+		priorityColorPipeline.close();
+		priorityDepthPipeline.close();
 		if (linePipeline != null) linePipeline.close();
 	}
 
