@@ -62,6 +62,13 @@ final class BaseRenderer implements VulkanRenderExtension
 	}
 
 	@Override
+	public void invalidateZone(Scene scene, int zx, int zz)
+	{
+		if (sceneRenderer == null) return;
+		sceneRenderer.invalidateZone(scene, zx, zz);
+	}
+
+	@Override
 	public void captureScene(Scene scene)
 	{
 		if (sceneRenderer == null) return;

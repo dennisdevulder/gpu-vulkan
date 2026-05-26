@@ -102,6 +102,11 @@ final class RenderExtensions implements AutoCloseable
 		forEachExtension("invalidateCapturedScene", VulkanRenderExtension::invalidateCapturedScene);
 	}
 
+	void invalidateZone(Scene scene, int zx, int zz)
+	{
+		forEachExtension("invalidateZone", extension -> extension.invalidateZone(scene, zx, zz));
+	}
+
 	void captureModel(Model model, int orientation, int worldX, int worldY, int worldZ)
 	{
 		for (int i = 0; i < extensions.size(); )

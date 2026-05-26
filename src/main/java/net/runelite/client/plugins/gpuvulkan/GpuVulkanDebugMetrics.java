@@ -6,6 +6,7 @@ public final class GpuVulkanDebugMetrics
 	int totalVertices;
 	int maxVertices;
 	int roofRanges;
+	int dirtyZones;
 	int pendingRenderables;
 	boolean overflowed;
 	long sceneBufferBytes;

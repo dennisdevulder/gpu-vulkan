@@ -18,6 +18,10 @@ public interface VulkanSceneRenderer extends AutoCloseable
 
 	void invalidateCapturedScene();
 
+	default void invalidateZone(Scene scene, int zx, int zz)
+	{
+	}
+
 	void captureScene(Scene scene);
 
 	void captureModel(Model model, int orientation, int worldX, int worldY, int worldZ);

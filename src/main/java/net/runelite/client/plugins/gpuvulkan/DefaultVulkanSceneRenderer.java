@@ -35,6 +35,12 @@ final class DefaultVulkanSceneRenderer implements VulkanSceneRenderer
 	}
 
 	@Override
+	public void invalidateZone(Scene scene, int zx, int zz)
+	{
+		sceneRenderer.invalidateZone(scene, zx, zz);
+	}
+
+	@Override
 	public void captureScene(Scene scene)
 	{
 		sceneRenderer.captureScene(scene);

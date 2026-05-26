@@ -10,7 +10,6 @@ import net.runelite.api.BufferProvider;
 import net.runelite.api.Client;
 import net.runelite.api.GameObject;
 import net.runelite.api.GameState;
-import net.runelite.api.ItemLayer;
 import net.runelite.api.Model;
 import net.runelite.api.NPC;
 import net.runelite.api.Player;
@@ -22,7 +21,6 @@ import java.util.Set;
 import net.runelite.api.SceneTilePaint;
 import net.runelite.api.Texture;
 import net.runelite.api.TextureProvider;
-import net.runelite.api.Tile;
 import net.runelite.api.TileObject;
 import net.runelite.api.hooks.DrawCallbacks;
 import net.runelite.client.callback.ClientThread;
@@ -105,8 +103,6 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	 *  doesn't pass a Projection, so {@link #captureActor} reuses the
 	 *  previous one; null on the first frame after plugin enable. */
 	private volatile net.runelite.api.Projection lastWorldProjection;
-	private boolean capturedSceneInvalidated;
-	private int capturedSceneInvalidatedZones;
 
 	@Override
 	protected void startUp()
@@ -543,8 +539,6 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		{
 			renderExtensions.invalidateCapturedScene();
 			capturedScene = null;
-			capturedSceneInvalidated = false;
-			capturedSceneInvalidatedZones = 0;
 		}
 	}
 
@@ -704,9 +698,6 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			long start = stats.startNanos();
 			renderExtensions.beginFrame();
 			stats.addNanos(stats.beginFrameNanos, start);
-			start = stats.startNanos();
-			captureItemLayers();
-			stats.addNanos(stats.actorCaptureNanos, start);
 			if (config.manualActorCapture())
 			{
 				start = stats.startNanos();
@@ -716,58 +707,6 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			start = stats.startNanos();
 			renderExtensions.captureDynamicPending();
 			stats.addNanos(stats.pendingCaptureNanos, start);
-		}
-	}
-
-	private void captureItemLayers()
-	{
-		Scene scene = capturedScene;
-		if (scene == null) return;
-		Tile[][][] tiles = scene.getTiles();
-		if (tiles == null || tiles.length == 0) return;
-		int plane = Math.max(0, Math.min(tiles.length - 1, client.getPlane()));
-		Tile[][] planeTiles = tiles[plane];
-		if (planeTiles == null) return;
-		for (Tile[] row : planeTiles)
-		{
-			if (row == null) continue;
-			for (Tile tile : row)
-			{
-				if (tile == null) continue;
-				captureItemLayer(tile.getItemLayer());
-				Tile bridge = tile.getBridge();
-				if (bridge != null)
-				{
-					captureItemLayer(bridge.getItemLayer());
-				}
-			}
-		}
-	}
-
-	private void captureItemLayer(ItemLayer itemLayer)
-	{
-		if (itemLayer == null) return;
-		int x = itemLayer.getX();
-		int y = itemLayer.getZ();
-		int z = itemLayer.getY();
-		captureItemRenderable(itemLayer.getBottom(), x, y, z);
-		captureItemRenderable(itemLayer.getMiddle(), x, y, z);
-		captureItemRenderable(itemLayer.getTop(), x, y, z);
-	}
-
-	private void captureItemRenderable(Renderable renderable, int x, int y, int z)
-	{
-		if (renderable == null) return;
-		Model model = renderable instanceof Model ? (Model) renderable : renderable.getModel();
-		if (model == null) return;
-		Projection projection = lastWorldProjection;
-		if (projection != null)
-		{
-			renderExtensions.captureModel(projection, model, 0, x, y, z, renderModeOf(renderable));
-		}
-		else
-		{
-			renderExtensions.captureModel(model, 0, x, y, z);
 		}
 	}
 
@@ -846,14 +785,6 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		if (scene != capturedScene && renderExtensions != null)
 		{
 			capturedScene = scene;
-			capturedSceneInvalidated = false;
-			capturedSceneInvalidatedZones = 0;
-			captureSceneNow(scene);
-		}
-		else if (capturedSceneInvalidated && renderExtensions != null)
-		{
-			capturedSceneInvalidated = false;
-			capturedSceneInvalidatedZones = 0;
 			captureSceneNow(scene);
 		}
 		if (renderExtensions != null)
@@ -888,8 +819,6 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		if (renderExtensions != null)
 		{
 			capturedScene = scene;
-			capturedSceneInvalidated = false;
-			capturedSceneInvalidatedZones = 0;
 			captureSceneNow(scene);
 		}
 	}
@@ -937,6 +866,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		lines.add("verts: " + compactCount(metrics.totalVertices) + " / " + compactCount(metrics.maxVertices));
 		lines.add("static: " + compactCount(metrics.sceneVertices));
 		lines.add("roofs: " + metrics.roofRanges);
+		lines.add("dirty zones: " + metrics.dirtyZones);
 		lines.add("pending: " + metrics.pendingRenderables);
 		lines.add("overflow: " + (metrics.overflowed ? "yes" : "no"));
 		lines.add("scene/pre/post: " + stats.drawSceneCount() + " / "
@@ -1019,10 +949,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	@Override
 	public void invalidateZone(Scene scene, int zx, int zz)
 	{
-		if (scene == capturedScene)
+		if (renderExtensions != null)
 		{
-			capturedSceneInvalidated = true;
-			capturedSceneInvalidatedZones++;
+			renderExtensions.invalidateZone(scene, zx, zz);
 		}
 	}
 

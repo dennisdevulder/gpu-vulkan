@@ -153,6 +153,8 @@ final class SceneRenderer implements AutoCloseable
 	private int   tileRoofCount;
 	/** Sorted [start, end) pairs of vertex sub-ranges to skip this frame. */
 	private int[] skipScratch = new int[256];
+	private final boolean[] dirtyZones = new boolean[ZONE_COUNT];
+	private int dirtyZoneCount;
 
 	private int vertexCount;
 	private boolean overflowed;
@@ -192,11 +194,27 @@ final class SceneRenderer implements AutoCloseable
 	{
 		vertexCount = 0;
 		tileRoofCount = 0;
+		java.util.Arrays.fill(dirtyZones, false);
+		dirtyZoneCount = 0;
 		pendingRenderables.clear();
 		for (int i = 0; i < LAYER_COUNT; i++)
 		{
 			regionEnds[i] = 0;
 			for (int p = 0; p < MAX_PLANES; p++) planeEnds[i][p] = 0;
+		}
+	}
+
+	void invalidateZone(Scene scene, int zx, int zz)
+	{
+		if (zx < 0 || zz < 0 || zx >= ZONES_PER_SIDE || zz >= ZONES_PER_SIDE)
+		{
+			return;
+		}
+		int zone = zx * ZONES_PER_SIDE + zz;
+		if (!dirtyZones[zone])
+		{
+			dirtyZones[zone] = true;
+			dirtyZoneCount++;
 		}
 	}
 
@@ -264,6 +282,7 @@ final class SceneRenderer implements AutoCloseable
 		metrics.maxVertices += MAX_VERTICES;
 		metrics.roofRanges += tileRoofCount;
 		metrics.pendingRenderables += pendingRenderables.size();
+		metrics.dirtyZones += dirtyZoneCount;
 		metrics.overflowed |= overflowed;
 		metrics.sceneBufferBytes += BUFFER_BYTES * FrameSync.FRAMES_IN_FLIGHT;
 	}
@@ -572,6 +591,7 @@ final class SceneRenderer implements AutoCloseable
 	private void captureRenderable(Renderable r, int orient, int x, int y, int z)
 	{
 		if (r == null) return;
+		if (r instanceof net.runelite.api.Actor) return;
 		Model m = resolveModel(r);
 		if (m == null)
 		{
@@ -612,6 +632,7 @@ final class SceneRenderer implements AutoCloseable
 			Model m = pr.model;
 			if (m == null)
 			{
+				if (pr.r instanceof net.runelite.api.Actor) continue;
 				m = resolveModel(pr.r);
 				if (m == null) continue;
 				pr.model = m;
