@@ -116,13 +116,14 @@ final class ModelComputePipeline implements AutoCloseable
 		}
 	}
 
-	void recordDispatch(VkCommandBuffer cmd, int frameSlot, int instanceCount, int faceSlotsPerInstance)
+	void recordDispatch(VkCommandBuffer cmd, int frameSlot, int instanceCount, int faceSlotsPerInstance,
+		int outputFaceSlots)
 	{
 		if (instanceCount <= 0)
 		{
 			return;
 		}
-		int workItems = instanceCount * faceSlotsPerInstance;
+		int workItems = Math.min(instanceCount * faceSlotsPerInstance, outputFaceSlots);
 
 		try (MemoryStack stack = stackPush())
 		{

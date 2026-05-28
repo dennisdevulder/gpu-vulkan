@@ -99,8 +99,9 @@ final class SceneRenderer implements AutoCloseable
 	private static final int MODEL_MESH_HEADER_INTS = 16;
 	private static final int MODEL_MESH_HEADER_BYTES = MODEL_MESH_HEADER_INTS * Integer.BYTES;
 	private static final int MODEL_COMPUTE_FACE_SLOTS_PER_INSTANCE = 16;
-	private static final long MODEL_COMPUTE_OUTPUT_FRAME_BYTES =
-		(long) MAX_MODEL_INSTANCES * MODEL_COMPUTE_FACE_SLOTS_PER_INSTANCE * 3L * ScenePipeline.VERTEX_STRIDE;
+	private static final long MODEL_COMPUTE_OUTPUT_FRAME_BYTES = 32L * 1024L * 1024L;
+	private static final int MODEL_COMPUTE_OUTPUT_FACE_SLOTS =
+		(int) (MODEL_COMPUTE_OUTPUT_FRAME_BYTES / (3L * ScenePipeline.VERTEX_STRIDE));
 	private static final boolean ENABLE_MODEL_COMPUTE_PROTOTYPE = true;
 	private static final int SCENE_OFFSET = (Constants.EXTENDED_SCENE_SIZE - Constants.SCENE_SIZE) / 2;
 	private static final float[] HSL_RGB = buildHslRgbTable();
@@ -2486,7 +2487,7 @@ final class SceneRenderer implements AutoCloseable
 			return;
 		}
 		modelComputePipeline.recordDispatch(cmd, sync.currentFrame(), modelInstanceCount,
-			MODEL_COMPUTE_FACE_SLOTS_PER_INSTANCE);
+			MODEL_COMPUTE_FACE_SLOTS_PER_INSTANCE, MODEL_COMPUTE_OUTPUT_FACE_SLOTS);
 	}
 
 	private int layerStartFor(int layer)
