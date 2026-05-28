@@ -96,8 +96,10 @@ final class SceneRenderer implements AutoCloseable
 	private static final long MODEL_MESH_ARENA_BYTES = 64L * 1024L * 1024L;
 	private static final int MAX_MODEL_INSTANCES = 65_536;
 	private static final int MODEL_INSTANCE_STRIDE = 40;
+	private static final int MODEL_MESH_HEADER_INTS = 16;
+	private static final int MODEL_MESH_HEADER_BYTES = MODEL_MESH_HEADER_INTS * Integer.BYTES;
 	private static final long MODEL_COMPUTE_OUTPUT_FRAME_BYTES =
-		(long) MAX_MODEL_INSTANCES * ScenePipeline.VERTEX_STRIDE;
+		(long) MAX_MODEL_INSTANCES * 3L * ScenePipeline.VERTEX_STRIDE;
 	private static final boolean ENABLE_MODEL_COMPUTE_PROTOTYPE = true;
 	private static final int SCENE_OFFSET = (Constants.EXTENDED_SCENE_SIZE - Constants.SCENE_SIZE) / 2;
 	private static final float[] HSL_RGB = buildHslRgbTable();
@@ -604,6 +606,13 @@ final class SceneRenderer implements AutoCloseable
 		return p;
 	}
 
+	private static int writeModelMeshSectionOffset(long header, int headerIndex, int currentOffset)
+	{
+		currentOffset = align4(currentOffset);
+		MemoryUtil.memPutInt(header + (long) headerIndex * Integer.BYTES, currentOffset);
+		return currentOffset;
+	}
+
 	private static final class ModelCacheEntry
 	{
 		ModelCacheEntry next;
@@ -666,6 +675,40 @@ final class SceneRenderer implements AutoCloseable
 				}
 			}
 			long p = arena.address() + offset;
+			long header = p;
+			int sectionOffset = MODEL_MESH_HEADER_BYTES;
+			sectionOffset = writeModelMeshSectionOffset(header, 0, sectionOffset);
+			sectionOffset += floatBytes(verticesX, vertexCount);
+			sectionOffset = writeModelMeshSectionOffset(header, 1, sectionOffset);
+			sectionOffset += floatBytes(verticesY, vertexCount);
+			sectionOffset = writeModelMeshSectionOffset(header, 2, sectionOffset);
+			sectionOffset += floatBytes(verticesZ, vertexCount);
+			sectionOffset = writeModelMeshSectionOffset(header, 3, sectionOffset);
+			sectionOffset += intBytes(faceIndices1, faceCount);
+			sectionOffset = writeModelMeshSectionOffset(header, 4, sectionOffset);
+			sectionOffset += intBytes(faceIndices2, faceCount);
+			sectionOffset = writeModelMeshSectionOffset(header, 5, sectionOffset);
+			sectionOffset += intBytes(faceIndices3, faceCount);
+			sectionOffset = writeModelMeshSectionOffset(header, 6, sectionOffset);
+			sectionOffset += intBytes(faceColors1, faceCount);
+			sectionOffset = writeModelMeshSectionOffset(header, 7, sectionOffset);
+			sectionOffset += intBytes(faceColors2, faceCount);
+			sectionOffset = writeModelMeshSectionOffset(header, 8, sectionOffset);
+			sectionOffset += intBytes(faceColors3, faceCount);
+			sectionOffset = writeModelMeshSectionOffset(header, 9, sectionOffset);
+			sectionOffset += shortBytes(faceTextures, faceCount);
+			sectionOffset = writeModelMeshSectionOffset(header, 10, sectionOffset);
+			sectionOffset += byteBytes(faceTransparencies, faceCount);
+			sectionOffset = writeModelMeshSectionOffset(header, 11, sectionOffset);
+			sectionOffset += byteBytes(faceBias, faceCount);
+			sectionOffset = writeModelMeshSectionOffset(header, 12, sectionOffset);
+			sectionOffset += byteBytes(textureFaces, arrayLength(textureFaces));
+			sectionOffset = writeModelMeshSectionOffset(header, 13, sectionOffset);
+			sectionOffset += intBytes(texIndices1, arrayLength(texIndices1));
+			sectionOffset = writeModelMeshSectionOffset(header, 14, sectionOffset);
+			sectionOffset += intBytes(texIndices2, arrayLength(texIndices2));
+			sectionOffset = writeModelMeshSectionOffset(header, 15, sectionOffset);
+			p += MODEL_MESH_HEADER_BYTES;
 			p = writeFloatArray(p, (float[]) verticesX, vertexCount);
 			p = align4(p);
 			p = writeFloatArray(p, (float[]) verticesY, vertexCount);
@@ -704,7 +747,7 @@ final class SceneRenderer implements AutoCloseable
 
 		private int meshBytes()
 		{
-			int bytes = 0;
+			int bytes = MODEL_MESH_HEADER_BYTES;
 			bytes = addAligned(bytes, floatBytes(verticesX, vertexCount));
 			bytes = addAligned(bytes, floatBytes(verticesY, vertexCount));
 			bytes = addAligned(bytes, floatBytes(verticesZ, vertexCount));
