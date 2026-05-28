@@ -4,6 +4,7 @@ import java.util.Set;
 import net.runelite.api.Model;
 import net.runelite.api.Projection;
 import net.runelite.api.Scene;
+import org.lwjgl.vulkan.VkCommandBuffer;
 
 /**
  * Backend-provided scene renderer for extensions that want the stock
@@ -65,6 +66,10 @@ public interface VulkanSceneRenderer extends AutoCloseable
 	void setWireframeDynamic(boolean enabled);
 
 	void recordDraw(VulkanFrameContext frame);
+
+	default void recordBeforeRenderPass(VkCommandBuffer commandBuffer)
+	{
+	}
 
 	@Override
 	void close();

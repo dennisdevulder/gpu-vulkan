@@ -5,13 +5,19 @@ import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.LongBuffer;
 import org.lwjgl.system.MemoryStack;
+import org.lwjgl.vulkan.VkCommandBuffer;
 import org.lwjgl.vulkan.VkComputePipelineCreateInfo;
+import org.lwjgl.vulkan.VkDescriptorBufferInfo;
+import org.lwjgl.vulkan.VkDescriptorPoolCreateInfo;
+import org.lwjgl.vulkan.VkDescriptorPoolSize;
+import org.lwjgl.vulkan.VkDescriptorSetAllocateInfo;
 import org.lwjgl.vulkan.VkDescriptorSetLayoutBinding;
 import org.lwjgl.vulkan.VkDescriptorSetLayoutCreateInfo;
 import org.lwjgl.vulkan.VkPipelineLayoutCreateInfo;
 import org.lwjgl.vulkan.VkPipelineShaderStageCreateInfo;
 import org.lwjgl.vulkan.VkPushConstantRange;
 import org.lwjgl.vulkan.VkShaderModuleCreateInfo;
+import org.lwjgl.vulkan.VkWriteDescriptorSet;
 
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.system.MemoryUtil.memAlloc;
@@ -21,11 +27,14 @@ import static org.lwjgl.vulkan.VK13.*;
 final class ModelComputePipeline implements AutoCloseable
 {
 	private final VulkanDevice device;
+	private final long[] descriptorSets = new long[FrameSync.FRAMES_IN_FLIGHT];
 	private long descriptorSetLayout;
+	private long descriptorPool;
 	private long pipelineLayout;
 	private long pipeline;
 
-	ModelComputePipeline(VulkanDevice device)
+	ModelComputePipeline(VulkanDevice device, long meshBuffer, long meshBytes,
+		long instanceBuffer, long instanceFrameBytes)
 	{
 		this.device = device;
 		long shaderModule = VK_NULL_HANDLE;
@@ -53,6 +62,7 @@ final class ModelComputePipeline implements AutoCloseable
 			Vk.check("vkCreateDescriptorSetLayout (model compute)",
 				vkCreateDescriptorSetLayout(device.handle(), dsInfo, null, pDsl));
 			descriptorSetLayout = pDsl.get(0);
+			createDescriptorSets(meshBuffer, meshBytes, instanceBuffer, instanceFrameBytes, stack);
 
 			VkPushConstantRange.Buffer pc = VkPushConstantRange.calloc(1, stack);
 			pc.get(0)
@@ -100,19 +110,24 @@ final class ModelComputePipeline implements AutoCloseable
 		}
 	}
 
-	long descriptorSetLayout()
+	void recordDispatch(VkCommandBuffer cmd, int frameSlot, int instanceCount)
 	{
-		return descriptorSetLayout;
-	}
+		if (instanceCount <= 0)
+		{
+			return;
+		}
 
-	long pipelineLayout()
-	{
-		return pipelineLayout;
-	}
+		try (MemoryStack stack = stackPush())
+		{
+			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+				pipelineLayout, 0, stack.longs(descriptorSets[frameSlot]), null);
 
-	long pipeline()
-	{
-		return pipeline;
+			ByteBuffer push = stack.malloc(4);
+			push.putInt(instanceCount).flip();
+			vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, push);
+			vkCmdDispatch(cmd, (instanceCount + 63) / 64, 1, 1);
+		}
 	}
 
 	@Override
@@ -128,11 +143,85 @@ final class ModelComputePipeline implements AutoCloseable
 			vkDestroyPipelineLayout(device.handle(), pipelineLayout, null);
 			pipelineLayout = VK_NULL_HANDLE;
 		}
+		if (descriptorPool != VK_NULL_HANDLE)
+		{
+			vkDestroyDescriptorPool(device.handle(), descriptorPool, null);
+			descriptorPool = VK_NULL_HANDLE;
+		}
 		if (descriptorSetLayout != VK_NULL_HANDLE)
 		{
 			vkDestroyDescriptorSetLayout(device.handle(), descriptorSetLayout, null);
 			descriptorSetLayout = VK_NULL_HANDLE;
 		}
+	}
+
+	private void createDescriptorSets(long meshBuffer, long meshBytes,
+		long instanceBuffer, long instanceFrameBytes, MemoryStack stack)
+	{
+		VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.calloc(1, stack);
+		poolSizes.get(0)
+			.type(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
+			.descriptorCount(2 * FrameSync.FRAMES_IN_FLIGHT);
+
+		VkDescriptorPoolCreateInfo poolInfo = VkDescriptorPoolCreateInfo.calloc(stack)
+			.sType$Default()
+			.maxSets(FrameSync.FRAMES_IN_FLIGHT)
+			.pPoolSizes(poolSizes);
+		LongBuffer pPool = stack.mallocLong(1);
+		Vk.check("vkCreateDescriptorPool (model compute)",
+			vkCreateDescriptorPool(device.handle(), poolInfo, null, pPool));
+		descriptorPool = pPool.get(0);
+
+		LongBuffer layouts = stack.mallocLong(FrameSync.FRAMES_IN_FLIGHT);
+		for (int i = 0; i < FrameSync.FRAMES_IN_FLIGHT; i++)
+		{
+			layouts.put(i, descriptorSetLayout);
+		}
+
+		VkDescriptorSetAllocateInfo allocInfo = VkDescriptorSetAllocateInfo.calloc(stack)
+			.sType$Default()
+			.descriptorPool(descriptorPool)
+			.pSetLayouts(layouts);
+		LongBuffer sets = stack.mallocLong(FrameSync.FRAMES_IN_FLIGHT);
+		Vk.check("vkAllocateDescriptorSets (model compute)",
+			vkAllocateDescriptorSets(device.handle(), allocInfo, sets));
+		for (int i = 0; i < FrameSync.FRAMES_IN_FLIGHT; i++)
+		{
+			descriptorSets[i] = sets.get(i);
+		}
+
+		VkDescriptorBufferInfo.Buffer bufferInfo =
+			VkDescriptorBufferInfo.calloc(2 * FrameSync.FRAMES_IN_FLIGHT, stack);
+		VkWriteDescriptorSet.Buffer writes =
+			VkWriteDescriptorSet.calloc(2 * FrameSync.FRAMES_IN_FLIGHT, stack);
+		for (int i = 0; i < FrameSync.FRAMES_IN_FLIGHT; i++)
+		{
+			int meshInfo = i * 2;
+			int instanceInfo = meshInfo + 1;
+
+			bufferInfo.get(meshInfo)
+				.buffer(meshBuffer)
+				.offset(0)
+				.range(meshBytes);
+			bufferInfo.get(instanceInfo)
+				.buffer(instanceBuffer)
+				.offset(instanceFrameBytes * i)
+				.range(instanceFrameBytes);
+
+			writes.get(meshInfo)
+				.sType$Default()
+				.dstSet(descriptorSets[i])
+				.dstBinding(0)
+				.descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
+				.pBufferInfo(VkDescriptorBufferInfo.create(bufferInfo.get(meshInfo).address(), 1));
+			writes.get(instanceInfo)
+				.sType$Default()
+				.dstSet(descriptorSets[i])
+				.dstBinding(1)
+				.descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
+				.pBufferInfo(VkDescriptorBufferInfo.create(bufferInfo.get(instanceInfo).address(), 1));
+		}
+		vkUpdateDescriptorSets(device.handle(), writes, null);
 	}
 
 	private long createShaderModule(ByteBuffer code)

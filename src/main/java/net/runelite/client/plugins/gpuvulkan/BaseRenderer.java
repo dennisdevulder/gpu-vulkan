@@ -144,6 +144,10 @@ final class BaseRenderer implements VulkanRenderExtension
 	@Override
 	public void recordBeforeRenderPass(VkCommandBuffer commandBuffer)
 	{
+		if (sceneRenderer != null)
+		{
+			sceneRenderer.recordBeforeRenderPass(commandBuffer);
+		}
 		if (config != null && config.benchmarkSkipUi()) return;
 		if (interfaceRenderer == null) return;
 		interfaceRenderer.recordCopyToImage(commandBuffer);

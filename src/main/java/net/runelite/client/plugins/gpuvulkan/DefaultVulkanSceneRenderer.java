@@ -147,6 +147,12 @@ final class DefaultVulkanSceneRenderer implements VulkanSceneRenderer
 	}
 
 	@Override
+	public void recordBeforeRenderPass(org.lwjgl.vulkan.VkCommandBuffer commandBuffer)
+	{
+		sceneRenderer.recordBeforeRenderPass(commandBuffer);
+	}
+
+	@Override
 	public void close()
 	{
 		sceneRenderer.close();

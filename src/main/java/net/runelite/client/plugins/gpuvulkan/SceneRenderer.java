@@ -297,7 +297,9 @@ final class SceneRenderer implements AutoCloseable
 		this.modelInstanceBuffer = new ModelInstanceBuffer(device,
 			(long) MAX_MODEL_INSTANCES * MODEL_INSTANCE_STRIDE * FrameSync.FRAMES_IN_FLIGHT);
 		this.modelComputePipeline = ENABLE_MODEL_COMPUTE_PROTOTYPE
-			? new ModelComputePipeline(device)
+			? new ModelComputePipeline(device,
+				modelMeshArena.handle(), modelMeshArena.capacityBytes(),
+				modelInstanceBuffer.handle(), modelInstanceBuffer.frameBytes())
 			: null;
 	}
 
@@ -796,6 +798,11 @@ final class SceneRenderer implements AutoCloseable
 			return capacity;
 		}
 
+		long handle()
+		{
+			return buffer.handle();
+		}
+
 		@Override
 		public void close()
 		{
@@ -820,6 +827,16 @@ final class SceneRenderer implements AutoCloseable
 		void beginFrame(int slot)
 		{
 			frameAddress = address + (long) slot * MAX_MODEL_INSTANCES * MODEL_INSTANCE_STRIDE;
+		}
+
+		long frameBytes()
+		{
+			return (long) MAX_MODEL_INSTANCES * MODEL_INSTANCE_STRIDE;
+		}
+
+		long handle()
+		{
+			return buffer.handle();
 		}
 
 		void write(int index, ModelCacheEntry model, int orient, int worldX, int worldY, int worldZ, int renderMode)
@@ -2373,6 +2390,15 @@ final class SceneRenderer implements AutoCloseable
 				skipScratch, skipPairs, loCur,
 				slot, staticFirstVertex, slotFirstVertex, alphaPipeline.layout(), vertPush, alphaFragPush);
 		}
+	}
+
+	void recordBeforeRenderPass(VkCommandBuffer cmd)
+	{
+		if (modelComputePipeline == null)
+		{
+			return;
+		}
+		modelComputePipeline.recordDispatch(cmd, sync.currentFrame(), modelInstanceCount);
 	}
 
 	private int layerStartFor(int layer)
