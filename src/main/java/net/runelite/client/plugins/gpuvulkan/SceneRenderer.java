@@ -90,6 +90,12 @@ final class SceneRenderer implements AutoCloseable
 	private static final long TOTAL_BUFFER_BYTES = STATIC_BUFFER_BYTES + FRAME_BUFFER_BYTES * FrameSync.FRAMES_IN_FLIGHT;
 	private static final int HSL_HIDDEN = 12345678;
 	private static final int OPAQUE_UNSORTED_FACE_THRESHOLD = 24;
+	private static final int MAX_MODEL_CACHE_ENTRIES = 8192;
+	private static final int MODEL_CACHE_BUCKETS = 16384;
+	private static final int MODEL_CACHE_BUCKET_MASK = MODEL_CACHE_BUCKETS - 1;
+	private static final long MODEL_MESH_ARENA_BYTES = 64L * 1024L * 1024L;
+	private static final int MAX_MODEL_INSTANCES = 65_536;
+	private static final int MODEL_INSTANCE_STRIDE = 40;
 	private static final int SCENE_OFFSET = (Constants.EXTENDED_SCENE_SIZE - Constants.SCENE_SIZE) / 2;
 	private static final float[] HSL_RGB = buildHslRgbTable();
 
@@ -115,6 +121,15 @@ final class SceneRenderer implements AutoCloseable
 	private final float[] cullProjX = new float[ModelSorter.MAX_VERTEX_COUNT];
 	private final float[] cullProjY = new float[ModelSorter.MAX_VERTEX_COUNT];
 	private final float[] cullProjectScratch = new float[3];
+	private final ModelCacheEntry[] modelCacheBuckets = new ModelCacheEntry[MODEL_CACHE_BUCKETS];
+	private final ModelMeshArena modelMeshArena;
+	private final ModelInstanceBuffer modelInstanceBuffer;
+	private int modelCacheSize;
+	private int modelInstanceCount;
+	private int modelInstanceOverflowCount;
+	private boolean modelInstanceFrameActive;
+	private long modelCacheHits;
+	private long modelCacheMisses;
 
 	private static final int MAX_PLANES = 4;
 
@@ -217,6 +232,7 @@ final class SceneRenderer implements AutoCloseable
 		java.util.Arrays.fill(dirtyZoneSlotMask, 0);
 		dirtyZoneCount = 0;
 		pendingRenderables.clear();
+		clearModelCache();
 		for (int i = 0; i < LAYER_COUNT; i++)
 		{
 			regionEnds[i] = 0;
@@ -275,6 +291,9 @@ final class SceneRenderer implements AutoCloseable
 		this.mapped = vbuf.mapped();
 		this.descriptorSet = vbuf.descriptorSet();
 		this.slotBytes = (int) vbuf.slotBytes();
+		this.modelMeshArena = new ModelMeshArena(device, MODEL_MESH_ARENA_BYTES);
+		this.modelInstanceBuffer = new ModelInstanceBuffer(device,
+			(long) MAX_MODEL_INSTANCES * MODEL_INSTANCE_STRIDE * FrameSync.FRAMES_IN_FLIGHT);
 	}
 
 	void setWireframe(Layer layer, boolean on)
@@ -310,6 +329,14 @@ final class SceneRenderer implements AutoCloseable
 		metrics.roofRanges += tileRoofCount;
 		metrics.pendingRenderables += pendingRenderables.size();
 		metrics.dirtyZones += dirtyZoneCount;
+		metrics.modelCacheEntries += modelCacheSize;
+		metrics.modelCacheHits += modelCacheHits;
+		metrics.modelCacheMisses += modelCacheMisses;
+		metrics.modelMeshBytes += modelMeshArena.usedBytes();
+		metrics.modelMeshCapacityBytes += modelMeshArena.capacityBytes();
+		metrics.modelInstances += modelInstanceCount;
+		metrics.modelInstanceMax += MAX_MODEL_INSTANCES;
+		metrics.modelInstanceOverflows += modelInstanceOverflowCount;
 		metrics.overflowed |= overflowed;
 		metrics.sceneBufferBytes += TOTAL_BUFFER_BYTES;
 	}
@@ -350,6 +377,467 @@ final class SceneRenderer implements AutoCloseable
 		return true;
 	}
 
+	private ModelCacheEntry modelInfo(Model model)
+	{
+		int faceCount = model.getFaceCount();
+		int vertexCount = model.getVerticesCount();
+		Object verticesX = model.getVerticesX();
+		Object verticesY = model.getVerticesY();
+		Object verticesZ = model.getVerticesZ();
+		Object faceIndices1 = model.getFaceIndices1();
+		Object faceIndices2 = model.getFaceIndices2();
+		Object faceIndices3 = model.getFaceIndices3();
+		Object faceColors1 = model.getFaceColors1();
+		Object faceColors2 = model.getFaceColors2();
+		Object faceColors3 = model.getFaceColors3();
+		Object faceTextures = model.getFaceTextures();
+		Object faceTransparencies = model.getFaceTransparencies();
+		Object faceBias = model.getFaceBias();
+		Object textureFaces = model.getTextureFaces();
+		Object texIndices1 = model.getTexIndices1();
+		Object texIndices2 = model.getTexIndices2();
+		Object texIndices3 = model.getTexIndices3();
+
+		int hash = 31 * faceCount + vertexCount;
+		hash = mix(hash, verticesX);
+		hash = mix(hash, verticesY);
+		hash = mix(hash, verticesZ);
+		hash = mix(hash, faceIndices1);
+		hash = mix(hash, faceIndices2);
+		hash = mix(hash, faceIndices3);
+		hash = mix(hash, faceColors1);
+		hash = mix(hash, faceColors2);
+		hash = mix(hash, faceColors3);
+		hash = mix(hash, faceTextures);
+		hash = mix(hash, faceTransparencies);
+		hash = mix(hash, faceBias);
+		hash = mix(hash, textureFaces);
+		hash = mix(hash, texIndices1);
+		hash = mix(hash, texIndices2);
+		hash = mix(hash, texIndices3);
+
+		int bucket = hash & MODEL_CACHE_BUCKET_MASK;
+		for (ModelCacheEntry entry = modelCacheBuckets[bucket]; entry != null; entry = entry.next)
+		{
+			if (entry.matches(hash, faceCount, vertexCount,
+				verticesX, verticesY, verticesZ,
+				faceIndices1, faceIndices2, faceIndices3,
+				faceColors1, faceColors2, faceColors3,
+				faceTextures, faceTransparencies, faceBias,
+				textureFaces, texIndices1, texIndices2, texIndices3))
+			{
+				modelCacheHits++;
+				return entry;
+			}
+		}
+
+		modelCacheMisses++;
+		if (modelCacheSize >= MAX_MODEL_CACHE_ENTRIES)
+		{
+			clearModelCache();
+			bucket = hash & MODEL_CACHE_BUCKET_MASK;
+		}
+		ModelCacheEntry cached = new ModelCacheEntry(hash, faceCount, vertexCount,
+			verticesX, verticesY, verticesZ,
+			faceIndices1, faceIndices2, faceIndices3,
+			faceColors1, faceColors2, faceColors3,
+			faceTextures, faceTransparencies, faceBias,
+			textureFaces, texIndices1, texIndices2, texIndices3,
+			modelCacheBuckets[bucket]);
+		cached.uploadMesh(modelMeshArena);
+		modelCacheBuckets[bucket] = cached;
+		modelCacheSize++;
+		return cached;
+	}
+
+	private void clearModelCache()
+	{
+		java.util.Arrays.fill(modelCacheBuckets, null);
+		modelCacheSize = 0;
+		modelMeshArena.reset();
+	}
+
+	private void recordModelInstance(ModelCacheEntry modelInfo, int orient, int worldX, int worldY, int worldZ, int renderMode)
+	{
+		if (modelInfo.meshOffset < 0L)
+		{
+			return;
+		}
+		if (!modelInstanceFrameActive)
+		{
+			modelInstanceOverflowCount++;
+			return;
+		}
+		if (modelInstanceCount >= MAX_MODEL_INSTANCES)
+		{
+			modelInstanceOverflowCount++;
+			return;
+		}
+		modelInstanceBuffer.write(modelInstanceCount, modelInfo, orient, worldX, worldY, worldZ, renderMode);
+		modelInstanceCount++;
+	}
+
+	private static int mix(int hash, Object ref)
+	{
+		return hash * 31 + System.identityHashCode(ref);
+	}
+
+	private static int arrayLength(Object array)
+	{
+		if (array instanceof int[])
+		{
+			return ((int[]) array).length;
+		}
+		if (array instanceof byte[])
+		{
+			return ((byte[]) array).length;
+		}
+		return 0;
+	}
+
+	private static int align4(int value)
+	{
+		return (value + 3) & ~3;
+	}
+
+	private static long align4(long value)
+	{
+		return (value + 3L) & ~3L;
+	}
+
+	private static int addAligned(int offset, int bytes)
+	{
+		return align4(offset + bytes);
+	}
+
+	private static int floatBytes(Object array, int count)
+	{
+		return array == null ? 0 : count * Float.BYTES;
+	}
+
+	private static int intBytes(Object array, int count)
+	{
+		return array == null ? 0 : count * Integer.BYTES;
+	}
+
+	private static int shortBytes(Object array, int count)
+	{
+		return array == null ? 0 : count * Short.BYTES;
+	}
+
+	private static int byteBytes(Object array, int count)
+	{
+		return array == null ? 0 : count;
+	}
+
+	private static long writeFloatArray(long p, float[] values, int count)
+	{
+		if (values == null)
+		{
+			return p;
+		}
+		int n = Math.min(count, values.length);
+		for (int i = 0; i < n; i++)
+		{
+			MemoryUtil.memPutFloat(p, values[i]);
+			p += Float.BYTES;
+		}
+		return p;
+	}
+
+	private static long writeIntArray(long p, int[] values, int count)
+	{
+		if (values == null)
+		{
+			return p;
+		}
+		int n = Math.min(count, values.length);
+		for (int i = 0; i < n; i++)
+		{
+			MemoryUtil.memPutInt(p, values[i]);
+			p += Integer.BYTES;
+		}
+		return p;
+	}
+
+	private static long writeShortArray(long p, short[] values, int count)
+	{
+		if (values == null)
+		{
+			return p;
+		}
+		int n = Math.min(count, values.length);
+		for (int i = 0; i < n; i++)
+		{
+			MemoryUtil.memPutShort(p, values[i]);
+			p += Short.BYTES;
+		}
+		return p;
+	}
+
+	private static long writeByteArray(long p, byte[] values, int count)
+	{
+		if (values == null)
+		{
+			return p;
+		}
+		int n = Math.min(count, values.length);
+		for (int i = 0; i < n; i++)
+		{
+			MemoryUtil.memPutByte(p++, values[i]);
+		}
+		return p;
+	}
+
+	private static final class ModelCacheEntry
+	{
+		ModelCacheEntry next;
+		final int hash;
+		final int faceCount;
+		final int vertexCount;
+		final Object verticesX, verticesY, verticesZ;
+		final Object faceIndices1, faceIndices2, faceIndices3;
+		final Object faceColors1, faceColors2, faceColors3;
+		final Object faceTextures, faceTransparencies, faceBias;
+		final Object textureFaces, texIndices1, texIndices2, texIndices3;
+		long meshOffset = -1L;
+		int meshBytes;
+		final int transparentFaces;
+		final boolean hasTransparentFaces;
+
+		ModelCacheEntry(int hash, int faceCount, int vertexCount,
+			Object verticesX, Object verticesY, Object verticesZ,
+			Object faceIndices1, Object faceIndices2, Object faceIndices3,
+			Object faceColors1, Object faceColors2, Object faceColors3,
+			Object faceTextures, Object faceTransparencies, Object faceBias,
+			Object textureFaces, Object texIndices1, Object texIndices2, Object texIndices3,
+			ModelCacheEntry next)
+		{
+			this.next = next;
+			this.hash = hash;
+			this.faceCount = faceCount;
+			this.vertexCount = vertexCount;
+			this.verticesX = verticesX;
+			this.verticesY = verticesY;
+			this.verticesZ = verticesZ;
+			this.faceIndices1 = faceIndices1;
+			this.faceIndices2 = faceIndices2;
+			this.faceIndices3 = faceIndices3;
+			this.faceColors1 = faceColors1;
+			this.faceColors2 = faceColors2;
+			this.faceColors3 = faceColors3;
+			this.faceTextures = faceTextures;
+			this.faceTransparencies = faceTransparencies;
+			this.faceBias = faceBias;
+			this.textureFaces = textureFaces;
+			this.texIndices1 = texIndices1;
+			this.texIndices2 = texIndices2;
+			this.texIndices3 = texIndices3;
+			this.transparentFaces = countTransparentFaces(faceCount, (byte[]) faceTransparencies);
+			this.hasTransparentFaces = transparentFaces > 0;
+		}
+
+		void uploadMesh(ModelMeshArena arena)
+		{
+			int bytes = meshBytes();
+			long offset = arena.allocate(bytes);
+			if (offset < 0L)
+			{
+				arena.reset();
+				offset = arena.allocate(bytes);
+				if (offset < 0L)
+				{
+					return;
+				}
+			}
+			long p = arena.address() + offset;
+			p = writeFloatArray(p, (float[]) verticesX, vertexCount);
+			p = align4(p);
+			p = writeFloatArray(p, (float[]) verticesY, vertexCount);
+			p = align4(p);
+			p = writeFloatArray(p, (float[]) verticesZ, vertexCount);
+			p = align4(p);
+			p = writeIntArray(p, (int[]) faceIndices1, faceCount);
+			p = align4(p);
+			p = writeIntArray(p, (int[]) faceIndices2, faceCount);
+			p = align4(p);
+			p = writeIntArray(p, (int[]) faceIndices3, faceCount);
+			p = align4(p);
+			p = writeIntArray(p, (int[]) faceColors1, faceCount);
+			p = align4(p);
+			p = writeIntArray(p, (int[]) faceColors2, faceCount);
+			p = align4(p);
+			p = writeIntArray(p, (int[]) faceColors3, faceCount);
+			p = align4(p);
+			p = writeShortArray(p, (short[]) faceTextures, faceCount);
+			p = align4(p);
+			p = writeByteArray(p, (byte[]) faceTransparencies, faceCount);
+			p = align4(p);
+			p = writeByteArray(p, (byte[]) faceBias, faceCount);
+			p = align4(p);
+			p = writeByteArray(p, (byte[]) textureFaces, arrayLength(textureFaces));
+			p = align4(p);
+			p = writeIntArray(p, (int[]) texIndices1, arrayLength(texIndices1));
+			p = align4(p);
+			p = writeIntArray(p, (int[]) texIndices2, arrayLength(texIndices2));
+			p = align4(p);
+			writeIntArray(p, (int[]) texIndices3, arrayLength(texIndices3));
+			arena.flush(offset, bytes);
+			meshOffset = offset;
+			meshBytes = bytes;
+		}
+
+		private int meshBytes()
+		{
+			int bytes = 0;
+			bytes = addAligned(bytes, floatBytes(verticesX, vertexCount));
+			bytes = addAligned(bytes, floatBytes(verticesY, vertexCount));
+			bytes = addAligned(bytes, floatBytes(verticesZ, vertexCount));
+			bytes = addAligned(bytes, intBytes(faceIndices1, faceCount));
+			bytes = addAligned(bytes, intBytes(faceIndices2, faceCount));
+			bytes = addAligned(bytes, intBytes(faceIndices3, faceCount));
+			bytes = addAligned(bytes, intBytes(faceColors1, faceCount));
+			bytes = addAligned(bytes, intBytes(faceColors2, faceCount));
+			bytes = addAligned(bytes, intBytes(faceColors3, faceCount));
+			bytes = addAligned(bytes, shortBytes(faceTextures, faceCount));
+			bytes = addAligned(bytes, byteBytes(faceTransparencies, faceCount));
+			bytes = addAligned(bytes, byteBytes(faceBias, faceCount));
+			bytes = addAligned(bytes, byteBytes(textureFaces, arrayLength(textureFaces)));
+			bytes = addAligned(bytes, intBytes(texIndices1, arrayLength(texIndices1)));
+			bytes = addAligned(bytes, intBytes(texIndices2, arrayLength(texIndices2)));
+			bytes = addAligned(bytes, intBytes(texIndices3, arrayLength(texIndices3)));
+			return bytes;
+		}
+
+		boolean matches(int hash, int faceCount, int vertexCount,
+			Object verticesX, Object verticesY, Object verticesZ,
+			Object faceIndices1, Object faceIndices2, Object faceIndices3,
+			Object faceColors1, Object faceColors2, Object faceColors3,
+			Object faceTextures, Object faceTransparencies, Object faceBias,
+			Object textureFaces, Object texIndices1, Object texIndices2, Object texIndices3)
+		{
+			return this.hash == hash
+				&& this.faceCount == faceCount
+				&& this.vertexCount == vertexCount
+				&& this.verticesX == verticesX
+				&& this.verticesY == verticesY
+				&& this.verticesZ == verticesZ
+				&& this.faceIndices1 == faceIndices1
+				&& this.faceIndices2 == faceIndices2
+				&& this.faceIndices3 == faceIndices3
+				&& this.faceColors1 == faceColors1
+				&& this.faceColors2 == faceColors2
+				&& this.faceColors3 == faceColors3
+				&& this.faceTextures == faceTextures
+				&& this.faceTransparencies == faceTransparencies
+				&& this.faceBias == faceBias
+				&& this.textureFaces == textureFaces
+				&& this.texIndices1 == texIndices1
+				&& this.texIndices2 == texIndices2
+				&& this.texIndices3 == texIndices3;
+		}
+	}
+
+	private static final class ModelMeshArena implements AutoCloseable
+	{
+		private final Buffer buffer;
+		private final long address;
+		private final long capacity;
+		private long used;
+
+		ModelMeshArena(VulkanDevice device, long capacity)
+		{
+			this.capacity = capacity;
+			this.buffer = new Buffer(device, capacity, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+			buffer.mapPersistent();
+			this.address = MemoryUtil.memAddress(buffer.mappedByteBuffer());
+		}
+
+		long allocate(int bytes)
+		{
+			int aligned = align4(bytes);
+			if (aligned <= 0 || used > capacity - aligned)
+			{
+				return -1L;
+			}
+			long offset = used;
+			used += aligned;
+			return offset;
+		}
+
+		void reset()
+		{
+			used = 0L;
+		}
+
+		void flush(long offset, int bytes)
+		{
+			buffer.flushRangeIfNeeded(offset, align4(bytes));
+		}
+
+		long address()
+		{
+			return address;
+		}
+
+		long usedBytes()
+		{
+			return used;
+		}
+
+		long capacityBytes()
+		{
+			return capacity;
+		}
+
+		@Override
+		public void close()
+		{
+			buffer.close();
+		}
+	}
+
+	private static final class ModelInstanceBuffer implements AutoCloseable
+	{
+		private final Buffer buffer;
+		private final long address;
+		private long frameAddress;
+
+		ModelInstanceBuffer(VulkanDevice device, long bytes)
+		{
+			this.buffer = new Buffer(device, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+			buffer.mapPersistent();
+			this.address = MemoryUtil.memAddress(buffer.mappedByteBuffer());
+		}
+
+		void beginFrame(int slot)
+		{
+			frameAddress = address + (long) slot * MAX_MODEL_INSTANCES * MODEL_INSTANCE_STRIDE;
+		}
+
+		void write(int index, ModelCacheEntry model, int orient, int worldX, int worldY, int worldZ, int renderMode)
+		{
+			long p = frameAddress + (long) index * MODEL_INSTANCE_STRIDE;
+			MemoryUtil.memPutLong(p, model.meshOffset);
+			MemoryUtil.memPutInt(p + 8, model.meshBytes);
+			MemoryUtil.memPutInt(p + 12, model.faceCount);
+			MemoryUtil.memPutInt(p + 16, model.vertexCount);
+			MemoryUtil.memPutInt(p + 20, orient);
+			MemoryUtil.memPutInt(p + 24, worldX);
+			MemoryUtil.memPutInt(p + 28, worldY);
+			MemoryUtil.memPutInt(p + 32, worldZ);
+			MemoryUtil.memPutInt(p + 36, renderMode);
+		}
+
+		@Override
+		public void close()
+		{
+			buffer.close();
+		}
+	}
+
 	/**
 	 * Drops the dynamic suffix; static layers preserved. Waits on this
 	 * slot's in-flight fence first — without it, CPU writes race the GPU
@@ -366,6 +854,10 @@ final class SceneRenderer implements AutoCloseable
 		int slot = sync.currentFrame();
 		vertexCount = overlayNextVertex[slot];
 		useFrameWriteArena(slot, vertexCount);
+		modelInstanceBuffer.beginFrame(slot);
+		modelInstanceCount = 0;
+		modelInstanceOverflowCount = 0;
+		modelInstanceFrameActive = true;
 		overflowed = false;
 		priorityRangeCount = 0;
 		dynamicOpaqueEnd = -1;
@@ -473,6 +965,7 @@ final class SceneRenderer implements AutoCloseable
 		tileRoofCount = 0;
 		clearOverlayRanges();
 		pendingRenderables.clear();
+		clearModelCache();
 
 		Tile[][][] tiles = scene.getTiles();
 		if (tiles == null) return;
@@ -1168,8 +1661,10 @@ final class SceneRenderer implements AutoCloseable
 		boolean detailedStats = stats.isDetailedModelStats();
 		boolean prioritySort = renderMode == Renderable.RENDERMODE_SORTED_NO_DEPTH;
 		int priorityStart = prioritySort ? vertexCount : -1;
-		boolean needsFaceSort = prioritySort || hasTransparentFaces(m);
-		if (!needsFaceSort && m.getFaceCount() <= OPAQUE_UNSORTED_FACE_THRESHOLD)
+		ModelCacheEntry modelInfo = modelInfo(m);
+		recordModelInstance(modelInfo, orient, worldX, worldY, worldZ, renderMode);
+		boolean needsFaceSort = prioritySort || modelInfo.hasTransparentFaces;
+		if (!needsFaceSort && modelInfo.faceCount <= OPAQUE_UNSORTED_FACE_THRESHOLD)
 		{
 			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
 			recordPriorityRange(priorityStart);
@@ -1371,7 +1866,7 @@ final class SceneRenderer implements AutoCloseable
 			if (needsFaceSort)
 			{
 				stats.fullSortModels.incrementAndGet();
-				stats.fullSortTransparentFaces.addAndGet(countTransparentFaces(m));
+				stats.fullSortTransparentFaces.addAndGet(modelInfo.transparentFaces);
 			}
 			else
 			{
@@ -1642,15 +2137,14 @@ final class SceneRenderer implements AutoCloseable
 		return true;
 	}
 
-	private static int countTransparentFaces(Model m)
+	private static int countTransparentFaces(int faceCount, byte[] transparencies)
 	{
-		byte[] transparencies = m.getFaceTransparencies();
 		if (transparencies == null)
 		{
 			return 0;
 		}
 		int transparent = 0;
-		int faces = Math.min(m.getFaceCount(), transparencies.length);
+		int faces = Math.min(faceCount, transparencies.length);
 		for (int i = 0; i < faces; i++)
 		{
 			if (transparencies[i] != 0)
@@ -1659,24 +2153,6 @@ final class SceneRenderer implements AutoCloseable
 			}
 		}
 		return transparent;
-	}
-
-	private static boolean hasTransparentFaces(Model m)
-	{
-		byte[] transparencies = m.getFaceTransparencies();
-		if (transparencies == null)
-		{
-			return false;
-		}
-		int faces = Math.min(m.getFaceCount(), transparencies.length);
-		for (int i = 0; i < faces; i++)
-		{
-			if (transparencies[i] != 0)
-			{
-				return true;
-			}
-		}
-		return false;
 	}
 
 	private final float[] uvScratch = new float[6];
@@ -2199,6 +2675,8 @@ final class SceneRenderer implements AutoCloseable
 	public void close()
 	{
 		vkDeviceWaitIdle(device.handle());
+		modelInstanceBuffer.close();
+		modelMeshArena.close();
 		vbuf.close();
 		fillPipeline.close();
 		alphaPipeline.close();
