@@ -144,6 +144,12 @@ final class DefaultVulkanSceneRenderer implements VulkanSceneRenderer
 	}
 
 	@Override
+	public void setModelComputeReplacement(boolean enabled)
+	{
+		sceneRenderer.setModelComputeReplacement(enabled);
+	}
+
+	@Override
 	public void recordDraw(VulkanFrameContext frame)
 	{
 		sceneRenderer.recordDraw(frame.commandBuffer(), frame.sceneMvp(), frame.brightness(),

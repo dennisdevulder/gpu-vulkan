@@ -96,10 +96,9 @@ final class SceneRenderer implements AutoCloseable
 	private static final int MODEL_CACHE_BUCKET_MASK = MODEL_CACHE_BUCKETS - 1;
 	private static final long MODEL_MESH_ARENA_BYTES = 64L * 1024L * 1024L;
 	private static final int MAX_MODEL_INSTANCES = 65_536;
-	private static final int MODEL_INSTANCE_STRIDE = 40;
+	private static final int MODEL_INSTANCE_STRIDE = 48;
 	private static final int MODEL_MESH_HEADER_INTS = 16;
 	private static final int MODEL_MESH_HEADER_BYTES = MODEL_MESH_HEADER_INTS * Integer.BYTES;
-	private static final int MODEL_COMPUTE_FACE_SLOTS_PER_INSTANCE = 16;
 	private static final long MODEL_COMPUTE_OUTPUT_FRAME_BYTES = 32L * 1024L * 1024L;
 	private static final int MODEL_COMPUTE_OUTPUT_FACE_SLOTS =
 		(int) (MODEL_COMPUTE_OUTPUT_FRAME_BYTES / (3L * ScenePipeline.VERTEX_STRIDE));
@@ -121,7 +120,17 @@ final class SceneRenderer implements AutoCloseable
 	private final int slotBytes;
 	private final DrawCallbackStats stats;
 	private volatile boolean modelComputeDebugDraw;
+	private volatile boolean modelComputeReplacement;
 	private int modelComputeDebugFaceSlots;
+	private int modelComputeClippedFaces;
+	private int modelComputeTrackedFaces;
+	private int modelComputeCandidateFaces;
+	private int modelComputeSortedFaces;
+	private int modelComputeTexturedFaces;
+	private int modelComputeBiasedFaces;
+	private int modelComputeOverrideFaces;
+	private int modelComputeOutputFaceCursor;
+	private int modelComputeMaxFacesPerInstance;
 	private boolean modelComputeDebugHasOrigin;
 	private int modelComputeDebugX;
 	private int modelComputeDebugY;
@@ -300,7 +309,7 @@ final class SceneRenderer implements AutoCloseable
 			true, true, false, renderPass.samples(), alphaToCoverage);
 		this.modelComputeDebugPipeline = ENABLE_MODEL_COMPUTE_PROTOTYPE
 			? new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL,
-				false, false, true, renderPass.samples(), false, true)
+				true, false, true, renderPass.samples(), false, true)
 			: null;
 		// fillModeNonSolid is required for VK_POLYGON_MODE_LINE; without it
 		// (llvmpipe, some embedded SoCs) wireframe collapses to FILL.
@@ -335,6 +344,11 @@ final class SceneRenderer implements AutoCloseable
 	void setModelComputeDebugDraw(boolean enabled)
 	{
 		modelComputeDebugDraw = enabled;
+	}
+
+	void setModelComputeReplacement(boolean enabled)
+	{
+		modelComputeReplacement = enabled;
 	}
 
 	void setLevelRange(int minLevel, int maxLevel)
@@ -376,6 +390,13 @@ final class SceneRenderer implements AutoCloseable
 		metrics.modelComputeOutputBytes += modelComputeOutputBuffer == null ? 0L : modelComputeOutputBuffer.totalBytes();
 		metrics.modelComputeDebugDraw |= modelComputeDebugDraw;
 		metrics.modelComputeDebugFaces += modelComputeDebugFaceSlots;
+		metrics.modelComputeClippedFaces += modelComputeClippedFaces;
+		metrics.modelComputeTrackedFaces += modelComputeTrackedFaces;
+		metrics.modelComputeCandidateFaces += modelComputeCandidateFaces;
+		metrics.modelComputeSortedFaces += modelComputeSortedFaces;
+		metrics.modelComputeTexturedFaces += modelComputeTexturedFaces;
+		metrics.modelComputeBiasedFaces += modelComputeBiasedFaces;
+		metrics.modelComputeOverrideFaces += modelComputeOverrideFaces;
 		metrics.overflowed |= overflowed;
 		metrics.sceneBufferBytes += TOTAL_BUFFER_BYTES;
 	}
@@ -416,7 +437,7 @@ final class SceneRenderer implements AutoCloseable
 		return true;
 	}
 
-	private ModelCacheEntry modelInfo(Model model)
+	private ModelCacheEntry modelInfo(Model model, boolean uploadMesh)
 	{
 		int faceCount = model.getFaceCount();
 		int vertexCount = model.getVerticesCount();
@@ -466,6 +487,10 @@ final class SceneRenderer implements AutoCloseable
 				textureFaces, texIndices1, texIndices2, texIndices3))
 			{
 				modelCacheHits++;
+				if (uploadMesh && entry.meshOffset < 0L)
+				{
+					entry.uploadMesh(modelMeshArena);
+				}
 				return entry;
 			}
 		}
@@ -483,7 +508,10 @@ final class SceneRenderer implements AutoCloseable
 			faceTextures, faceTransparencies, faceBias,
 			textureFaces, texIndices1, texIndices2, texIndices3,
 			modelCacheBuckets[bucket]);
-		cached.uploadMesh(modelMeshArena);
+		if (uploadMesh)
+		{
+			cached.uploadMesh(modelMeshArena);
+		}
 		modelCacheBuckets[bucket] = cached;
 		modelCacheSize++;
 		return cached;
@@ -512,7 +540,23 @@ final class SceneRenderer implements AutoCloseable
 			modelInstanceOverflowCount++;
 			return;
 		}
-		modelInstanceBuffer.write(modelInstanceCount, modelInfo, orient, worldX, worldY, worldZ, renderMode);
+		int outputFaceOffset = modelComputeOutputFaceCursor;
+		int outputFaceCount = Math.max(0, modelInfo.faceCount);
+		int remainingOutputFaces = MODEL_COMPUTE_OUTPUT_FACE_SLOTS - modelComputeOutputFaceCursor;
+		if (remainingOutputFaces <= 0)
+		{
+			modelComputeClippedFaces += outputFaceCount;
+			outputFaceCount = 0;
+		}
+		else if (outputFaceCount > remainingOutputFaces)
+		{
+			modelComputeClippedFaces += outputFaceCount - remainingOutputFaces;
+			outputFaceCount = remainingOutputFaces;
+		}
+		modelComputeOutputFaceCursor += outputFaceCount;
+		modelComputeMaxFacesPerInstance = Math.max(modelComputeMaxFacesPerInstance, outputFaceCount);
+		modelInstanceBuffer.write(modelInstanceCount, modelInfo, orient, worldX, worldY, worldZ, renderMode,
+			outputFaceOffset, outputFaceCount);
 		if (!modelComputeDebugHasOrigin)
 		{
 			modelComputeDebugHasOrigin = true;
@@ -657,6 +701,8 @@ final class SceneRenderer implements AutoCloseable
 		int meshBytes;
 		final int transparentFaces;
 		final boolean hasTransparentFaces;
+		final int texturedFaces;
+		final int biasedFaces;
 
 		ModelCacheEntry(int hash, int faceCount, int vertexCount,
 			Object verticesX, Object verticesY, Object verticesZ,
@@ -688,6 +734,8 @@ final class SceneRenderer implements AutoCloseable
 			this.texIndices3 = texIndices3;
 			this.transparentFaces = countTransparentFaces(faceCount, (byte[]) faceTransparencies);
 			this.hasTransparentFaces = transparentFaces > 0;
+			this.texturedFaces = countTexturedFaces(faceCount, (short[]) faceTextures);
+			this.biasedFaces = countNonZeroBytes(faceCount, (byte[]) faceBias);
 		}
 
 		void uploadMesh(ModelMeshArena arena)
@@ -919,7 +967,8 @@ final class SceneRenderer implements AutoCloseable
 			return buffer.handle();
 		}
 
-		void write(int index, ModelCacheEntry model, int orient, int worldX, int worldY, int worldZ, int renderMode)
+		void write(int index, ModelCacheEntry model, int orient, int worldX, int worldY, int worldZ, int renderMode,
+			int outputFaceOffset, int outputFaceCount)
 		{
 			long p = frameAddress + (long) index * MODEL_INSTANCE_STRIDE;
 			MemoryUtil.memPutLong(p, model.meshOffset);
@@ -931,6 +980,8 @@ final class SceneRenderer implements AutoCloseable
 			MemoryUtil.memPutInt(p + 28, worldY);
 			MemoryUtil.memPutInt(p + 32, worldZ);
 			MemoryUtil.memPutInt(p + 36, renderMode);
+			MemoryUtil.memPutInt(p + 40, outputFaceOffset);
+			MemoryUtil.memPutInt(p + 44, outputFaceCount);
 		}
 
 		@Override
@@ -1001,6 +1052,15 @@ final class SceneRenderer implements AutoCloseable
 		modelInstanceOverflowCount = 0;
 		modelInstanceFrameActive = true;
 		modelComputeDebugFaceSlots = 0;
+		modelComputeClippedFaces = 0;
+		modelComputeTrackedFaces = 0;
+		modelComputeCandidateFaces = 0;
+		modelComputeSortedFaces = 0;
+		modelComputeTexturedFaces = 0;
+		modelComputeBiasedFaces = 0;
+		modelComputeOverrideFaces = 0;
+		modelComputeOutputFaceCursor = 0;
+		modelComputeMaxFacesPerInstance = 0;
 		modelComputeDebugHasOrigin = false;
 		overflowed = false;
 		priorityRangeCount = 0;
@@ -1805,9 +1865,44 @@ final class SceneRenderer implements AutoCloseable
 		boolean detailedStats = stats.isDetailedModelStats();
 		boolean prioritySort = renderMode == Renderable.RENDERMODE_SORTED_NO_DEPTH;
 		int priorityStart = prioritySort ? vertexCount : -1;
-		ModelCacheEntry modelInfo = modelInfo(m);
-		recordModelInstance(modelInfo, orient, worldX, worldY, worldZ, renderMode);
+		ModelCacheEntry modelInfo = modelInfo(m, false);
 		boolean needsFaceSort = prioritySort || modelInfo.hasTransparentFaces;
+		modelComputeTrackedFaces += modelInfo.faceCount;
+		if (needsFaceSort)
+		{
+			modelComputeSortedFaces += modelInfo.faceCount;
+		}
+		if (modelInfo.texturedFaces > 0)
+		{
+			modelComputeTexturedFaces += modelInfo.faceCount;
+		}
+		if (modelInfo.biasedFaces > 0)
+		{
+			modelComputeBiasedFaces += modelInfo.faceCount;
+		}
+		if ((m.getOverrideAmount() & 0xFF) != 0)
+		{
+			modelComputeOverrideFaces += modelInfo.faceCount;
+		}
+		if (isModelComputeCandidate(m, modelInfo, needsFaceSort))
+		{
+			modelComputeCandidateFaces += modelInfo.faceCount;
+		}
+		boolean replaceWithCompute = modelComputeReplacement && isModelComputeCandidate(m, modelInfo, needsFaceSort);
+		boolean recordForCompute = modelComputeDebugDraw || replaceWithCompute;
+		if (recordForCompute)
+		{
+			if (modelInfo.meshOffset < 0L)
+			{
+				modelInfo.uploadMesh(modelMeshArena);
+			}
+			recordModelInstance(modelInfo, orient, worldX, worldY, worldZ, renderMode);
+		}
+		if (replaceWithCompute)
+		{
+			recordPriorityRange(priorityStart);
+			return;
+		}
 		if (!needsFaceSort && modelInfo.faceCount <= OPAQUE_UNSORTED_FACE_THRESHOLD)
 		{
 			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
@@ -2299,6 +2394,49 @@ final class SceneRenderer implements AutoCloseable
 		return transparent;
 	}
 
+	private static int countTexturedFaces(int faceCount, short[] textures)
+	{
+		if (textures == null)
+		{
+			return 0;
+		}
+		int textured = 0;
+		int faces = Math.min(faceCount, textures.length);
+		for (int i = 0; i < faces; i++)
+		{
+			if (textures[i] != -1)
+			{
+				textured++;
+			}
+		}
+		return textured;
+	}
+
+	private static int countNonZeroBytes(int faceCount, byte[] values)
+	{
+		if (values == null)
+		{
+			return 0;
+		}
+		int count = 0;
+		int faces = Math.min(faceCount, values.length);
+		for (int i = 0; i < faces; i++)
+		{
+			if (values[i] != 0)
+			{
+				count++;
+			}
+		}
+		return count;
+	}
+
+	private static boolean isModelComputeCandidate(Model model, ModelCacheEntry info, boolean needsFaceSort)
+	{
+		return !needsFaceSort
+			&& info.texturedFaces == 0
+			&& (model.getOverrideAmount() & 0xFF) == 0;
+	}
+
 	private final float[] uvScratch = new float[6];
 
 	/**
@@ -2492,6 +2630,8 @@ final class SceneRenderer implements AutoCloseable
 				layerStart = regionEnd;
 			}
 
+			drawModelComputeReplacement(cmd, slot, vertPush, fragPush);
+
 			if (priorityRangeCount > 0)
 			{
 				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, priorityColorPipeline.handle());
@@ -2522,8 +2662,8 @@ final class SceneRenderer implements AutoCloseable
 			return;
 		}
 		modelComputePipeline.recordDispatch(cmd, sync.currentFrame(), modelInstanceCount,
-			MODEL_COMPUTE_FACE_SLOTS_PER_INSTANCE, MODEL_COMPUTE_OUTPUT_FACE_SLOTS);
-		if (modelComputeDebugDraw)
+			modelComputeMaxFacesPerInstance, modelComputeDebugDraw && !modelComputeReplacement);
+		if (modelComputeDebugDraw || modelComputeReplacement)
 		{
 			try (MemoryStack stack = stackPush())
 			{
@@ -2547,12 +2687,12 @@ final class SceneRenderer implements AutoCloseable
 
 	private void drawModelComputeDebug(VkCommandBuffer cmd, int slot, ByteBuffer vertPush, ByteBuffer fragPush)
 	{
-		if (!modelComputeDebugDraw || modelComputeOutputBuffer == null || modelComputeDebugPipeline == null)
+		if (!modelComputeDebugDraw || modelComputeReplacement
+			|| modelComputeOutputBuffer == null || modelComputeDebugPipeline == null)
 		{
 			return;
 		}
-		int faceSlots = Math.min(modelInstanceCount * MODEL_COMPUTE_FACE_SLOTS_PER_INSTANCE,
-			MODEL_COMPUTE_OUTPUT_FACE_SLOTS);
+		int faceSlots = modelComputeOutputFaceCursor;
 		modelComputeDebugFaceSlots = faceSlots;
 		if (faceSlots <= 0)
 		{
@@ -2568,6 +2708,35 @@ final class SceneRenderer implements AutoCloseable
 				modelComputeDebugPipeline.layout(), 0, stack.longs(descriptorSet), null);
 			vkCmdPushConstants(cmd, modelComputeDebugPipeline.layout(), VK_SHADER_STAGE_VERTEX_BIT, 0, vertPush);
 			vkCmdPushConstants(cmd, modelComputeDebugPipeline.layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
+			vkCmdDraw(cmd, faceSlots * 3, 1, 0, 0);
+			vkCmdBindVertexBuffers(cmd, 0,
+				stack.longs(vbuf.handle()),
+				stack.longs(0L));
+		}
+	}
+
+	private void drawModelComputeReplacement(VkCommandBuffer cmd, int slot, ByteBuffer vertPush, ByteBuffer fragPush)
+	{
+		if (!modelComputeReplacement || modelComputeOutputBuffer == null || fillPipeline == null)
+		{
+			return;
+		}
+		int faceSlots = modelComputeOutputFaceCursor;
+		modelComputeDebugFaceSlots = faceSlots;
+		if (faceSlots <= 0)
+		{
+			return;
+		}
+		try (MemoryStack stack = stackPush())
+		{
+			vkCmdBindVertexBuffers(cmd, 0,
+				stack.longs(modelComputeOutputBuffer.handle()),
+				stack.longs(modelComputeOutputBuffer.frameOffset(slot)));
+			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fillPipeline.handle());
+			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+				fillPipeline.layout(), 0, stack.longs(descriptorSet), null);
+			vkCmdPushConstants(cmd, fillPipeline.layout(), VK_SHADER_STAGE_VERTEX_BIT, 0, vertPush);
+			vkCmdPushConstants(cmd, fillPipeline.layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
 			vkCmdDraw(cmd, faceSlots * 3, 1, 0, 0);
 			vkCmdBindVertexBuffers(cmd, 0,
 				stack.longs(vbuf.handle()),

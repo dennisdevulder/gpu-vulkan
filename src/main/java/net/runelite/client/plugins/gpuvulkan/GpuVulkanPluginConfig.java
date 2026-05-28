@@ -220,6 +220,15 @@ public interface GpuVulkanPluginConfig extends Config
 	)
 	default boolean modelComputeDebugDraw() { return false; }
 
+	@ConfigItem(
+		keyName = "modelComputeReplacement",
+		name = "Model compute replacement",
+		description = "Experimental: replace eligible dynamic CPU model emission with GPU-generated Vulkan vertices. Development only; enable when testing.",
+		section = DEBUG_SECTION,
+		position = 2
+	)
+	default boolean modelComputeReplacement() { return false; }
+
 	@ConfigSection(
 		name = "Wireframe",
 		description = "Render individual scene layers as wireframe. Each toggle is independent.",

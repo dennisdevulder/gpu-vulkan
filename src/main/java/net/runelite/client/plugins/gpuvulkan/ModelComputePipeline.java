@@ -74,7 +74,7 @@ final class ModelComputePipeline implements AutoCloseable
 			pc.get(0)
 				.stageFlags(VK_SHADER_STAGE_COMPUTE_BIT)
 				.offset(0)
-				.size(8);
+				.size(12);
 
 			VkPipelineLayoutCreateInfo layoutInfo = VkPipelineLayoutCreateInfo.calloc(stack)
 				.sType$Default()
@@ -116,14 +116,13 @@ final class ModelComputePipeline implements AutoCloseable
 		}
 	}
 
-	void recordDispatch(VkCommandBuffer cmd, int frameSlot, int instanceCount, int faceSlotsPerInstance,
-		int outputFaceSlots)
+	void recordDispatch(VkCommandBuffer cmd, int frameSlot, int instanceCount, int maxFacesPerInstance,
+		boolean debugVisual)
 	{
-		if (instanceCount <= 0)
+		if (instanceCount <= 0 || maxFacesPerInstance <= 0)
 		{
 			return;
 		}
-		int workItems = Math.min(instanceCount * faceSlotsPerInstance, outputFaceSlots);
 
 		try (MemoryStack stack = stackPush())
 		{
@@ -131,12 +130,13 @@ final class ModelComputePipeline implements AutoCloseable
 			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
 				pipelineLayout, 0, stack.longs(descriptorSets[frameSlot]), null);
 
-			ByteBuffer push = stack.malloc(8);
+			ByteBuffer push = stack.malloc(12);
 			push.putInt(instanceCount);
-			push.putInt(faceSlotsPerInstance);
+			push.putInt(maxFacesPerInstance);
+			push.putInt(debugVisual ? 1 : 0);
 			push.flip();
 			vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, push);
-			vkCmdDispatch(cmd, (workItems + 63) / 64, 1, 1);
+			vkCmdDispatch(cmd, (maxFacesPerInstance + 63) / 64, instanceCount, 1);
 		}
 	}
 

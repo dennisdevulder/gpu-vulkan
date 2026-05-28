@@ -14,6 +14,8 @@ struct ModelInstance
 	int worldY;
 	int worldZ;
 	int renderMode;
+	int outputFaceOffset;
+	int outputFaceCount;
 };
 
 layout(set = 0, binding = 0, std430) readonly buffer ModelMeshData
@@ -35,6 +37,7 @@ layout(push_constant) uniform Push
 {
 	uint instanceCount;
 	uint faceSlotsPerInstance;
+	uint debugVisual;
 } pc;
 
 const float PI2_OVER_2048 = 0.0030679615757712823;
@@ -45,6 +48,10 @@ const uint HEADER_FACE_A = 3u;
 const uint HEADER_FACE_B = 4u;
 const uint HEADER_FACE_C = 5u;
 const uint HEADER_COLOR_A = 6u;
+const uint HEADER_COLOR_B = 7u;
+const uint HEADER_COLOR_C = 8u;
+const uint HEADER_TRANSPARENCY = 10u;
+const uint HEADER_BIAS = 11u;
 
 float readFloat(uint meshBaseWord, uint offsetBytes, uint index)
 {
@@ -56,7 +63,15 @@ int readInt(uint meshBaseWord, uint offsetBytes, uint index)
 	return int(meshWords[meshBaseWord + (offsetBytes >> 2) + index]);
 }
 
-void writeVertex(uint vertexWordBase, vec3 position, vec3 color, float light)
+int readByte(uint meshBaseWord, uint offsetBytes, uint index)
+{
+	uint byteOffset = offsetBytes + index;
+	uint word = meshWords[meshBaseWord + (byteOffset >> 2)];
+	uint shift = (byteOffset & 3u) * 8u;
+	return int((word >> shift) & 0xffu);
+}
+
+void writeVertex(uint vertexWordBase, vec3 position, vec3 color, float light, uint texLayer)
 {
 	vertexWords[vertexWordBase + 0u] = floatBitsToUint(position.x);
 	vertexWords[vertexWordBase + 1u] = floatBitsToUint(position.y);
@@ -69,7 +84,15 @@ void writeVertex(uint vertexWordBase, vec3 position, vec3 color, float light)
 	vertexWords[vertexWordBase + 8u] = floatBitsToUint(light);
 	vertexWords[vertexWordBase + 9u] = 0u;
 	vertexWords[vertexWordBase + 10u] = 0u;
-	vertexWords[vertexWordBase + 11u] = 0u;
+	vertexWords[vertexWordBase + 11u] = texLayer;
+}
+
+void writeDegenerateFace(uint vertexWordBase)
+{
+	vec3 zero = vec3(0.0);
+	writeVertex(vertexWordBase, zero, zero, 0.0, 0u);
+	writeVertex(vertexWordBase + 12u, zero, zero, 0.0, 0u);
+	writeVertex(vertexWordBase + 24u, zero, zero, 0.0, 0u);
 }
 
 vec3 transformVertex(float localX, float localY, float localZ, float orient, vec3 world)
@@ -82,11 +105,29 @@ vec3 transformVertex(float localX, float localY, float localZ, float orient, vec
 	return vec3(x + world.x, localY + world.y, z + world.z);
 }
 
+vec3 hslToRgb(int hsl)
+{
+	int hue = (hsl >> 10) & 0x3f;
+	int sat = (hsl >> 7) & 0x07;
+	int lum = hsl & 0x7f;
+	float h = float(hue) / 64.0 + 0.0078125;
+	float s = float(sat) / 8.0 + 0.0625;
+	float l = float(lum) / 128.0;
+	float q = (l < 0.5) ? l * (1.0 + s) : l + s - l * s;
+	float p = 2.0 * l - q;
+	vec3 t = vec3(h + 1.0 / 3.0, h, h - 1.0 / 3.0);
+	t = mix(t, t + 1.0, lessThan(t, vec3(0.0)));
+	t = mix(t, t - 1.0, greaterThan(t, vec3(1.0)));
+	vec3 rgb = mix(vec3(p), vec3(q), step(t, vec3(0.5)));
+	rgb = mix(rgb, p + (q - p) * (2.0 / 3.0 - t) * 6.0, step(t, vec3(2.0 / 3.0)));
+	rgb = mix(rgb, p + (q - p) * 6.0 * t, step(t, vec3(1.0 / 6.0)));
+	return rgb;
+}
+
 void main()
 {
-	uint instanceId = gl_GlobalInvocationID.x;
-	uint faceSlot = instanceId % pc.faceSlotsPerInstance;
-	instanceId /= pc.faceSlotsPerInstance;
+	uint faceSlot = gl_GlobalInvocationID.x;
+	uint instanceId = gl_GlobalInvocationID.y;
 	if (instanceId >= pc.instanceCount)
 	{
 		return;
@@ -97,7 +138,11 @@ void main()
 	{
 		return;
 	}
-	uint vertexBase = ((instanceId * pc.faceSlotsPerInstance) + faceSlot) * 36u;
+	if (faceSlot >= uint(instance.outputFaceCount) || faceSlot >= pc.faceSlotsPerInstance)
+	{
+		return;
+	}
+	uint vertexBase = (uint(instance.outputFaceOffset) + faceSlot) * 36u;
 
 	uint meshBaseWord = instance.meshOffsetLo >> 2;
 	uint verticesXOffset = meshWords[meshBaseWord + HEADER_VERTICES_X];
@@ -107,6 +152,10 @@ void main()
 	uint faceBOffset = meshWords[meshBaseWord + HEADER_FACE_B];
 	uint faceCOffset = meshWords[meshBaseWord + HEADER_FACE_C];
 	uint colorAOffset = meshWords[meshBaseWord + HEADER_COLOR_A];
+	uint colorBOffset = meshWords[meshBaseWord + HEADER_COLOR_B];
+	uint colorCOffset = meshWords[meshBaseWord + HEADER_COLOR_C];
+	uint transparencyOffset = meshWords[meshBaseWord + HEADER_TRANSPARENCY];
+	uint biasOffset = meshWords[meshBaseWord + HEADER_BIAS];
 
 	if (faceSlot >= uint(instance.faceCount))
 	{
@@ -116,9 +165,25 @@ void main()
 	int ia = readInt(meshBaseWord, faceAOffset, faceSlot);
 	int ib = readInt(meshBaseWord, faceBOffset, faceSlot);
 	int ic = readInt(meshBaseWord, faceCOffset, faceSlot);
+	int colorA = readInt(meshBaseWord, colorAOffset, faceSlot);
+	int colorB = readInt(meshBaseWord, colorBOffset, faceSlot);
+	int colorC = readInt(meshBaseWord, colorCOffset, faceSlot);
+	uint trans = uint(readByte(meshBaseWord, transparencyOffset, faceSlot));
+	uint bias = uint(readByte(meshBaseWord, biasOffset, faceSlot));
 	if (ia < 0 || ib < 0 || ic < 0)
 	{
+		writeDegenerateFace(vertexBase);
 		return;
+	}
+	if (colorC == -2)
+	{
+		writeDegenerateFace(vertexBase);
+		return;
+	}
+	if (colorC == -1)
+	{
+		colorB = colorA;
+		colorC = colorA;
 	}
 
 	vec3 world = vec3(float(instance.worldX), float(instance.worldY), float(instance.worldZ));
@@ -141,8 +206,18 @@ void main()
 		float(instance.orient),
 		world);
 
-	vec3 lifted = vec3(0.0, 24.0, 0.0);
-	writeVertex(vertexBase, a + lifted, vec3(1.0, 0.0, 1.0), 65535.0);
-	writeVertex(vertexBase + 12u, b + lifted, vec3(0.0, 1.0, 1.0), 65535.0);
-	writeVertex(vertexBase + 24u, c + lifted, vec3(1.0, 1.0, 0.0), 65535.0);
+	uint packedTexLayer = (bias << 16u) | (trans << 24u);
+	if (pc.debugVisual != 0u)
+	{
+		vec3 lifted = vec3(0.0, 24.0, 0.0);
+		vec3 debugGreen = vec3(0.0, 1.0, 0.0);
+		writeVertex(vertexBase, a + lifted, debugGreen, 65535.0, packedTexLayer);
+		writeVertex(vertexBase + 12u, b + lifted, debugGreen, 65535.0, packedTexLayer);
+		writeVertex(vertexBase + 24u, c + lifted, debugGreen, 65535.0, packedTexLayer);
+		return;
+	}
+
+	writeVertex(vertexBase, a, hslToRgb(colorA & 0xffff), float(colorA & 0xffff), packedTexLayer);
+	writeVertex(vertexBase + 12u, b, hslToRgb(colorB & 0xffff), float(colorB & 0xffff), packedTexLayer);
+	writeVertex(vertexBase + 24u, c, hslToRgb(colorC & 0xffff), float(colorC & 0xffff), packedTexLayer);
 }

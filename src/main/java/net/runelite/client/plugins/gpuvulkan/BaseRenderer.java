@@ -38,7 +38,8 @@ final class BaseRenderer implements VulkanRenderExtension
 		{
 			applyWireframeConfig();
 		}
-		if ("modelComputeDebugDraw".equals(event.getKey()))
+		if ("modelComputeDebugDraw".equals(event.getKey())
+			|| "modelComputeReplacement".equals(event.getKey()))
 		{
 			applyModelComputeDebugConfig();
 		}
@@ -204,5 +205,6 @@ final class BaseRenderer implements VulkanRenderExtension
 	{
 		if (sceneRenderer == null || config == null) return;
 		sceneRenderer.setModelComputeDebugDraw(config.modelComputeDebugDraw());
+		sceneRenderer.setModelComputeReplacement(config.modelComputeReplacement());
 	}
 }
