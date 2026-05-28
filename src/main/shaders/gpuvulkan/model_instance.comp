@@ -34,6 +34,7 @@ layout(set = 0, binding = 2, std430) writeonly buffer GeneratedVertices
 layout(push_constant) uniform Push
 {
 	uint instanceCount;
+	uint faceSlotsPerInstance;
 } pc;
 
 const float PI2_OVER_2048 = 0.0030679615757712823;
@@ -84,6 +85,8 @@ vec3 transformVertex(float localX, float localY, float localZ, float orient, vec
 void main()
 {
 	uint instanceId = gl_GlobalInvocationID.x;
+	uint faceSlot = instanceId % pc.faceSlotsPerInstance;
+	instanceId /= pc.faceSlotsPerInstance;
 	if (instanceId >= pc.instanceCount)
 	{
 		return;
@@ -104,9 +107,14 @@ void main()
 	uint faceCOffset = meshWords[meshBaseWord + HEADER_FACE_C];
 	uint colorAOffset = meshWords[meshBaseWord + HEADER_COLOR_A];
 
-	int ia = readInt(meshBaseWord, faceAOffset, 0u);
-	int ib = readInt(meshBaseWord, faceBOffset, 0u);
-	int ic = readInt(meshBaseWord, faceCOffset, 0u);
+	if (faceSlot >= uint(instance.faceCount))
+	{
+		return;
+	}
+
+	int ia = readInt(meshBaseWord, faceAOffset, faceSlot);
+	int ib = readInt(meshBaseWord, faceBOffset, faceSlot);
+	int ic = readInt(meshBaseWord, faceCOffset, faceSlot);
 	if (ia < 0 || ib < 0 || ic < 0)
 	{
 		return;
@@ -132,8 +140,8 @@ void main()
 		float(instance.orient),
 		world);
 
-	uint colorWord = uint(readInt(meshBaseWord, colorAOffset, 0u) & 0xffff);
-	uint vertexBase = instanceId * 36u;
+	uint colorWord = uint(readInt(meshBaseWord, colorAOffset, faceSlot) & 0xffff);
+	uint vertexBase = ((instanceId * pc.faceSlotsPerInstance) + faceSlot) * 36u;
 	writeVertex(vertexBase, a, colorWord, float(colorWord));
 	writeVertex(vertexBase + 12u, b, colorWord, float(colorWord));
 	writeVertex(vertexBase + 24u, c, colorWord, float(colorWord));
