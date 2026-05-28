@@ -21,6 +21,7 @@ final class DrawCallbackStats
 {
 	private final boolean statsEnabled = Boolean.parseBoolean(System.getProperty("vkgpu.stats", "false"));
 	private volatile boolean detailedModelStats;
+	private volatile boolean overlayStatsEnabled;
 
 	// Per-method call counters
 	final Counter drawScene = new Counter();
@@ -57,7 +58,6 @@ final class DrawCallbackStats
 	final Counter presentNanos = new Counter();
 	final Counter customDrawableNanos = new Counter();
 	final Counter beginFrameNanos = new Counter();
-	final Counter actorCaptureNanos = new Counter();
 	final Counter pendingCaptureNanos = new Counter();
 	final Counter sceneCaptureNanos = new Counter();
 	final Counter modelSortNanos = new Counter();
@@ -88,7 +88,7 @@ final class DrawCallbackStats
 
 	boolean isEnabled()
 	{
-		return statsEnabled || detailedModelStats;
+		return statsEnabled || detailedModelStats || overlayStatsEnabled;
 	}
 
 	boolean isDetailedModelStats()
@@ -107,6 +107,15 @@ final class DrawCallbackStats
 		{
 			resetDetailedModelStats();
 		}
+	}
+
+	void setOverlayStatsEnabled(boolean enabled)
+	{
+		if (overlayStatsEnabled == enabled)
+		{
+			return;
+		}
+		overlayStatsEnabled = enabled;
 	}
 
 	void recordModel(Model m)
@@ -169,13 +178,12 @@ final class DrawCallbackStats
 		long customDrawable = customDrawableNanos.getAndSet(0);
 		long drawSceneCount = drawScene.getAndSet(0);
 		long beginFrame = beginFrameNanos.getAndSet(0);
-		long actorCapture = actorCaptureNanos.getAndSet(0);
 		long pendingCapture = pendingCaptureNanos.getAndSet(0);
 		long sceneCapture = sceneCaptureNanos.getAndSet(0);
 		if (!detailedModelStats)
 		{
 			log.info(String.format(
-				"recon | scene=%d preSD=%d postSD=%d swap=%d load=%d | paint=%d tileModel=%d | zoneOpq=%d zoneAlpha=%d | dyn=%d temp=%d pass=%d single=%d | cam=(%.1f, %.1f, %.1f) plane=%d | anim=%d | cpu/frame avg ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f | scene avg ms: begin=%.2f actors=%.2f pending=%.2f staticCaptureTotal=%.2f",
+				"recon | scene=%d preSD=%d postSD=%d swap=%d load=%d | paint=%d tileModel=%d | zoneOpq=%d zoneAlpha=%d | dyn=%d temp=%d pass=%d single=%d | cam=(%.1f, %.1f, %.1f) plane=%d | anim=%d | cpu/frame avg ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f | scene avg ms: begin=%.2f pending=%.2f staticCaptureTotal=%.2f",
 				drawSceneCount,
 				preSceneDraw.getAndSet(0),
 				postDrawScene.getAndSet(0),
@@ -202,7 +210,6 @@ final class DrawCallbackStats
 				avgMs(present, frameCount),
 				avgMs(customDrawable, frameCount),
 				avgMs(beginFrame, drawSceneCount),
-				avgMs(actorCapture, drawSceneCount),
 				avgMs(pendingCapture, drawSceneCount),
 				totalMs(sceneCapture)
 			));
@@ -227,8 +234,8 @@ final class DrawCallbackStats
 		long texturedFaceCount = texturedEmitFaces.getAndSet(0);
 		long overrideFaceCount = overrideEmitFaces.getAndSet(0);
 
-		log.info(String.format(
-			"recon | scene=%d preSD=%d postSD=%d swap=%d load=%d | paint=%d tileModel=%d | zoneOpq=%d zoneAlpha=%d | dyn=%d temp=%d pass=%d single=%d | dynVerts=%d dynFaces=%d maxF=%d | cam=(%.1f, %.1f, %.1f) plane=%d | anim=%d | cpu/frame avg ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f | scene avg ms: begin=%.2f actors=%.2f pending=%.2f staticCaptureTotal=%.2f | model ms: sort=%.2f full=%.2f cull=%.2f emit=%.2f sortedEmit=%.2f unsortedEmit=%.2f uv=%.2f | models sorted=%d full=%d cull=%d unsorted=%d fallback=%d | faces sorted=%d unsorted=%d tex=%d override=%d fullTrans=%d",
+			log.info(String.format(
+				"recon | scene=%d preSD=%d postSD=%d swap=%d load=%d | paint=%d tileModel=%d | zoneOpq=%d zoneAlpha=%d | dyn=%d temp=%d pass=%d single=%d | dynVerts=%d dynFaces=%d maxF=%d | cam=(%.1f, %.1f, %.1f) plane=%d | anim=%d | cpu/frame avg ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f | scene avg ms: begin=%.2f pending=%.2f staticCaptureTotal=%.2f | model ms: sort=%.2f full=%.2f cull=%.2f emit=%.2f sortedEmit=%.2f unsortedEmit=%.2f uv=%.2f | models sorted=%d full=%d cull=%d unsorted=%d fallback=%d | faces sorted=%d unsorted=%d tex=%d override=%d fullTrans=%d",
 			drawSceneCount,
 			preSceneDraw.getAndSet(0),
 			postDrawScene.getAndSet(0),
@@ -255,12 +262,11 @@ final class DrawCallbackStats
 			avgMs(beforePass, frameCount),
 			avgMs(renderPass, frameCount),
 			avgMs(submit, frameCount),
-			avgMs(present, frameCount),
-			avgMs(customDrawable, frameCount),
-			avgMs(beginFrame, drawSceneCount),
-			avgMs(actorCapture, drawSceneCount),
-			avgMs(pendingCapture, drawSceneCount),
-			totalMs(sceneCapture),
+				avgMs(present, frameCount),
+				avgMs(customDrawable, frameCount),
+				avgMs(beginFrame, drawSceneCount),
+				avgMs(pendingCapture, drawSceneCount),
+				totalMs(sceneCapture),
 			totalMs(sort),
 			totalMs(fullSort),
 			totalMs(cullOnly),

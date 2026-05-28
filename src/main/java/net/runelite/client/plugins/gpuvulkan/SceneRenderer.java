@@ -49,6 +49,7 @@ import net.runelite.api.SceneTileModel;
 import net.runelite.api.SceneTilePaint;
 import net.runelite.api.Tile;
 import net.runelite.api.WallObject;
+import net.runelite.api.hooks.DrawCallbacks;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
 import org.lwjgl.vulkan.VkCommandBuffer;
@@ -114,6 +115,7 @@ final class SceneRenderer implements AutoCloseable
 	static final int ZONE_SIZE = 8;
 	static final int ZONES_PER_SIDE = Constants.SCENE_SIZE / ZONE_SIZE;
 	static final int ZONE_COUNT = ZONES_PER_SIDE * ZONES_PER_SIDE;
+	private static final int TOPLEVEL_ZONE_OFFSET = SCENE_OFFSET / ZONE_SIZE;
 
 	private final int[] regionEnds = new int[LAYER_COUNT];
 	/** Per-layer, per-plane: vertex count after that plane's tiles emitted.
@@ -126,12 +128,20 @@ final class SceneRenderer implements AutoCloseable
 	 *  geometry outside the configured scene/fog radius. */
 	private final int[][][] zoneVertexStart = new int[LAYER_COUNT][MAX_PLANES][ZONE_COUNT];
 	private final int[][][] zoneVertexCount = new int[LAYER_COUNT][MAX_PLANES][ZONE_COUNT];
+	private final int[][][][] overlayZoneStart =
+		new int[FrameSync.FRAMES_IN_FLIGHT][LAYER_COUNT][MAX_PLANES][ZONE_COUNT];
+	private final int[][][][] overlayZoneCount =
+		new int[FrameSync.FRAMES_IN_FLIGHT][LAYER_COUNT][MAX_PLANES][ZONE_COUNT];
+	private final boolean[][] overlayZoneValid = new boolean[FrameSync.FRAMES_IN_FLIGHT][ZONE_COUNT];
+	private final boolean[] overlaySlotHasZones = new boolean[FrameSync.FRAMES_IN_FLIGHT];
+	private final int[] overlayNextVertex = new int[FrameSync.FRAMES_IN_FLIGHT];
 
 	private final boolean[] wireframe = new boolean[LAYER_COUNT];
 	private int[] priorityRangeStarts = new int[1024];
 	private int[] priorityRangeEnds = new int[1024];
 	private int[] prioritySkipPairs = new int[2048];
 	private int priorityRangeCount;
+	private int dynamicOpaqueEnd = -1;
 	/** Plane range to render this frame, forwarded from preSceneDraw's
 	 *  (minLevel, level, maxLevel). Roof hiding only applies above the
 	 *  current plane, matching the stock GPU plugin's zone renderer. */
@@ -151,9 +161,11 @@ final class SceneRenderer implements AutoCloseable
 	private int[] tileRoofStarts   = new int[2048];
 	private int[] tileRoofCounts   = new int[2048];
 	private int   tileRoofCount;
+	private boolean rebuildingOverlayZone;
 	/** Sorted [start, end) pairs of vertex sub-ranges to skip this frame. */
 	private int[] skipScratch = new int[256];
 	private final boolean[] dirtyZones = new boolean[ZONE_COUNT];
+	private final int[] dirtyZoneSlotMask = new int[ZONE_COUNT];
 	private int dirtyZoneCount;
 
 	private int vertexCount;
@@ -195,6 +207,7 @@ final class SceneRenderer implements AutoCloseable
 		vertexCount = 0;
 		tileRoofCount = 0;
 		java.util.Arrays.fill(dirtyZones, false);
+		java.util.Arrays.fill(dirtyZoneSlotMask, 0);
 		dirtyZoneCount = 0;
 		pendingRenderables.clear();
 		for (int i = 0; i < LAYER_COUNT; i++)
@@ -202,10 +215,16 @@ final class SceneRenderer implements AutoCloseable
 			regionEnds[i] = 0;
 			for (int p = 0; p < MAX_PLANES; p++) planeEnds[i][p] = 0;
 		}
+		clearOverlayRanges();
 	}
 
 	void invalidateZone(Scene scene, int zx, int zz)
 	{
+		if (scene != null && scene.getWorldViewId() == net.runelite.api.WorldView.TOPLEVEL)
+		{
+			zx -= TOPLEVEL_ZONE_OFFSET;
+			zz -= TOPLEVEL_ZONE_OFFSET;
+		}
 		if (zx < 0 || zz < 0 || zx >= ZONES_PER_SIDE || zz >= ZONES_PER_SIDE)
 		{
 			return;
@@ -216,6 +235,7 @@ final class SceneRenderer implements AutoCloseable
 			dirtyZones[zone] = true;
 			dirtyZoneCount++;
 		}
+		dirtyZoneSlotMask[zone] = 0;
 	}
 
 	/** Single instance reused across captures — all captures run on the
@@ -287,11 +307,6 @@ final class SceneRenderer implements AutoCloseable
 		metrics.sceneBufferBytes += BUFFER_BYTES * FrameSync.FRAMES_IN_FLIGHT;
 	}
 
-	/** Per-frame (Model identity, worldX, worldZ) dedupe — collapses the
-	 *  "two heads on the player" case where multiple capture paths emit
-	 *  the same actor model at the same position. */
-	private final java.util.HashSet<Long> seenCaptures = new java.util.HashSet<>();
-
 	/**
 	 * Drops the dynamic suffix; static layers preserved. Waits on this
 	 * slot's in-flight fence first — without it, CPU writes race the GPU
@@ -305,13 +320,83 @@ final class SceneRenderer implements AutoCloseable
 		{
 			vkWaitForFences(device.handle(), stack.longs(sync.inFlightFence()), true, Long.MAX_VALUE);
 		}
-		vertexCount = regionEnds[LAST_STATIC.ordinal()];
+		int slot = sync.currentFrame();
+		vertexCount = overlayNextVertex[slot];
 		writePtr = MemoryUtil.memAddress(mapped)
-			+ (long) sync.currentFrame() * slotBytes
+			+ (long) slot * slotBytes
 			+ (long) vertexCount * ScenePipeline.VERTEX_STRIDE;
 		overflowed = false;
-		seenCaptures.clear();
 		priorityRangeCount = 0;
+		dynamicOpaqueEnd = -1;
+	}
+
+	void drawPass(int pass)
+	{
+		if (pass == DrawCallbacks.PASS_OPAQUE)
+		{
+			dynamicOpaqueEnd = vertexCount;
+		}
+	}
+
+	void rebuildDirtyZones(Scene scene)
+	{
+		if (scene == null || dirtyZoneCount == 0)
+		{
+			return;
+		}
+
+		Tile[][][] tiles = scene.getTiles();
+		if (tiles == null)
+		{
+			return;
+		}
+
+		int slot = sync.currentFrame();
+		int slotBit = 1 << slot;
+		int allSlots = (1 << FrameSync.FRAMES_IN_FLIGHT) - 1;
+		vertexCount = overlayNextVertex[slot];
+		writePtr = MemoryUtil.memAddress(mapped)
+			+ (long) slot * slotBytes
+			+ (long) vertexCount * ScenePipeline.VERTEX_STRIDE;
+
+		final int planes = Math.min(tiles.length, MAX_PLANES);
+		final int sceneSize = Constants.SCENE_SIZE;
+		final int[][][] roofs = scene.getRoofs();
+		final byte[][][] tileSettings = scene.getExtendedTileSettings();
+		final int roofOffset = scene.getWorldViewId() == net.runelite.api.WorldView.TOPLEVEL
+			? (Constants.EXTENDED_SCENE_SIZE - Constants.SCENE_SIZE) / 2 : 0;
+
+		for (int zone = 0; zone < ZONE_COUNT; zone++)
+		{
+			if (!dirtyZones[zone] || (dirtyZoneSlotMask[zone] & slotBit) != 0)
+			{
+				continue;
+			}
+
+			clearOverlayZone(slot, zone);
+			rebuildingOverlayZone = true;
+			try
+			{
+				captureDirtyZone(scene, tiles, planes, sceneSize, roofs, tileSettings, roofOffset, slot, zone);
+			}
+			finally
+			{
+				rebuildingOverlayZone = false;
+			}
+			overlayZoneValid[slot][zone] = true;
+			overlaySlotHasZones[slot] = true;
+			dirtyZoneSlotMask[zone] |= slotBit;
+			if (dirtyZoneSlotMask[zone] == allSlots)
+			{
+				dirtyZones[zone] = false;
+				dirtyZoneCount--;
+			}
+		}
+
+		overlayNextVertex[slot] = vertexCount;
+		writePtr = MemoryUtil.memAddress(mapped)
+			+ (long) slot * slotBytes
+			+ (long) vertexCount * ScenePipeline.VERTEX_STRIDE;
 	}
 
 	/** Visits one tile (including any bridge tile underneath) within a layer pass. */
@@ -349,6 +434,7 @@ final class SceneRenderer implements AutoCloseable
 		writePtr = MemoryUtil.memAddress(mapped);
 		overflowed = false;
 		tileRoofCount = 0;
+		clearOverlayRanges();
 		pendingRenderables.clear();
 
 		Tile[][][] tiles = scene.getTiles();
@@ -412,20 +498,154 @@ final class SceneRenderer implements AutoCloseable
 			for (int p = planes; p < MAX_PLANES; p++)
 				planeEnds[i][p] = regionEnds[i];
 
-		copyStaticPrefixToAllSlots(vertexCount * ScenePipeline.VERTEX_STRIDE);
+		for (int slot = 0; slot < FrameSync.FRAMES_IN_FLIGHT; slot++)
+		{
+			overlayNextVertex[slot] = vertexCount;
+		}
 
 		log.debug("captureScene: {} vertices, {} roof tiles", vertexCount, tileRoofCount);
 	}
 
-	/** Mirror static prefix from slot 0 into every other slot so all
-	 *  FRAMES_IN_FLIGHT bindings see identical static geometry. */
-	private void copyStaticPrefixToAllSlots(int staticBytes)
+	private void clearOverlayRanges()
 	{
-		if (staticBytes <= 0) return;
-		long base = MemoryUtil.memAddress(mapped, 0);
-		for (int slot = 1; slot < FrameSync.FRAMES_IN_FLIGHT; slot++)
+		for (int slot = 0; slot < FrameSync.FRAMES_IN_FLIGHT; slot++)
 		{
-			MemoryUtil.memCopy(base, base + (long) slot * slotBytes, staticBytes);
+			overlayNextVertex[slot] = regionEnds[LAST_STATIC.ordinal()];
+			overlaySlotHasZones[slot] = false;
+			java.util.Arrays.fill(overlayZoneValid[slot], false);
+			for (int layer = 0; layer < LAYER_COUNT; layer++)
+			{
+				for (int plane = 0; plane < MAX_PLANES; plane++)
+				{
+					java.util.Arrays.fill(overlayZoneStart[slot][layer][plane], 0);
+					java.util.Arrays.fill(overlayZoneCount[slot][layer][plane], 0);
+				}
+			}
+		}
+	}
+
+	private void clearOverlayZone(int slot, int zone)
+	{
+		overlayZoneValid[slot][zone] = false;
+		for (int layer = 0; layer < LAYER_COUNT; layer++)
+		{
+			for (int plane = 0; plane < MAX_PLANES; plane++)
+			{
+				overlayZoneStart[slot][layer][plane][zone] = 0;
+				overlayZoneCount[slot][layer][plane][zone] = 0;
+			}
+		}
+	}
+
+	private void captureDirtyZone(Scene scene, Tile[][][] tiles, int planes, int sceneSize,
+								  int[][][] roofs, byte[][][] tileSettings, int roofOffset,
+								  int slot, int zone)
+	{
+		int zx = zone / ZONES_PER_SIDE;
+		int zy = zone % ZONES_PER_SIDE;
+		captureOverlayLayer(Layer.TERRAIN, tiles, planes, sceneSize,
+			roofs, tileSettings, roofOffset, slot, zone, zx, zy,
+			(cur, p, sx, sy) ->
+			{
+				SceneTilePaint paint = cur.getSceneTilePaint();
+				if (paint != null) captureTilePaint(scene, paint, p, sx, sy);
+				SceneTileModel m = cur.getSceneTileModel();
+				if (m != null) captureTileModel(m, sx, sy);
+			});
+
+		captureOverlayLayer(Layer.WALLS, tiles, planes, sceneSize,
+			roofs, tileSettings, roofOffset, slot, zone, zx, zy,
+			(cur, p, sx, sy) ->
+			{
+				WallObject w = cur.getWallObject();
+				if (w == null) return;
+				captureRenderable(w.getRenderable1(), 0, w.getX(), w.getZ(), w.getY());
+				captureRenderable(w.getRenderable2(), 0, w.getX(), w.getZ(), w.getY());
+			});
+
+		captureOverlayLayer(Layer.DECORATIVE, tiles, planes, sceneSize,
+			roofs, tileSettings, roofOffset, slot, zone, zx, zy,
+			(cur, p, sx, sy) ->
+			{
+				DecorativeObject d = cur.getDecorativeObject();
+				if (d == null) return;
+				captureRenderable(d.getRenderable(), 0,
+					d.getX() + d.getXOffset(), d.getZ(), d.getY() + d.getYOffset());
+				captureRenderable(d.getRenderable2(), 0,
+					d.getX() + d.getXOffset2(), d.getZ(), d.getY() + d.getYOffset2());
+			});
+
+		captureOverlayLayer(Layer.GROUND, tiles, planes, sceneSize,
+			roofs, tileSettings, roofOffset, slot, zone, zx, zy,
+			(cur, p, sx, sy) ->
+			{
+				GroundObject g = cur.getGroundObject();
+				if (g == null) return;
+				captureRenderable(g.getRenderable(), 0, g.getX(), g.getZ(), g.getY());
+			});
+
+		captureOverlayGameObjectsLayer(tiles, planes, sceneSize,
+			roofs, tileSettings, roofOffset, slot, zone, zx, zy);
+	}
+
+	private void captureOverlayLayer(Layer layer,
+		Tile[][][] tiles, int planes, int sceneSize,
+		int[][][] roofs, byte[][][] tileSettings, int roofOffset,
+		int slot, int zone, int zx, int zy, TileCapture body)
+	{
+		final int L = layer.ordinal();
+		int x0 = zx * ZONE_SIZE, x1 = Math.min(x0 + ZONE_SIZE, sceneSize);
+		int y0 = zy * ZONE_SIZE, y1 = Math.min(y0 + ZONE_SIZE, sceneSize);
+		for (int outputLevel = 0; outputLevel < planes; outputLevel++)
+		{
+			int start = vertexCount;
+			if (outputLevel == 0)
+			{
+				captureLayerPass(tiles, planes, x0, x1, y0, y1, 0, false,
+					roofs, tileSettings, roofOffset, body);
+				for (int sourceLevel = 0; sourceLevel < planes; sourceLevel++)
+				{
+					captureLayerPass(tiles, planes, x0, x1, y0, y1, sourceLevel, true,
+						roofs, tileSettings, roofOffset, body);
+				}
+			}
+			else
+			{
+				captureLayerPass(tiles, planes, x0, x1, y0, y1, outputLevel, false,
+					roofs, tileSettings, roofOffset, body);
+			}
+			overlayZoneStart[slot][L][outputLevel][zone] = start;
+			overlayZoneCount[slot][L][outputLevel][zone] = vertexCount - start;
+		}
+	}
+
+	private void captureOverlayGameObjectsLayer(Tile[][][] tiles, int planes, int sceneSize,
+		int[][][] roofs, byte[][][] tileSettings, int roofOffset,
+		int slot, int zone, int zx, int zy)
+	{
+		final int L = Layer.GAME_OBJECTS.ordinal();
+		int x0 = zx * ZONE_SIZE, x1 = Math.min(x0 + ZONE_SIZE, sceneSize);
+		int y0 = zy * ZONE_SIZE, y1 = Math.min(y0 + ZONE_SIZE, sceneSize);
+		for (int outputLevel = 0; outputLevel < planes; outputLevel++)
+		{
+			int start = vertexCount;
+			if (outputLevel == 0)
+			{
+				captureGameObjectsPass(tiles, planes, x0, x1, y0, y1, 0, false,
+					roofs, tileSettings, roofOffset);
+				for (int sourceLevel = 0; sourceLevel < planes; sourceLevel++)
+				{
+					captureGameObjectsPass(tiles, planes, x0, x1, y0, y1, sourceLevel, true,
+						roofs, tileSettings, roofOffset);
+				}
+			}
+			else
+			{
+				captureGameObjectsPass(tiles, planes, x0, x1, y0, y1, outputLevel, false,
+					roofs, tileSettings, roofOffset);
+			}
+			overlayZoneStart[slot][L][outputLevel][zone] = start;
+			overlayZoneCount[slot][L][outputLevel][zone] = vertexCount - start;
 		}
 	}
 
@@ -720,16 +940,8 @@ final class SceneRenderer implements AutoCloseable
 
 	void captureModel(Model m, int orient, int worldX, int worldY, int worldZ)
 	{
-		if (m == null || !markCaptureSeen(m, worldX, worldZ)) return;
+		if (m == null) return;
 		captureModelUnsorted(m, orient, worldX, worldY, worldZ);
-	}
-
-	private boolean markCaptureSeen(Model m, int worldX, int worldZ)
-	{
-		long key = ((long) System.identityHashCode(m) & 0xFFFFFFFFL)
-			| ((long) (worldX & 0xFFFF) << 32)
-			| ((long) (worldZ & 0xFFFF) << 48);
-		return seenCaptures.add(key);
 	}
 
 	private void captureModelUnsorted(Model m, int orient, int worldX, int worldY, int worldZ)
@@ -904,8 +1116,8 @@ final class SceneRenderer implements AutoCloseable
 	 * unsorted {@link #captureModel} stays in place for the actor walk,
 	 * which has no Projection of its own.
 	 *
-	 * <p>Same dedupe behavior as {@code captureModel} (Model identity +
-	 * world XZ).
+	 * <p>Stock GPU uploads every dynamic/temp callback independently, so this
+	 * path intentionally does not dedupe by model identity.
 	 */
 	void captureModelSorted(Projection proj, Model m, int orient, int worldX, int worldY, int worldZ)
 	{
@@ -915,7 +1127,6 @@ final class SceneRenderer implements AutoCloseable
 	void captureModelSorted(Projection proj, Model m, int orient, int worldX, int worldY, int worldZ, int renderMode)
 	{
 		if (m == null || proj == null) return;
-		if (!markCaptureSeen(m, worldX, worldZ)) return;
 
 		boolean detailedStats = stats.isDetailedModelStats();
 		boolean prioritySort = renderMode == Renderable.RENDERMODE_SORTED_NO_DEPTH;
@@ -1502,7 +1713,9 @@ final class SceneRenderer implements AutoCloseable
 		// LANDMINE: bind at offset 0 and shift via firstVertex rather than
 		// byte-offset binding — MoltenVK's offset translation produces no
 		// visible geometry at hundreds-of-MB offsets on Apple Silicon.
-		final int slotFirstVertex = sync.currentFrame() * MAX_VERTICES;
+		final int slot = sync.currentFrame();
+		final int slotFirstVertex = slot * MAX_VERTICES;
+		final int staticFirstVertex = 0;
 		try (MemoryStack stack = stackPush())
 		{
 			vkCmdBindVertexBuffers(cmd, 0,
@@ -1586,7 +1799,9 @@ final class SceneRenderer implements AutoCloseable
 
 				if (LAYERS[i] == Layer.DYNAMIC)
 				{
-					drawRange(cmd, layerStart, regionEnd, prioritySkipPairs, priorityRangeCount, priorityRangeCount > 0, slotFirstVertex,
+					int dynamicStart = overlayNextVertex[slot];
+					int dynamicEnd = dynamicOpaqueEnd >= dynamicStart ? Math.min(dynamicOpaqueEnd, regionEnd) : regionEnd;
+					drawRange(cmd, dynamicStart, dynamicEnd, prioritySkipPairs, priorityRangeCount, priorityRangeCount > 0, slotFirstVertex,
 						want.layout(), vertPush, fragPush);
 				}
 				else
@@ -1599,7 +1814,10 @@ final class SceneRenderer implements AutoCloseable
 					{
 						drawStaticPlane(cmd, i, p, layerStart, cameraX, cameraZ,
 							drawDistanceTiles, fogDepthTiles, skipScratch, skipPairs, p > loCur,
-							slotFirstVertex, want.layout(), vertPush, fragPush);
+							slot, staticFirstVertex, want.layout(), vertPush, fragPush);
+						drawOverlayPlane(cmd, i, p, cameraX, cameraZ, drawDistanceTiles, fogDepthTiles,
+							skipScratch, skipPairs, p > loCur,
+							slot, slotFirstVertex, want.layout(), vertPush, fragPush);
 					}
 				}
 				layerStart = regionEnd;
@@ -1623,7 +1841,7 @@ final class SceneRenderer implements AutoCloseable
 				alphaPipeline.layout(), 0, stack.longs(descriptorSet), null);
 			drawAlphaPass(cmd, loMin, loMax, cameraX, cameraZ,
 				drawDistanceTiles, fogDepthTiles, skipScratch, skipPairs, loCur,
-				slotFirstVertex, alphaPipeline.layout(), vertPush, alphaFragPush);
+				slot, staticFirstVertex, slotFirstVertex, alphaPipeline.layout(), vertPush, alphaFragPush);
 		}
 	}
 
@@ -1635,7 +1853,8 @@ final class SceneRenderer implements AutoCloseable
 	private void drawAlphaPass(VkCommandBuffer cmd, int loMin, int loMax,
 							   float cameraX, float cameraZ, float drawDistanceTiles, float fogDepthTiles,
 							   int[] skips, int skipPairs, int currentPlane,
-							   int slotFirstVertex, long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
+							   int slot, int staticFirstVertex, int slotFirstVertex,
+							   long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
 	{
 		for (int i = 0; i < LAYER_COUNT; i++)
 		{
@@ -1647,7 +1866,9 @@ final class SceneRenderer implements AutoCloseable
 			}
 			if (LAYERS[i] == Layer.DYNAMIC)
 			{
-				drawRange(cmd, layerStart, regionEnd, prioritySkipPairs, priorityRangeCount,
+				int dynamicStart = overlayNextVertex[slot];
+				int dynamicEnd = dynamicOpaqueEnd >= dynamicStart ? Math.min(dynamicOpaqueEnd, regionEnd) : regionEnd;
+				drawRange(cmd, dynamicStart, dynamicEnd, prioritySkipPairs, priorityRangeCount,
 					false, slotFirstVertex, pipelineLayout, vertPush, fragPush);
 			}
 			else
@@ -1656,7 +1877,10 @@ final class SceneRenderer implements AutoCloseable
 				{
 					drawStaticPlane(cmd, i, p, layerStart, cameraX, cameraZ,
 						drawDistanceTiles, fogDepthTiles, skips, skipPairs, p > currentPlane,
-						slotFirstVertex, pipelineLayout, vertPush, fragPush);
+						slot, staticFirstVertex, pipelineLayout, vertPush, fragPush);
+					drawOverlayPlane(cmd, i, p, cameraX, cameraZ, drawDistanceTiles, fogDepthTiles,
+						skips, skipPairs, p > currentPlane,
+						slot, slotFirstVertex, pipelineLayout, vertPush, fragPush);
 				}
 			}
 		}
@@ -1667,7 +1891,13 @@ final class SceneRenderer implements AutoCloseable
 	{
 		for (int i = 0; i < priorityRangeCount; i++)
 		{
-			drawRange(cmd, priorityRangeStarts[i], priorityRangeEnds[i], skipScratch, 0, false,
+			int start = priorityRangeStarts[i];
+			int end = priorityRangeEnds[i];
+			if (end <= start)
+			{
+				continue;
+			}
+			drawRange(cmd, start, end, skipScratch, 0, false,
 				slotFirstVertex, pipelineLayout, vertPush, fragPush);
 		}
 	}
@@ -1675,7 +1905,7 @@ final class SceneRenderer implements AutoCloseable
 	private void drawStaticPlane(VkCommandBuffer cmd, int layer, int plane, int layerStart,
 								 float cameraX, float cameraZ, float drawDistanceTiles, float fogDepthTiles,
 								 int[] skips, int skipPairs, boolean applySkips,
-								 int slotFirstVertex, long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
+								 int slot, int slotFirstVertex, long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
 	{
 		int planeStart = plane == 0 ? layerStart : planeEnds[layer][plane - 1];
 		int planeEnd = planeEnds[layer][plane];
@@ -1686,7 +1916,7 @@ final class SceneRenderer implements AutoCloseable
 
 		int radiusTiles = (int) Math.ceil(drawDistanceTiles + fogDepthTiles + 2f);
 		int radiusZones = Math.max(1, (radiusTiles + ZONE_SIZE - 1) / ZONE_SIZE);
-		if (radiusZones >= ZONES_PER_SIDE)
+		if (radiusZones >= ZONES_PER_SIDE && !overlaySlotHasZones[slot])
 		{
 			drawRange(cmd, planeStart, planeEnd, skips, skipPairs, applySkips,
 				slotFirstVertex, pipelineLayout, vertPush, fragPush);
@@ -1697,22 +1927,83 @@ final class SceneRenderer implements AutoCloseable
 		int camTileZ = clamp((int) Math.floor(cameraZ / 128f), 0, Constants.SCENE_SIZE - 1);
 		int camZoneX = camTileX / ZONE_SIZE;
 		int camZoneZ = camTileZ / ZONE_SIZE;
-		int minZoneX = Math.max(0, camZoneX - radiusZones);
-		int maxZoneX = Math.min(ZONES_PER_SIDE - 1, camZoneX + radiusZones);
-		int minZoneZ = Math.max(0, camZoneZ - radiusZones);
-		int maxZoneZ = Math.min(ZONES_PER_SIDE - 1, camZoneZ + radiusZones);
+		int minZoneX = radiusZones >= ZONES_PER_SIDE ? 0 : Math.max(0, camZoneX - radiusZones);
+		int maxZoneX = radiusZones >= ZONES_PER_SIDE ? ZONES_PER_SIDE - 1 : Math.min(ZONES_PER_SIDE - 1, camZoneX + radiusZones);
+		int minZoneZ = radiusZones >= ZONES_PER_SIDE ? 0 : Math.max(0, camZoneZ - radiusZones);
+		int maxZoneZ = radiusZones >= ZONES_PER_SIDE ? ZONES_PER_SIDE - 1 : Math.min(ZONES_PER_SIDE - 1, camZoneZ + radiusZones);
 
 		for (int zx = minZoneX; zx <= maxZoneX; zx++)
 		{
 			for (int zz = minZoneZ; zz <= maxZoneZ; zz++)
 			{
 				int zoneIdx = zx * ZONES_PER_SIDE + zz;
+				if (overlayZoneValid[slot][zoneIdx])
+				{
+					continue;
+				}
 				int count = zoneVertexCount[layer][plane][zoneIdx];
 				if (count <= 0)
 				{
 					continue;
 				}
 				int start = zoneVertexStart[layer][plane][zoneIdx];
+				drawRange(cmd, start, start + count, skips, skipPairs, applySkips,
+					slotFirstVertex, pipelineLayout, vertPush, fragPush);
+			}
+		}
+	}
+
+	private void drawOverlayPlane(VkCommandBuffer cmd, int layer, int plane,
+								  float cameraX, float cameraZ, float drawDistanceTiles, float fogDepthTiles,
+								  int[] skips, int skipPairs, boolean applySkips,
+								  int slot, int slotFirstVertex, long pipelineLayout,
+								  ByteBuffer vertPush, ByteBuffer fragPush)
+	{
+		if (!overlaySlotHasZones[slot])
+		{
+			return;
+		}
+
+		int radiusTiles = (int) Math.ceil(drawDistanceTiles + fogDepthTiles + 2f);
+		int radiusZones = Math.max(1, (radiusTiles + ZONE_SIZE - 1) / ZONE_SIZE);
+		int minZoneX;
+		int maxZoneX;
+		int minZoneZ;
+		int maxZoneZ;
+		if (radiusZones >= ZONES_PER_SIDE)
+		{
+			minZoneX = 0;
+			maxZoneX = ZONES_PER_SIDE - 1;
+			minZoneZ = 0;
+			maxZoneZ = ZONES_PER_SIDE - 1;
+		}
+		else
+		{
+			int camTileX = clamp((int) Math.floor(cameraX / 128f), 0, Constants.SCENE_SIZE - 1);
+			int camTileZ = clamp((int) Math.floor(cameraZ / 128f), 0, Constants.SCENE_SIZE - 1);
+			int camZoneX = camTileX / ZONE_SIZE;
+			int camZoneZ = camTileZ / ZONE_SIZE;
+			minZoneX = Math.max(0, camZoneX - radiusZones);
+			maxZoneX = Math.min(ZONES_PER_SIDE - 1, camZoneX + radiusZones);
+			minZoneZ = Math.max(0, camZoneZ - radiusZones);
+			maxZoneZ = Math.min(ZONES_PER_SIDE - 1, camZoneZ + radiusZones);
+		}
+
+		for (int zx = minZoneX; zx <= maxZoneX; zx++)
+		{
+			for (int zz = minZoneZ; zz <= maxZoneZ; zz++)
+			{
+				int zoneIdx = zx * ZONES_PER_SIDE + zz;
+				if (!overlayZoneValid[slot][zoneIdx])
+				{
+					continue;
+				}
+				int count = overlayZoneCount[slot][layer][plane][zoneIdx];
+				if (count <= 0)
+				{
+					continue;
+				}
+				int start = overlayZoneStart[slot][layer][plane][zoneIdx];
 				drawRange(cmd, start, start + count, skips, skipPairs, applySkips,
 					slotFirstVertex, pipelineLayout, vertPush, fragPush);
 			}
@@ -1783,6 +2074,10 @@ final class SceneRenderer implements AutoCloseable
 
 	private void recordRoofRange(int roofId, int vertexStart, int vertexCount)
 	{
+		if (rebuildingOverlayZone)
+		{
+			return;
+		}
 		if (tileRoofCount == tileRoofIds.length)
 		{
 			int newSize = tileRoofIds.length * 2;

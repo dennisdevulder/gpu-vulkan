@@ -22,6 +22,14 @@ public interface VulkanSceneRenderer extends AutoCloseable
 	{
 	}
 
+	default void rebuildDirtyZones(Scene scene)
+	{
+	}
+
+	default void drawPass(int pass)
+	{
+	}
+
 	void captureScene(Scene scene);
 
 	void captureModel(Model model, int orientation, int worldX, int worldY, int worldZ);

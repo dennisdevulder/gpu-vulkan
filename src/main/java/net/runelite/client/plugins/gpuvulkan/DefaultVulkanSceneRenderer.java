@@ -41,6 +41,18 @@ final class DefaultVulkanSceneRenderer implements VulkanSceneRenderer
 	}
 
 	@Override
+	public void rebuildDirtyZones(Scene scene)
+	{
+		sceneRenderer.rebuildDirtyZones(scene);
+	}
+
+	@Override
+	public void drawPass(int pass)
+	{
+		sceneRenderer.drawPass(pass);
+	}
+
+	@Override
 	public void captureScene(Scene scene)
 	{
 		sceneRenderer.captureScene(scene);

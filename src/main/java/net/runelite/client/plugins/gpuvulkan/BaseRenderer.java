@@ -69,6 +69,20 @@ final class BaseRenderer implements VulkanRenderExtension
 	}
 
 	@Override
+	public void rebuildDirtyZones(Scene scene)
+	{
+		if (sceneRenderer == null) return;
+		sceneRenderer.rebuildDirtyZones(scene);
+	}
+
+	@Override
+	public void drawPass(int pass)
+	{
+		if (sceneRenderer == null) return;
+		sceneRenderer.drawPass(pass);
+	}
+
+	@Override
 	public void captureScene(Scene scene)
 	{
 		if (sceneRenderer == null) return;

@@ -29,6 +29,10 @@ public interface VulkanRenderExtension extends AutoCloseable
 
 	default void invalidateZone(Scene scene, int zx, int zz) {}
 
+	default void rebuildDirtyZones(Scene scene) {}
+
+	default void drawPass(int pass) {}
+
 	default void captureScene(Scene scene) {}
 
 	default void captureModel(Model model, int orientation, int worldX, int worldY, int worldZ) {}

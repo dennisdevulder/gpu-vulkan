@@ -17,10 +17,10 @@ import static org.lwjgl.vulkan.VK13.*;
 /**
  * Owns the scene's host-visible vertex buffer and its descriptor set. The
  * buffer is sized for {@code framesInFlight} contiguous slots of
- * {@code slotBytes} each so the CPU can write the next frame's geometry while
- * the GPU is still reading the previous frame's — without that partition the
- * write races the GPU read (spec-illegal even when no corruption is observed).
- * Bind with offset {@code slot * slotBytes()} per frame.
+ * {@code slotBytes} each so the CPU can write the next frame's dynamic and
+ * overlay geometry while the GPU is still reading the previous frame's. Static
+ * scene geometry lives once in slot 0 and is drawn with a zero first-vertex
+ * base; per-frame geometry is drawn from the current slot base.
  *
  * <p>The descriptor set has two bindings: 0 = OSRS texture array (combined
  * image sampler), 1 = texture-animation UBO. Both are static for the plugin

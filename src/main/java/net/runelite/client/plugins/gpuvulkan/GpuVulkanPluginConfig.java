@@ -106,13 +106,6 @@ public interface GpuVulkanPluginConfig extends Config
 	default boolean hideUnrelatedMaps() { return true; }
 
 	@ConfigItem(
-		keyName = "manualActorCapture",
-		name = "Manual actor capture",
-		description = "Fallback path that walks every player/NPC each frame to avoid actor flicker. Higher CPU cost; leave off unless actors flicker."
-	)
-	default boolean manualActorCapture() { return false; }
-
-	@ConfigItem(
 		keyName = "benchmarkSkipUi",
 		name = "Skip UI upload",
 		description = "Benchmark only: skip UI texture upload/draw to isolate scene renderer cost.",

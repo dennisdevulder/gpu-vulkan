@@ -107,6 +107,16 @@ final class RenderExtensions implements AutoCloseable
 		forEachExtension("invalidateZone", extension -> extension.invalidateZone(scene, zx, zz));
 	}
 
+	void rebuildDirtyZones(Scene scene)
+	{
+		forEachExtension("rebuildDirtyZones", extension -> extension.rebuildDirtyZones(scene));
+	}
+
+	void drawPass(int pass)
+	{
+		forEachExtension("drawPass", extension -> extension.drawPass(pass));
+	}
+
 	void captureModel(Model model, int orientation, int worldX, int worldY, int worldZ)
 	{
 		for (int i = 0; i < extensions.size(); )
