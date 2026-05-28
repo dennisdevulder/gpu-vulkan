@@ -52,6 +52,7 @@ import net.runelite.api.WallObject;
 import net.runelite.api.hooks.DrawCallbacks;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
+import org.lwjgl.vulkan.VkBufferMemoryBarrier;
 import org.lwjgl.vulkan.VkCommandBuffer;
 
 import static org.lwjgl.system.MemoryStack.stackPush;
@@ -103,6 +104,7 @@ final class SceneRenderer implements AutoCloseable
 	private static final int MODEL_COMPUTE_OUTPUT_FACE_SLOTS =
 		(int) (MODEL_COMPUTE_OUTPUT_FRAME_BYTES / (3L * ScenePipeline.VERTEX_STRIDE));
 	private static final boolean ENABLE_MODEL_COMPUTE_PROTOTYPE = true;
+	private static final boolean ENABLE_MODEL_COMPUTE_DEBUG_DRAW = false;
 	private static final int SCENE_OFFSET = (Constants.EXTENDED_SCENE_SIZE - Constants.SCENE_SIZE) / 2;
 	private static final float[] HSL_RGB = buildHslRgbTable();
 
@@ -929,6 +931,11 @@ final class SceneRenderer implements AutoCloseable
 		long frameBytes()
 		{
 			return MODEL_COMPUTE_OUTPUT_FRAME_BYTES;
+		}
+
+		long frameOffset(int slot)
+		{
+			return MODEL_COMPUTE_OUTPUT_FRAME_BYTES * slot;
 		}
 
 		long totalBytes()
@@ -2477,6 +2484,7 @@ final class SceneRenderer implements AutoCloseable
 			drawAlphaPass(cmd, loMin, loMax, fullZoneRange, minZoneX, maxZoneX, minZoneZ, maxZoneZ,
 				skipScratch, skipPairs, loCur,
 				slot, staticFirstVertex, slotFirstVertex, alphaPipeline.layout(), vertPush, alphaFragPush);
+			drawModelComputeDebug(cmd, slot, vertPush, fragPush);
 		}
 	}
 
@@ -2488,6 +2496,55 @@ final class SceneRenderer implements AutoCloseable
 		}
 		modelComputePipeline.recordDispatch(cmd, sync.currentFrame(), modelInstanceCount,
 			MODEL_COMPUTE_FACE_SLOTS_PER_INSTANCE, MODEL_COMPUTE_OUTPUT_FACE_SLOTS);
+		if (ENABLE_MODEL_COMPUTE_DEBUG_DRAW)
+		{
+			try (MemoryStack stack = stackPush())
+			{
+				VkBufferMemoryBarrier.Buffer barrier = VkBufferMemoryBarrier.calloc(1, stack);
+				barrier.get(0)
+					.sType$Default()
+					.srcAccessMask(VK_ACCESS_SHADER_WRITE_BIT)
+					.dstAccessMask(VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT)
+					.srcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+					.dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+					.buffer(modelComputeOutputBuffer.handle())
+					.offset(modelComputeOutputBuffer.frameOffset(sync.currentFrame()))
+					.size(modelComputeOutputBuffer.frameBytes());
+				vkCmdPipelineBarrier(cmd,
+					VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+					VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
+					0, null, barrier, null);
+			}
+		}
+	}
+
+	private void drawModelComputeDebug(VkCommandBuffer cmd, int slot, ByteBuffer vertPush, ByteBuffer fragPush)
+	{
+		if (!ENABLE_MODEL_COMPUTE_DEBUG_DRAW || modelComputeOutputBuffer == null)
+		{
+			return;
+		}
+		int faceSlots = Math.min(modelInstanceCount * MODEL_COMPUTE_FACE_SLOTS_PER_INSTANCE,
+			MODEL_COMPUTE_OUTPUT_FACE_SLOTS);
+		if (faceSlots <= 0)
+		{
+			return;
+		}
+		try (MemoryStack stack = stackPush())
+		{
+			vkCmdBindVertexBuffers(cmd, 0,
+				stack.longs(modelComputeOutputBuffer.handle()),
+				stack.longs(modelComputeOutputBuffer.frameOffset(slot)));
+			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fillPipeline.handle());
+			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+				fillPipeline.layout(), 0, stack.longs(descriptorSet), null);
+			vkCmdPushConstants(cmd, fillPipeline.layout(), VK_SHADER_STAGE_VERTEX_BIT, 0, vertPush);
+			vkCmdPushConstants(cmd, fillPipeline.layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
+			vkCmdDraw(cmd, faceSlots * 3, 1, 0, 0);
+			vkCmdBindVertexBuffers(cmd, 0,
+				stack.longs(vbuf.handle()),
+				stack.longs(0L));
+		}
 	}
 
 	private int layerStartFor(int layer)
