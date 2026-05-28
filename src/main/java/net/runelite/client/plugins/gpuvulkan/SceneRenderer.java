@@ -58,18 +58,18 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK13.*;
 
 /**
- * Captures OSRS scene geometry into one host-visible vertex buffer that's split
- * into six contiguous regions, one per {@link Layer}. The five static layers
- * (TERRAIN..GAME_OBJECTS) are populated by {@link #captureScene} on scene load;
- * the DYNAMIC layer is refilled each frame by {@link #captureModel}.
+ * Captures OSRS scene geometry into one host-visible vertex buffer with a
+ * static arena followed by per-frame dynamic/overlay arenas. The five static
+ * layers (TERRAIN..GAME_OBJECTS) are populated by {@link #captureScene} on
+ * scene load; dirty static zones and the DYNAMIC layer are refilled in the
+ * current frame arena.
  *
  * <p>{@link #recordDraw} issues one draw per non-empty layer, picking the fill
  * or line pipeline based on each layer's individual wireframe flag, and binds
  * the OSRS texture array as descriptor set 0.
  *
  * <p>Vertex layout (matches {@link ScenePipeline}):
- * {@code [posX posY posZ colorR colorG colorB u v texLayer]} as 8 floats + 1
- * uint per vertex (36 bytes).
+ * {@code [posX posY posZ pad colorR colorG colorB pad light u v texLayer]}.
  */
 @Slf4j
 final class SceneRenderer implements AutoCloseable
@@ -82,8 +82,12 @@ final class SceneRenderer implements AutoCloseable
 	private static final int LAYER_COUNT = LAYERS.length;
 	private static final Layer LAST_STATIC = Layer.GAME_OBJECTS;
 
-	private static final int MAX_VERTICES = 8_000_000;
-	private static final long BUFFER_BYTES = (long) MAX_VERTICES * ScenePipeline.VERTEX_STRIDE;
+	private static final int MAX_STATIC_VERTICES = 5_000_000;
+	private static final int MAX_FRAME_VERTICES = 3_000_000;
+	private static final int MAX_LOGICAL_VERTICES = MAX_STATIC_VERTICES + MAX_FRAME_VERTICES;
+	private static final long STATIC_BUFFER_BYTES = (long) MAX_STATIC_VERTICES * ScenePipeline.VERTEX_STRIDE;
+	private static final long FRAME_BUFFER_BYTES = (long) MAX_FRAME_VERTICES * ScenePipeline.VERTEX_STRIDE;
+	private static final long TOTAL_BUFFER_BYTES = STATIC_BUFFER_BYTES + FRAME_BUFFER_BYTES * FrameSync.FRAMES_IN_FLIGHT;
 	private static final int HSL_HIDDEN = 12345678;
 	private static final int OPAQUE_UNSORTED_FACE_THRESHOLD = 24;
 	private static final int SCENE_OFFSET = (Constants.EXTENDED_SCENE_SIZE - Constants.SCENE_SIZE) / 2;
@@ -102,6 +106,9 @@ final class SceneRenderer implements AutoCloseable
 	private final int slotBytes;
 	private final DrawCallbackStats stats;
 	private long writePtr;
+	private long writeBasePtr;
+	private int writeBaseVertex;
+	private int writeVertexLimit = MAX_STATIC_VERTICES;
 	private final float[] cullLocalX = new float[ModelSorter.MAX_VERTEX_COUNT];
 	private final float[] cullLocalY = new float[ModelSorter.MAX_VERTEX_COUNT];
 	private final float[] cullLocalZ = new float[ModelSorter.MAX_VERTEX_COUNT];
@@ -263,7 +270,7 @@ final class SceneRenderer implements AutoCloseable
 			? new ScenePipeline(device, renderPass, VK_POLYGON_MODE_LINE, true,
 				renderPass.samples(), alphaToCoverage)
 			: null;
-		this.vbuf = new SceneVertexBuffer(device, BUFFER_BYTES, FrameSync.FRAMES_IN_FLIGHT,
+		this.vbuf = new SceneVertexBuffer(device, TOTAL_BUFFER_BYTES, FRAME_BUFFER_BYTES,
 			fillPipeline.descriptorSetLayout(), textureArray);
 		this.mapped = vbuf.mapped();
 		this.descriptorSet = vbuf.descriptorSet();
@@ -299,12 +306,48 @@ final class SceneRenderer implements AutoCloseable
 	{
 		metrics.sceneVertices += regionEnds[LAST_STATIC.ordinal()];
 		metrics.totalVertices += vertexCount;
-		metrics.maxVertices += MAX_VERTICES;
+		metrics.maxVertices += MAX_LOGICAL_VERTICES;
 		metrics.roofRanges += tileRoofCount;
 		metrics.pendingRenderables += pendingRenderables.size();
 		metrics.dirtyZones += dirtyZoneCount;
 		metrics.overflowed |= overflowed;
-		metrics.sceneBufferBytes += BUFFER_BYTES * FrameSync.FRAMES_IN_FLIGHT;
+		metrics.sceneBufferBytes += TOTAL_BUFFER_BYTES;
+	}
+
+	private int staticVertexCount()
+	{
+		return regionEnds[LAST_STATIC.ordinal()];
+	}
+
+	private void useStaticWriteArena()
+	{
+		writeBaseVertex = 0;
+		writeVertexLimit = MAX_STATIC_VERTICES;
+		writeBasePtr = MemoryUtil.memAddress(mapped);
+		writePtr = writeBasePtr;
+	}
+
+	private void useFrameWriteArena(int slot, int logicalVertex)
+	{
+		writeBaseVertex = staticVertexCount();
+		writeVertexLimit = writeBaseVertex + MAX_FRAME_VERTICES;
+		writeBasePtr = MemoryUtil.memAddress(mapped) + STATIC_BUFFER_BYTES + (long) slot * slotBytes;
+		setWriteCursor(logicalVertex);
+	}
+
+	private void setWriteCursor(int logicalVertex)
+	{
+		writePtr = writeBasePtr + (long) (logicalVertex - writeBaseVertex) * ScenePipeline.VERTEX_STRIDE;
+	}
+
+	private boolean reserveVertices(int vertices)
+	{
+		if (vertices < 0 || vertexCount > writeVertexLimit - vertices)
+		{
+			overflow();
+			return false;
+		}
+		return true;
 	}
 
 	/**
@@ -322,9 +365,7 @@ final class SceneRenderer implements AutoCloseable
 		}
 		int slot = sync.currentFrame();
 		vertexCount = overlayNextVertex[slot];
-		writePtr = MemoryUtil.memAddress(mapped)
-			+ (long) slot * slotBytes
-			+ (long) vertexCount * ScenePipeline.VERTEX_STRIDE;
+		useFrameWriteArena(slot, vertexCount);
 		overflowed = false;
 		priorityRangeCount = 0;
 		dynamicOpaqueEnd = -1;
@@ -355,9 +396,7 @@ final class SceneRenderer implements AutoCloseable
 		int slotBit = 1 << slot;
 		int allSlots = (1 << FrameSync.FRAMES_IN_FLIGHT) - 1;
 		vertexCount = overlayNextVertex[slot];
-		writePtr = MemoryUtil.memAddress(mapped)
-			+ (long) slot * slotBytes
-			+ (long) vertexCount * ScenePipeline.VERTEX_STRIDE;
+		useFrameWriteArena(slot, vertexCount);
 
 		final int planes = Math.min(tiles.length, MAX_PLANES);
 		final int sceneSize = Constants.SCENE_SIZE;
@@ -394,9 +433,7 @@ final class SceneRenderer implements AutoCloseable
 		}
 
 		overlayNextVertex[slot] = vertexCount;
-		writePtr = MemoryUtil.memAddress(mapped)
-			+ (long) slot * slotBytes
-			+ (long) vertexCount * ScenePipeline.VERTEX_STRIDE;
+		setWriteCursor(vertexCount);
 	}
 
 	/** Visits one tile (including any bridge tile underneath) within a layer pass. */
@@ -431,7 +468,7 @@ final class SceneRenderer implements AutoCloseable
 			}
 		}
 		vertexCount = 0;
-		writePtr = MemoryUtil.memAddress(mapped);
+		useStaticWriteArena();
 		overflowed = false;
 		tileRoofCount = 0;
 		clearOverlayRanges();
@@ -885,7 +922,7 @@ final class SceneRenderer implements AutoCloseable
 		// id. Texture array layer 0 is white, so +1 maps cleanly.
 		int texLayer = paint.getTexture() + 1;
 
-		if (vertexCount + 6 > MAX_VERTICES) { overflow(); return; }
+		if (!reserveVertices(6)) return;
 
 		writeHslVert(x0, swH, z0, swColor, 0f, 0f, texLayer);
 		writeHslVert(x1, seH, z0, seColor, 1f, 0f, texLayer);
@@ -918,7 +955,7 @@ final class SceneRenderer implements AutoCloseable
 		float lz = sy << 7;
 
 		int faces = faceX.length;
-		if (vertexCount + faces * 3 > MAX_VERTICES) { overflow(); return; }
+		if (!reserveVertices(faces * 3)) return;
 
 		for (int i = 0; i < faces; i++)
 		{
@@ -981,7 +1018,7 @@ final class SceneRenderer implements AutoCloseable
 		// face index arrays for assembled actor models (player composition,
 		// reused NPC bodies); fa.length reads stale trailing data.
 		int faces = m.getFaceCount();
-		if (vertexCount + faces * 3 > MAX_VERTICES) { overflow(); return; }
+		if (!reserveVertices(faces * 3)) return;
 
 		float[] uv = uvScratch;
 		int wrote = 0;
@@ -1186,7 +1223,7 @@ final class SceneRenderer implements AutoCloseable
 			recordPriorityRange(priorityStart);
 			return;
 		}
-		if (vertexCount + faces * 3 > MAX_VERTICES) { overflow(); return; }
+		if (!reserveVertices(faces * 3)) return;
 
 		// Vertex positions are read by computeFaceUvs only; emit uses the
 		// sorter's already-rotated localX/Y/Z.
@@ -1486,7 +1523,7 @@ final class SceneRenderer implements AutoCloseable
 				continue;
 			}
 
-			if (vertexCount + wrote + 3 > MAX_VERTICES)
+			if (vertexCount + wrote > writeVertexLimit - 3)
 			{
 				overflow();
 				break;
@@ -1714,7 +1751,7 @@ final class SceneRenderer implements AutoCloseable
 		// byte-offset binding — MoltenVK's offset translation produces no
 		// visible geometry at hundreds-of-MB offsets on Apple Silicon.
 		final int slot = sync.currentFrame();
-		final int slotFirstVertex = slot * MAX_VERTICES;
+		final int slotFirstVertex = MAX_STATIC_VERTICES + slot * MAX_FRAME_VERTICES - staticVertexCount();
 		final int staticFirstVertex = 0;
 		try (MemoryStack stack = stackPush())
 		{
@@ -1778,6 +1815,17 @@ final class SceneRenderer implements AutoCloseable
 			final int loMin = minPlane;
 			final int loCur = currentPlane;
 			final int loMax = maxPlane;
+			int radiusTiles = (int) Math.ceil(drawDistanceTiles + fogDepthTiles + 2f);
+			int radiusZones = Math.max(1, (radiusTiles + ZONE_SIZE - 1) / ZONE_SIZE);
+			boolean fullZoneRange = radiusZones >= ZONES_PER_SIDE;
+			int camTileX = clamp((int) Math.floor(cameraX / 128f), 0, Constants.SCENE_SIZE - 1);
+			int camTileZ = clamp((int) Math.floor(cameraZ / 128f), 0, Constants.SCENE_SIZE - 1);
+			int camZoneX = camTileX / ZONE_SIZE;
+			int camZoneZ = camTileZ / ZONE_SIZE;
+			int minZoneX = fullZoneRange ? 0 : Math.max(0, camZoneX - radiusZones);
+			int maxZoneX = fullZoneRange ? ZONES_PER_SIDE - 1 : Math.min(ZONES_PER_SIDE - 1, camZoneX + radiusZones);
+			int minZoneZ = fullZoneRange ? 0 : Math.max(0, camZoneZ - radiusZones);
+			int maxZoneZ = fullZoneRange ? ZONES_PER_SIDE - 1 : Math.min(ZONES_PER_SIDE - 1, camZoneZ + radiusZones);
 			int layerStart = 0;
 			for (int i = 0; i < LAYER_COUNT; i++)
 			{
@@ -1812,10 +1860,11 @@ final class SceneRenderer implements AutoCloseable
 					// chopped when their roof id is hidden.
 					for (int p = loMin; p <= loMax; p++)
 					{
-						drawStaticPlane(cmd, i, p, layerStart, cameraX, cameraZ,
-							drawDistanceTiles, fogDepthTiles, skipScratch, skipPairs, p > loCur,
+						drawStaticPlane(cmd, i, p, layerStart,
+							fullZoneRange, minZoneX, maxZoneX, minZoneZ, maxZoneZ,
+							skipScratch, skipPairs, p > loCur,
 							slot, staticFirstVertex, want.layout(), vertPush, fragPush);
-						drawOverlayPlane(cmd, i, p, cameraX, cameraZ, drawDistanceTiles, fogDepthTiles,
+						drawOverlayPlane(cmd, i, p, minZoneX, maxZoneX, minZoneZ, maxZoneZ,
 							skipScratch, skipPairs, p > loCur,
 							slot, slotFirstVertex, want.layout(), vertPush, fragPush);
 					}
@@ -1839,8 +1888,8 @@ final class SceneRenderer implements AutoCloseable
 			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, alphaPipeline.handle());
 			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
 				alphaPipeline.layout(), 0, stack.longs(descriptorSet), null);
-			drawAlphaPass(cmd, loMin, loMax, cameraX, cameraZ,
-				drawDistanceTiles, fogDepthTiles, skipScratch, skipPairs, loCur,
+			drawAlphaPass(cmd, loMin, loMax, fullZoneRange, minZoneX, maxZoneX, minZoneZ, maxZoneZ,
+				skipScratch, skipPairs, loCur,
 				slot, staticFirstVertex, slotFirstVertex, alphaPipeline.layout(), vertPush, alphaFragPush);
 		}
 	}
@@ -1851,7 +1900,7 @@ final class SceneRenderer implements AutoCloseable
 	}
 
 	private void drawAlphaPass(VkCommandBuffer cmd, int loMin, int loMax,
-							   float cameraX, float cameraZ, float drawDistanceTiles, float fogDepthTiles,
+							   boolean fullZoneRange, int minZoneX, int maxZoneX, int minZoneZ, int maxZoneZ,
 							   int[] skips, int skipPairs, int currentPlane,
 							   int slot, int staticFirstVertex, int slotFirstVertex,
 							   long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
@@ -1875,10 +1924,11 @@ final class SceneRenderer implements AutoCloseable
 			{
 				for (int p = loMin; p <= loMax; p++)
 				{
-					drawStaticPlane(cmd, i, p, layerStart, cameraX, cameraZ,
-						drawDistanceTiles, fogDepthTiles, skips, skipPairs, p > currentPlane,
+					drawStaticPlane(cmd, i, p, layerStart,
+						fullZoneRange, minZoneX, maxZoneX, minZoneZ, maxZoneZ,
+						skips, skipPairs, p > currentPlane,
 						slot, staticFirstVertex, pipelineLayout, vertPush, fragPush);
-					drawOverlayPlane(cmd, i, p, cameraX, cameraZ, drawDistanceTiles, fogDepthTiles,
+					drawOverlayPlane(cmd, i, p, minZoneX, maxZoneX, minZoneZ, maxZoneZ,
 						skips, skipPairs, p > currentPlane,
 						slot, slotFirstVertex, pipelineLayout, vertPush, fragPush);
 				}
@@ -1903,7 +1953,7 @@ final class SceneRenderer implements AutoCloseable
 	}
 
 	private void drawStaticPlane(VkCommandBuffer cmd, int layer, int plane, int layerStart,
-								 float cameraX, float cameraZ, float drawDistanceTiles, float fogDepthTiles,
+								 boolean fullZoneRange, int minZoneX, int maxZoneX, int minZoneZ, int maxZoneZ,
 								 int[] skips, int skipPairs, boolean applySkips,
 								 int slot, int slotFirstVertex, long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
 	{
@@ -1914,23 +1964,48 @@ final class SceneRenderer implements AutoCloseable
 			return;
 		}
 
-		int radiusTiles = (int) Math.ceil(drawDistanceTiles + fogDepthTiles + 2f);
-		int radiusZones = Math.max(1, (radiusTiles + ZONE_SIZE - 1) / ZONE_SIZE);
-		if (radiusZones >= ZONES_PER_SIDE && !overlaySlotHasZones[slot])
+		if (fullZoneRange)
 		{
-			drawRange(cmd, planeStart, planeEnd, skips, skipPairs, applySkips,
-				slotFirstVertex, pipelineLayout, vertPush, fragPush);
-			return;
+			if (overlaySlotHasZones[slot] && (!applySkips || skipPairs == 0))
+			{
+				int overlayPairs = 0;
+				for (int zoneIdx = 0; zoneIdx < ZONE_COUNT; zoneIdx++)
+				{
+					if (!overlayZoneValid[slot][zoneIdx])
+					{
+						continue;
+					}
+					int count = zoneVertexCount[layer][plane][zoneIdx];
+					if (count <= 0)
+					{
+						continue;
+					}
+					if (overlayPairs * 2 + 2 > skips.length)
+					{
+						skipScratch = java.util.Arrays.copyOf(skips, skips.length * 2);
+						skips = skipScratch;
+					}
+					int start = zoneVertexStart[layer][plane][zoneIdx];
+					skips[overlayPairs * 2] = start;
+					skips[overlayPairs * 2 + 1] = start + count;
+					overlayPairs++;
+				}
+				drawRange(cmd, planeStart, planeEnd, skips, overlayPairs, overlayPairs > 0,
+					slotFirstVertex, pipelineLayout, vertPush, fragPush);
+				return;
+			}
+			if (overlaySlotHasZones[slot])
+			{
+				// When roof skips are active, keep the simple per-zone path so
+				// roof and overlay skip lists cannot fight each other.
+			}
+			else
+			{
+				drawRange(cmd, planeStart, planeEnd, skips, skipPairs, applySkips,
+					slotFirstVertex, pipelineLayout, vertPush, fragPush);
+				return;
+			}
 		}
-
-		int camTileX = clamp((int) Math.floor(cameraX / 128f), 0, Constants.SCENE_SIZE - 1);
-		int camTileZ = clamp((int) Math.floor(cameraZ / 128f), 0, Constants.SCENE_SIZE - 1);
-		int camZoneX = camTileX / ZONE_SIZE;
-		int camZoneZ = camTileZ / ZONE_SIZE;
-		int minZoneX = radiusZones >= ZONES_PER_SIDE ? 0 : Math.max(0, camZoneX - radiusZones);
-		int maxZoneX = radiusZones >= ZONES_PER_SIDE ? ZONES_PER_SIDE - 1 : Math.min(ZONES_PER_SIDE - 1, camZoneX + radiusZones);
-		int minZoneZ = radiusZones >= ZONES_PER_SIDE ? 0 : Math.max(0, camZoneZ - radiusZones);
-		int maxZoneZ = radiusZones >= ZONES_PER_SIDE ? ZONES_PER_SIDE - 1 : Math.min(ZONES_PER_SIDE - 1, camZoneZ + radiusZones);
 
 		for (int zx = minZoneX; zx <= maxZoneX; zx++)
 		{
@@ -1954,7 +2029,7 @@ final class SceneRenderer implements AutoCloseable
 	}
 
 	private void drawOverlayPlane(VkCommandBuffer cmd, int layer, int plane,
-								  float cameraX, float cameraZ, float drawDistanceTiles, float fogDepthTiles,
+								  int minZoneX, int maxZoneX, int minZoneZ, int maxZoneZ,
 								  int[] skips, int skipPairs, boolean applySkips,
 								  int slot, int slotFirstVertex, long pipelineLayout,
 								  ByteBuffer vertPush, ByteBuffer fragPush)
@@ -1962,31 +2037,6 @@ final class SceneRenderer implements AutoCloseable
 		if (!overlaySlotHasZones[slot])
 		{
 			return;
-		}
-
-		int radiusTiles = (int) Math.ceil(drawDistanceTiles + fogDepthTiles + 2f);
-		int radiusZones = Math.max(1, (radiusTiles + ZONE_SIZE - 1) / ZONE_SIZE);
-		int minZoneX;
-		int maxZoneX;
-		int minZoneZ;
-		int maxZoneZ;
-		if (radiusZones >= ZONES_PER_SIDE)
-		{
-			minZoneX = 0;
-			maxZoneX = ZONES_PER_SIDE - 1;
-			minZoneZ = 0;
-			maxZoneZ = ZONES_PER_SIDE - 1;
-		}
-		else
-		{
-			int camTileX = clamp((int) Math.floor(cameraX / 128f), 0, Constants.SCENE_SIZE - 1);
-			int camTileZ = clamp((int) Math.floor(cameraZ / 128f), 0, Constants.SCENE_SIZE - 1);
-			int camZoneX = camTileX / ZONE_SIZE;
-			int camZoneZ = camTileZ / ZONE_SIZE;
-			minZoneX = Math.max(0, camZoneX - radiusZones);
-			maxZoneX = Math.min(ZONES_PER_SIDE - 1, camZoneX + radiusZones);
-			minZoneZ = Math.max(0, camZoneZ - radiusZones);
-			maxZoneZ = Math.min(ZONES_PER_SIDE - 1, camZoneZ + radiusZones);
 		}
 
 		for (int zx = minZoneX; zx <= maxZoneX; zx++)
