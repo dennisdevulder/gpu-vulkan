@@ -2522,8 +2522,7 @@ final class SceneRenderer implements AutoCloseable
 			return;
 		}
 		modelComputePipeline.recordDispatch(cmd, sync.currentFrame(), modelInstanceCount,
-			MODEL_COMPUTE_FACE_SLOTS_PER_INSTANCE, MODEL_COMPUTE_OUTPUT_FACE_SLOTS,
-			modelComputeDebugX, modelComputeDebugY, modelComputeDebugZ);
+			MODEL_COMPUTE_FACE_SLOTS_PER_INSTANCE, MODEL_COMPUTE_OUTPUT_FACE_SLOTS);
 		if (modelComputeDebugDraw)
 		{
 			try (MemoryStack stack = stackPush())
@@ -2569,7 +2568,7 @@ final class SceneRenderer implements AutoCloseable
 				modelComputeDebugPipeline.layout(), 0, stack.longs(descriptorSet), null);
 			vkCmdPushConstants(cmd, modelComputeDebugPipeline.layout(), VK_SHADER_STAGE_VERTEX_BIT, 0, vertPush);
 			vkCmdPushConstants(cmd, modelComputeDebugPipeline.layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
-			vkCmdDraw(cmd, 3, 1, 0, 0);
+			vkCmdDraw(cmd, faceSlots * 3, 1, 0, 0);
 			vkCmdBindVertexBuffers(cmd, 0,
 				stack.longs(vbuf.handle()),
 				stack.longs(0L));
