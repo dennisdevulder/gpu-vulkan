@@ -104,7 +104,6 @@ final class SceneRenderer implements AutoCloseable
 	private static final int MODEL_COMPUTE_OUTPUT_FACE_SLOTS =
 		(int) (MODEL_COMPUTE_OUTPUT_FRAME_BYTES / (3L * ScenePipeline.VERTEX_STRIDE));
 	private static final boolean ENABLE_MODEL_COMPUTE_PROTOTYPE = true;
-	private static final boolean ENABLE_MODEL_COMPUTE_DEBUG_DRAW = false;
 	private static final int SCENE_OFFSET = (Constants.EXTENDED_SCENE_SIZE - Constants.SCENE_SIZE) / 2;
 	private static final float[] HSL_RGB = buildHslRgbTable();
 
@@ -115,11 +114,18 @@ final class SceneRenderer implements AutoCloseable
 	private final ScenePipeline alphaPipeline;
 	private final ScenePipeline priorityColorPipeline;
 	private final ScenePipeline priorityDepthPipeline;
+	private final ScenePipeline modelComputeDebugPipeline;
 	private final SceneVertexBuffer vbuf;
 	private final ByteBuffer mapped;
 	private final long descriptorSet;
 	private final int slotBytes;
 	private final DrawCallbackStats stats;
+	private volatile boolean modelComputeDebugDraw;
+	private int modelComputeDebugFaceSlots;
+	private boolean modelComputeDebugHasOrigin;
+	private int modelComputeDebugX;
+	private int modelComputeDebugY;
+	private int modelComputeDebugZ;
 	private long writePtr;
 	private long writeBasePtr;
 	private int writeBaseVertex;
@@ -278,11 +284,12 @@ final class SceneRenderer implements AutoCloseable
 
 	SceneRenderer(VulkanDevice device, FrameSync sync,
 		RenderPass renderPass, TextureArray textureArray,
-		DrawCallbackStats stats, boolean alphaToCoverage)
+		DrawCallbackStats stats, boolean alphaToCoverage, boolean modelComputeDebugDraw)
 	{
 		this.device = device;
 		this.sync = sync;
 		this.stats = stats;
+		this.modelComputeDebugDraw = modelComputeDebugDraw;
 		this.fillPipeline = new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL, true,
 			renderPass.samples(), alphaToCoverage);
 		this.alphaPipeline = new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL,
@@ -291,6 +298,10 @@ final class SceneRenderer implements AutoCloseable
 			true, false, true, renderPass.samples(), alphaToCoverage);
 		this.priorityDepthPipeline = new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL,
 			true, true, false, renderPass.samples(), alphaToCoverage);
+		this.modelComputeDebugPipeline = ENABLE_MODEL_COMPUTE_PROTOTYPE
+			? new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL,
+				false, false, true, renderPass.samples(), false, true)
+			: null;
 		// fillModeNonSolid is required for VK_POLYGON_MODE_LINE; without it
 		// (llvmpipe, some embedded SoCs) wireframe collapses to FILL.
 		this.linePipeline = device.supportsFillModeNonSolid()
@@ -319,6 +330,11 @@ final class SceneRenderer implements AutoCloseable
 	void setWireframe(Layer layer, boolean on)
 	{
 		wireframe[layer.ordinal()] = on;
+	}
+
+	void setModelComputeDebugDraw(boolean enabled)
+	{
+		modelComputeDebugDraw = enabled;
 	}
 
 	void setLevelRange(int minLevel, int maxLevel)
@@ -358,6 +374,8 @@ final class SceneRenderer implements AutoCloseable
 		metrics.modelInstanceMax += MAX_MODEL_INSTANCES;
 		metrics.modelInstanceOverflows += modelInstanceOverflowCount;
 		metrics.modelComputeOutputBytes += modelComputeOutputBuffer == null ? 0L : modelComputeOutputBuffer.totalBytes();
+		metrics.modelComputeDebugDraw |= modelComputeDebugDraw;
+		metrics.modelComputeDebugFaces += modelComputeDebugFaceSlots;
 		metrics.overflowed |= overflowed;
 		metrics.sceneBufferBytes += TOTAL_BUFFER_BYTES;
 	}
@@ -495,6 +513,13 @@ final class SceneRenderer implements AutoCloseable
 			return;
 		}
 		modelInstanceBuffer.write(modelInstanceCount, modelInfo, orient, worldX, worldY, worldZ, renderMode);
+		if (!modelComputeDebugHasOrigin)
+		{
+			modelComputeDebugHasOrigin = true;
+			modelComputeDebugX = worldX;
+			modelComputeDebugY = worldY;
+			modelComputeDebugZ = worldZ;
+		}
 		modelInstanceCount++;
 	}
 
@@ -975,6 +1000,8 @@ final class SceneRenderer implements AutoCloseable
 		modelInstanceCount = 0;
 		modelInstanceOverflowCount = 0;
 		modelInstanceFrameActive = true;
+		modelComputeDebugFaceSlots = 0;
+		modelComputeDebugHasOrigin = false;
 		overflowed = false;
 		priorityRangeCount = 0;
 		dynamicOpaqueEnd = -1;
@@ -2495,8 +2522,9 @@ final class SceneRenderer implements AutoCloseable
 			return;
 		}
 		modelComputePipeline.recordDispatch(cmd, sync.currentFrame(), modelInstanceCount,
-			MODEL_COMPUTE_FACE_SLOTS_PER_INSTANCE, MODEL_COMPUTE_OUTPUT_FACE_SLOTS);
-		if (ENABLE_MODEL_COMPUTE_DEBUG_DRAW)
+			MODEL_COMPUTE_FACE_SLOTS_PER_INSTANCE, MODEL_COMPUTE_OUTPUT_FACE_SLOTS,
+			modelComputeDebugX, modelComputeDebugY, modelComputeDebugZ);
+		if (modelComputeDebugDraw)
 		{
 			try (MemoryStack stack = stackPush())
 			{
@@ -2520,12 +2548,13 @@ final class SceneRenderer implements AutoCloseable
 
 	private void drawModelComputeDebug(VkCommandBuffer cmd, int slot, ByteBuffer vertPush, ByteBuffer fragPush)
 	{
-		if (!ENABLE_MODEL_COMPUTE_DEBUG_DRAW || modelComputeOutputBuffer == null)
+		if (!modelComputeDebugDraw || modelComputeOutputBuffer == null || modelComputeDebugPipeline == null)
 		{
 			return;
 		}
 		int faceSlots = Math.min(modelInstanceCount * MODEL_COMPUTE_FACE_SLOTS_PER_INSTANCE,
 			MODEL_COMPUTE_OUTPUT_FACE_SLOTS);
+		modelComputeDebugFaceSlots = faceSlots;
 		if (faceSlots <= 0)
 		{
 			return;
@@ -2535,12 +2564,12 @@ final class SceneRenderer implements AutoCloseable
 			vkCmdBindVertexBuffers(cmd, 0,
 				stack.longs(modelComputeOutputBuffer.handle()),
 				stack.longs(modelComputeOutputBuffer.frameOffset(slot)));
-			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fillPipeline.handle());
+			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, modelComputeDebugPipeline.handle());
 			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-				fillPipeline.layout(), 0, stack.longs(descriptorSet), null);
-			vkCmdPushConstants(cmd, fillPipeline.layout(), VK_SHADER_STAGE_VERTEX_BIT, 0, vertPush);
-			vkCmdPushConstants(cmd, fillPipeline.layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
-			vkCmdDraw(cmd, faceSlots * 3, 1, 0, 0);
+				modelComputeDebugPipeline.layout(), 0, stack.longs(descriptorSet), null);
+			vkCmdPushConstants(cmd, modelComputeDebugPipeline.layout(), VK_SHADER_STAGE_VERTEX_BIT, 0, vertPush);
+			vkCmdPushConstants(cmd, modelComputeDebugPipeline.layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
+			vkCmdDraw(cmd, 3, 1, 0, 0);
 			vkCmdBindVertexBuffers(cmd, 0,
 				stack.longs(vbuf.handle()),
 				stack.longs(0L));
@@ -2861,6 +2890,7 @@ final class SceneRenderer implements AutoCloseable
 		alphaPipeline.close();
 		priorityColorPipeline.close();
 		priorityDepthPipeline.close();
+		if (modelComputeDebugPipeline != null) modelComputeDebugPipeline.close();
 		if (linePipeline != null) linePipeline.close();
 	}
 

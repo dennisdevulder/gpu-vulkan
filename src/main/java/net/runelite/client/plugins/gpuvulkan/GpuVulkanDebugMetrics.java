@@ -17,6 +17,8 @@ public final class GpuVulkanDebugMetrics
 	int modelInstanceMax;
 	int modelInstanceOverflows;
 	long modelComputeOutputBytes;
+	boolean modelComputeDebugDraw;
+	int modelComputeDebugFaces;
 	boolean overflowed;
 	long sceneBufferBytes;
 }

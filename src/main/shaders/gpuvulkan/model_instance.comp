@@ -35,6 +35,9 @@ layout(push_constant) uniform Push
 {
 	uint instanceCount;
 	uint faceSlotsPerInstance;
+	int debugX;
+	int debugY;
+	int debugZ;
 } pc;
 
 const float PI2_OVER_2048 = 0.0030679615757712823;
@@ -56,15 +59,15 @@ int readInt(uint meshBaseWord, uint offsetBytes, uint index)
 	return int(meshWords[meshBaseWord + (offsetBytes >> 2) + index]);
 }
 
-void writeVertex(uint vertexWordBase, vec3 position, uint colorWord, float light)
+void writeVertex(uint vertexWordBase, vec3 position, vec3 color, float light)
 {
 	vertexWords[vertexWordBase + 0u] = floatBitsToUint(position.x);
 	vertexWords[vertexWordBase + 1u] = floatBitsToUint(position.y);
 	vertexWords[vertexWordBase + 2u] = floatBitsToUint(position.z);
 	vertexWords[vertexWordBase + 3u] = 0u;
-	vertexWords[vertexWordBase + 4u] = colorWord;
-	vertexWords[vertexWordBase + 5u] = colorWord;
-	vertexWords[vertexWordBase + 6u] = colorWord;
+	vertexWords[vertexWordBase + 4u] = floatBitsToUint(color.x);
+	vertexWords[vertexWordBase + 5u] = floatBitsToUint(color.y);
+	vertexWords[vertexWordBase + 6u] = floatBitsToUint(color.z);
 	vertexWords[vertexWordBase + 7u] = 0u;
 	vertexWords[vertexWordBase + 8u] = floatBitsToUint(light);
 	vertexWords[vertexWordBase + 9u] = 0u;
@@ -84,6 +87,15 @@ vec3 transformVertex(float localX, float localY, float localZ, float orient, vec
 
 void main()
 {
+	if (gl_GlobalInvocationID.x == 0u)
+	{
+		vec3 origin = vec3(float(pc.debugX) + 320.0, float(pc.debugY) + 640.0, float(pc.debugZ));
+		writeVertex(0u, origin + vec3(-192.0, 0.0, -192.0), vec3(1.0, 0.0, 1.0), 65535.0);
+		writeVertex(12u, origin + vec3(192.0, 0.0, -192.0), vec3(0.0, 1.0, 1.0), 65535.0);
+		writeVertex(24u, origin + vec3(0.0, 0.0, 192.0), vec3(1.0, 1.0, 0.0), 65535.0);
+		return;
+	}
+
 	uint instanceId = gl_GlobalInvocationID.x;
 	uint faceSlot = instanceId % pc.faceSlotsPerInstance;
 	instanceId /= pc.faceSlotsPerInstance;
@@ -97,6 +109,7 @@ void main()
 	{
 		return;
 	}
+	uint vertexBase = ((instanceId * pc.faceSlotsPerInstance) + faceSlot) * 36u;
 
 	uint meshBaseWord = instance.meshOffsetLo >> 2;
 	uint verticesXOffset = meshWords[meshBaseWord + HEADER_VERTICES_X];
@@ -140,9 +153,8 @@ void main()
 		float(instance.orient),
 		world);
 
-	uint colorWord = uint(readInt(meshBaseWord, colorAOffset, faceSlot) & 0xffff);
-	uint vertexBase = ((instanceId * pc.faceSlotsPerInstance) + faceSlot) * 36u;
-	writeVertex(vertexBase, a, colorWord, float(colorWord));
-	writeVertex(vertexBase + 12u, b, colorWord, float(colorWord));
-	writeVertex(vertexBase + 24u, c, colorWord, float(colorWord));
+	vec3 lifted = vec3(0.0, 24.0, 0.0);
+	writeVertex(vertexBase, a + lifted, vec3(1.0, 0.0, 1.0), 65535.0);
+	writeVertex(vertexBase + 12u, b + lifted, vec3(0.0, 1.0, 1.0), 65535.0);
+	writeVertex(vertexBase + 24u, c + lifted, vec3(1.0, 1.0, 0.0), 65535.0);
 }

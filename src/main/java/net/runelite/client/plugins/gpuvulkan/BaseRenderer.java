@@ -20,6 +20,7 @@ final class BaseRenderer implements VulkanRenderExtension
 		sceneRenderer = context.createSceneRenderer();
 		interfaceRenderer = new InterfaceRenderer(context.renderer());
 		applyWireframeConfig();
+		applyModelComputeDebugConfig();
 	}
 
 	@Override
@@ -36,6 +37,10 @@ final class BaseRenderer implements VulkanRenderExtension
 		if (event.getKey() != null && event.getKey().startsWith("wireframe"))
 		{
 			applyWireframeConfig();
+		}
+		if ("modelComputeDebugDraw".equals(event.getKey()))
+		{
+			applyModelComputeDebugConfig();
 		}
 	}
 
@@ -193,5 +198,11 @@ final class BaseRenderer implements VulkanRenderExtension
 		sceneRenderer.setWireframeGround(config.wireframeGround());
 		sceneRenderer.setWireframeGameObjects(config.wireframeGameObjects());
 		sceneRenderer.setWireframeDynamic(config.wireframeDynamic());
+	}
+
+	private void applyModelComputeDebugConfig()
+	{
+		if (sceneRenderer == null || config == null) return;
+		sceneRenderer.setModelComputeDebugDraw(config.modelComputeDebugDraw());
 	}
 }

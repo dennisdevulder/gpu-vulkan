@@ -11,9 +11,10 @@ final class DefaultVulkanSceneRenderer implements VulkanSceneRenderer
 
 	DefaultVulkanSceneRenderer(VulkanDevice device, FrameSync sync,
 		RenderPass renderPass, TextureArray textureArray,
-		DrawCallbackStats stats, boolean alphaToCoverage)
+		DrawCallbackStats stats, boolean alphaToCoverage, boolean modelComputeDebugDraw)
 	{
-		this.sceneRenderer = new SceneRenderer(device, sync, renderPass, textureArray, stats, alphaToCoverage);
+		this.sceneRenderer = new SceneRenderer(device, sync, renderPass, textureArray, stats,
+			alphaToCoverage, modelComputeDebugDraw);
 	}
 
 	@Override
@@ -134,6 +135,12 @@ final class DefaultVulkanSceneRenderer implements VulkanSceneRenderer
 	public void setWireframeDynamic(boolean enabled)
 	{
 		sceneRenderer.setWireframe(SceneRenderer.Layer.DYNAMIC, enabled);
+	}
+
+	@Override
+	public void setModelComputeDebugDraw(boolean enabled)
+	{
+		sceneRenderer.setModelComputeDebugDraw(enabled);
 	}
 
 	@Override

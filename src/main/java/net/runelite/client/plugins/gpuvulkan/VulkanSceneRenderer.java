@@ -65,6 +65,10 @@ public interface VulkanSceneRenderer extends AutoCloseable
 
 	void setWireframeDynamic(boolean enabled);
 
+	default void setModelComputeDebugDraw(boolean enabled)
+	{
+	}
+
 	void recordDraw(VulkanFrameContext frame);
 
 	default void recordBeforeRenderPass(VkCommandBuffer commandBuffer)

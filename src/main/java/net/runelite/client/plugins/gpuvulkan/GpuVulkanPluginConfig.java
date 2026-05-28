@@ -211,6 +211,15 @@ public interface GpuVulkanPluginConfig extends Config
 	)
 	default boolean debugOverlay() { return false; }
 
+	@ConfigItem(
+		keyName = "modelComputeDebugDraw",
+		name = "Model compute debug draw",
+		description = "Draw the experimental GPU-generated model probe geometry over the normal scene. Development only; visuals are intentionally incomplete.",
+		section = DEBUG_SECTION,
+		position = 1
+	)
+	default boolean modelComputeDebugDraw() { return false; }
+
 	@ConfigSection(
 		name = "Wireframe",
 		description = "Render individual scene layers as wireframe. Each toggle is independent.",
