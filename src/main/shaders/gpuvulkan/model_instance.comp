@@ -1,0 +1,55 @@
+#version 450
+
+layout(local_size_x = 64) in;
+
+struct ModelInstance
+{
+	uint meshOffsetLo;
+	uint meshOffsetHi;
+	int meshBytes;
+	int faceCount;
+	int vertexCount;
+	int orient;
+	int worldX;
+	int worldY;
+	int worldZ;
+	int renderMode;
+};
+
+layout(set = 0, binding = 0, std430) readonly buffer ModelMeshData
+{
+	uint meshWords[];
+};
+
+layout(set = 0, binding = 1, std430) readonly buffer ModelInstances
+{
+	ModelInstance instances[];
+};
+
+layout(push_constant) uniform Push
+{
+	uint instanceCount;
+} pc;
+
+void main()
+{
+	uint instanceId = gl_GlobalInvocationID.x;
+	if (instanceId >= pc.instanceCount)
+	{
+		return;
+	}
+
+	ModelInstance instance = instances[instanceId];
+	if (instance.faceCount <= 0 || instance.meshBytes <= 0)
+	{
+		return;
+	}
+
+	// First-stage prototype: validate GPU-side access to the passive mesh and
+	// instance streams. Actual vertex emission is added once this path is live.
+	uint meshWord = meshWords[instance.meshOffsetLo >> 2];
+	if (meshWord == 0xffffffffu)
+	{
+		return;
+	}
+}

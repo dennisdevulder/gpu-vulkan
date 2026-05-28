@@ -96,6 +96,7 @@ final class SceneRenderer implements AutoCloseable
 	private static final long MODEL_MESH_ARENA_BYTES = 64L * 1024L * 1024L;
 	private static final int MAX_MODEL_INSTANCES = 65_536;
 	private static final int MODEL_INSTANCE_STRIDE = 40;
+	private static final boolean ENABLE_MODEL_COMPUTE_PROTOTYPE = false;
 	private static final int SCENE_OFFSET = (Constants.EXTENDED_SCENE_SIZE - Constants.SCENE_SIZE) / 2;
 	private static final float[] HSL_RGB = buildHslRgbTable();
 
@@ -124,6 +125,7 @@ final class SceneRenderer implements AutoCloseable
 	private final ModelCacheEntry[] modelCacheBuckets = new ModelCacheEntry[MODEL_CACHE_BUCKETS];
 	private final ModelMeshArena modelMeshArena;
 	private final ModelInstanceBuffer modelInstanceBuffer;
+	private final ModelComputePipeline modelComputePipeline;
 	private int modelCacheSize;
 	private int modelInstanceCount;
 	private int modelInstanceOverflowCount;
@@ -294,6 +296,9 @@ final class SceneRenderer implements AutoCloseable
 		this.modelMeshArena = new ModelMeshArena(device, MODEL_MESH_ARENA_BYTES);
 		this.modelInstanceBuffer = new ModelInstanceBuffer(device,
 			(long) MAX_MODEL_INSTANCES * MODEL_INSTANCE_STRIDE * FrameSync.FRAMES_IN_FLIGHT);
+		this.modelComputePipeline = ENABLE_MODEL_COMPUTE_PROTOTYPE
+			? new ModelComputePipeline(device)
+			: null;
 	}
 
 	void setWireframe(Layer layer, boolean on)
@@ -2675,6 +2680,7 @@ final class SceneRenderer implements AutoCloseable
 	public void close()
 	{
 		vkDeviceWaitIdle(device.handle());
+		if (modelComputePipeline != null) modelComputePipeline.close();
 		modelInstanceBuffer.close();
 		modelMeshArena.close();
 		vbuf.close();
