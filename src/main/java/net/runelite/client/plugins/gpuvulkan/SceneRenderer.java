@@ -96,7 +96,7 @@ final class SceneRenderer implements AutoCloseable
 	private static final long MODEL_MESH_ARENA_BYTES = 64L * 1024L * 1024L;
 	private static final int MAX_MODEL_INSTANCES = 65_536;
 	private static final int MODEL_INSTANCE_STRIDE = 40;
-	private static final boolean ENABLE_MODEL_COMPUTE_PROTOTYPE = false;
+	private static final boolean ENABLE_MODEL_COMPUTE_PROTOTYPE = true;
 	private static final int SCENE_OFFSET = (Constants.EXTENDED_SCENE_SIZE - Constants.SCENE_SIZE) / 2;
 	private static final float[] HSL_RGB = buildHslRgbTable();
 
