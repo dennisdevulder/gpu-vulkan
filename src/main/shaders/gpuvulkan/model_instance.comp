@@ -26,6 +26,11 @@ layout(set = 0, binding = 1, std430) readonly buffer ModelInstances
 	ModelInstance instances[];
 };
 
+layout(set = 0, binding = 2, std430) writeonly buffer GeneratedVertices
+{
+	uint vertexWords[];
+};
+
 layout(push_constant) uniform Push
 {
 	uint instanceCount;
@@ -52,4 +57,18 @@ void main()
 	{
 		return;
 	}
+
+	uint vertexBase = instanceId * 12u;
+	vertexWords[vertexBase + 0u] = floatBitsToUint(float(instance.worldX));
+	vertexWords[vertexBase + 1u] = floatBitsToUint(float(instance.worldY));
+	vertexWords[vertexBase + 2u] = floatBitsToUint(float(instance.worldZ));
+	vertexWords[vertexBase + 3u] = 0u;
+	vertexWords[vertexBase + 4u] = meshWord;
+	vertexWords[vertexBase + 5u] = uint(instance.faceCount);
+	vertexWords[vertexBase + 6u] = uint(instance.vertexCount);
+	vertexWords[vertexBase + 7u] = 0u;
+	vertexWords[vertexBase + 8u] = 0u;
+	vertexWords[vertexBase + 9u] = 0u;
+	vertexWords[vertexBase + 10u] = 0u;
+	vertexWords[vertexBase + 11u] = 0u;
 }

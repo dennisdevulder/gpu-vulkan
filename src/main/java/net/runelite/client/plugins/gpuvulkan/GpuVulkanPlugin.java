@@ -821,6 +821,10 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			+ mib(metrics.modelMeshCapacityBytes) + " MiB");
 		lines.add("model inst: " + compactCount(metrics.modelInstances) + " / "
 			+ compactCount(metrics.modelInstanceMax) + " o=" + metrics.modelInstanceOverflows);
+		if (metrics.modelComputeOutputBytes > 0L)
+		{
+			lines.add("model out: " + mib(metrics.modelComputeOutputBytes) + " MiB");
+		}
 		lines.add("overflow: " + (metrics.overflowed ? "yes" : "no"));
 		lines.add("scene/pre/post: " + stats.drawSceneCount() + " / "
 			+ stats.preSceneDrawCount() + " / " + stats.postDrawSceneCount());
