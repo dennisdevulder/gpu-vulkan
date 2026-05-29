@@ -16,11 +16,11 @@ import static org.lwjgl.vulkan.VK13.*;
 
 /**
  * Owns the scene's host-visible vertex buffer and its descriptor set. The
- * buffer is sized for {@code framesInFlight} contiguous slots of
- * {@code slotBytes} each so the CPU can write the next frame's geometry while
- * the GPU is still reading the previous frame's — without that partition the
- * write races the GPU read (spec-illegal even when no corruption is observed).
- * Bind with offset {@code slot * slotBytes()} per frame.
+ * buffer contains one static scene arena followed by {@code framesInFlight}
+ * dynamic/overlay arenas. The CPU can write the next frame's dynamic geometry
+ * while the GPU is still reading the previous frame's arena. Static scene
+ * geometry lives once at the start of the buffer and is drawn with a zero
+ * first-vertex base.
  *
  * <p>The descriptor set has two bindings: 0 = OSRS texture array (combined
  * image sampler), 1 = texture-animation UBO. Both are static for the plugin
@@ -36,12 +36,12 @@ final class SceneVertexBuffer implements AutoCloseable
 	private final long descriptorPool;
 	private final long descriptorSet;
 
-	SceneVertexBuffer(VulkanDevice device, long slotBytes, int framesInFlight,
+	SceneVertexBuffer(VulkanDevice device, long totalBytes, long slotBytes,
 		long descriptorSetLayout, TextureArray textureArray)
 	{
 		this.device = device;
 		this.slotBytes = slotBytes;
-		this.vertexBuffer = new Buffer(device, slotBytes * framesInFlight,
+		this.vertexBuffer = new Buffer(device, totalBytes,
 			VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
 			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 		vertexBuffer.mapPersistent();

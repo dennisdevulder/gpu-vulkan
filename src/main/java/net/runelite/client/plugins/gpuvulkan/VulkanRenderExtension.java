@@ -27,6 +27,12 @@ public interface VulkanRenderExtension extends AutoCloseable
 
 	default void invalidateCapturedScene() {}
 
+	default void invalidateZone(Scene scene, int zx, int zz) {}
+
+	default void rebuildDirtyZones(Scene scene) {}
+
+	default void drawPass(int pass) {}
+
 	default void captureScene(Scene scene) {}
 
 	default void captureModel(Model model, int orientation, int worldX, int worldY, int worldZ) {}
@@ -39,6 +45,12 @@ public interface VulkanRenderExtension extends AutoCloseable
 	default void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ, int renderMode)
 	{
 		captureModel(projection, model, orientation, worldX, worldY, worldZ);
+	}
+
+	default void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ,
+		int renderMode, boolean actorModel)
+	{
+		captureModel(projection, model, orientation, worldX, worldY, worldZ, renderMode);
 	}
 
 	default void setLevelRange(int minLevel, int currentLevel, int maxLevel)

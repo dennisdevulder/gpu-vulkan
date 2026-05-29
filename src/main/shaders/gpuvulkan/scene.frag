@@ -37,7 +37,7 @@ layout(push_constant) uniform Push {
     layout(offset = 112) vec4 fragExtras;  // .x = textureLightMode (0 = light-only, 1 = full HSL tint)
                                            // .y = colorBlindMode (0 NONE, 1 PROTAN, 2 DEUTERAN, 3 TRITAN)
                                            // .z = colorBlindIntensity (0..1)
-                                           // .w = smoothBanding (0 = per-fragment HSL decode, 1 = per-vertex RGB interp)
+                                           // .w = smoothBanding + 10 * alphaPass
 } push;
 
 layout(location = 0) in vec3 vColor;       // CPU-decoded per-vertex RGB; smooth-banding term
@@ -110,15 +110,20 @@ void main() {
     // Engine invisibility sentinel — discard rather than letting
     // alpha-to-coverage write zero samples (cheaper, skips depth write).
     if (vTrans == 255u) discard;
+    int alphaPass = int(push.fragExtras.w / 10.0);
+    if (alphaPass == 0 && vTrans != 0u) discard;
+    if (alphaPass != 0 && vTrans == 0u) discard;
+
     int hsl = int(vHslPacked);
     int lum =  hsl        & 0x7F;
+    float smoothBanding = push.fragExtras.w - float(alphaPass * 10);
 
     vec3 rgb;
     if (vTexLayer == 0u) {
         // smoothBanding mixes per-fragment HSL decode (faceted, stock's
         // default-off look) with rasterizer-interpolated per-vertex RGB
         // (smooth gradients, stock's default-on look).
-        if (push.fragExtras.w >= 0.5) {
+        if (smoothBanding >= 0.5) {
             rgb = vColor;
         } else {
             int hue = (hsl >> 10) & 0x3F;

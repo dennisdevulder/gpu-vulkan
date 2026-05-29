@@ -59,6 +59,11 @@ final class Swapchain implements AutoCloseable
 		return imageViews;
 	}
 
+	long image(int index)
+	{
+		return images[index];
+	}
+
 	int imageFormat()
 	{
 		return imageFormat;
@@ -152,7 +157,7 @@ final class Swapchain implements AutoCloseable
 				.imageColorSpace(format.colorSpace())
 				.imageExtent(e -> e.width(width).height(height))
 				.imageArrayLayers(1)
-				.imageUsage(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
+				.imageUsage(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)
 				.imageSharingMode(VK_SHARING_MODE_EXCLUSIVE)
 				.preTransform(caps.currentTransform())
 				.compositeAlpha(KHRSurface.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)

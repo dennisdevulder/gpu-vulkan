@@ -49,26 +49,28 @@ import net.runelite.api.SceneTileModel;
 import net.runelite.api.SceneTilePaint;
 import net.runelite.api.Tile;
 import net.runelite.api.WallObject;
+import net.runelite.api.hooks.DrawCallbacks;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
+import org.lwjgl.vulkan.VkBufferMemoryBarrier;
 import org.lwjgl.vulkan.VkCommandBuffer;
 
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK13.*;
 
 /**
- * Captures OSRS scene geometry into one host-visible vertex buffer that's split
- * into six contiguous regions, one per {@link Layer}. The five static layers
- * (TERRAIN..GAME_OBJECTS) are populated by {@link #captureScene} on scene load;
- * the DYNAMIC layer is refilled each frame by {@link #captureModel}.
+ * Captures OSRS scene geometry into one host-visible vertex buffer with a
+ * static arena followed by per-frame dynamic/overlay arenas. The five static
+ * layers (TERRAIN..GAME_OBJECTS) are populated by {@link #captureScene} on
+ * scene load; dirty static zones and the DYNAMIC layer are refilled in the
+ * current frame arena.
  *
  * <p>{@link #recordDraw} issues one draw per non-empty layer, picking the fill
  * or line pipeline based on each layer's individual wireframe flag, and binds
  * the OSRS texture array as descriptor set 0.
  *
  * <p>Vertex layout (matches {@link ScenePipeline}):
- * {@code [posX posY posZ colorR colorG colorB u v texLayer]} as 8 floats + 1
- * uint per vertex (36 bytes).
+ * {@code [posX posY posZ pad colorR colorG colorB pad light u v texLayer]}.
  */
 @Slf4j
 final class SceneRenderer implements AutoCloseable
@@ -81,10 +83,27 @@ final class SceneRenderer implements AutoCloseable
 	private static final int LAYER_COUNT = LAYERS.length;
 	private static final Layer LAST_STATIC = Layer.GAME_OBJECTS;
 
-	private static final int MAX_VERTICES = 8_000_000;
-	private static final long BUFFER_BYTES = (long) MAX_VERTICES * ScenePipeline.VERTEX_STRIDE;
+	private static final int MAX_STATIC_VERTICES = 5_000_000;
+	private static final int MAX_FRAME_VERTICES = 3_000_000;
+	private static final int MAX_LOGICAL_VERTICES = MAX_STATIC_VERTICES + MAX_FRAME_VERTICES;
+	private static final long STATIC_BUFFER_BYTES = (long) MAX_STATIC_VERTICES * ScenePipeline.VERTEX_STRIDE;
+	private static final long FRAME_BUFFER_BYTES = (long) MAX_FRAME_VERTICES * ScenePipeline.VERTEX_STRIDE;
+	private static final long TOTAL_BUFFER_BYTES = STATIC_BUFFER_BYTES + FRAME_BUFFER_BYTES * FrameSync.FRAMES_IN_FLIGHT;
 	private static final int HSL_HIDDEN = 12345678;
 	private static final int OPAQUE_UNSORTED_FACE_THRESHOLD = 24;
+	private static final int MAX_MODEL_CACHE_ENTRIES = 8192;
+	private static final int MODEL_CACHE_BUCKETS = 16384;
+	private static final int MODEL_CACHE_BUCKET_MASK = MODEL_CACHE_BUCKETS - 1;
+	private static final long MODEL_MESH_ARENA_BYTES = 64L * 1024L * 1024L;
+	private static final int MAX_MODEL_INSTANCES = 65_536;
+	private static final int MODEL_INSTANCE_STRIDE = 56;
+	private static final int MODEL_MESH_HEADER_INTS = 16;
+	private static final int MODEL_MESH_HEADER_BYTES = MODEL_MESH_HEADER_INTS * Integer.BYTES;
+	private static final long MODEL_COMPUTE_OUTPUT_FRAME_BYTES = 32L * 1024L * 1024L;
+	private static final int MODEL_COMPUTE_OUTPUT_FACE_SLOTS =
+		(int) (MODEL_COMPUTE_OUTPUT_FRAME_BYTES / (3L * ScenePipeline.VERTEX_STRIDE));
+	private static final int MODEL_COMPUTE_FACE_INDEX_SLOTS = MODEL_COMPUTE_OUTPUT_FACE_SLOTS;
+	private static final boolean ENABLE_MODEL_COMPUTE_PROTOTYPE = true;
 	private static final int SCENE_OFFSET = (Constants.EXTENDED_SCENE_SIZE - Constants.SCENE_SIZE) / 2;
 	private static final float[] HSL_RGB = buildHslRgbTable();
 
@@ -92,18 +111,60 @@ final class SceneRenderer implements AutoCloseable
 	private final FrameSync sync;
 	private final ScenePipeline fillPipeline;
 	private final ScenePipeline linePipeline;
+	private final ScenePipeline alphaPipeline;
+	private final ScenePipeline priorityColorPipeline;
+	private final ScenePipeline priorityDepthPipeline;
+	private final ScenePipeline modelComputeDebugPipeline;
 	private final SceneVertexBuffer vbuf;
 	private final ByteBuffer mapped;
 	private final long descriptorSet;
 	private final int slotBytes;
 	private final DrawCallbackStats stats;
+	private volatile boolean modelComputeDebugDraw;
+	private volatile boolean modelComputeReplacement;
+	private int modelComputeDebugFaceSlots;
+	private int modelComputeClippedFaces;
+	private int modelComputeTrackedFaces;
+	private int modelComputeCandidateFaces;
+	private int modelComputeReplacedFaces;
+	private int modelComputeReplacedSortedFaces;
+	private int modelComputeReplacedPriorityFaces;
+	private int modelComputeSortedFaces;
+	private int modelComputePriorityFaces;
+	private int modelComputeTransparentFaces;
+	private int modelComputeTexturedFaces;
+	private int modelComputeBiasedFaces;
+	private int modelComputeOverrideFaces;
+	private int modelComputeActorFaces;
+	private int modelComputeOutputFaceCursor;
+	private int modelComputeMaxFacesPerInstance;
+	private int modelComputeFaceIndexCursor;
+	private boolean modelComputeDebugHasOrigin;
+	private int modelComputeDebugX;
+	private int modelComputeDebugY;
+	private int modelComputeDebugZ;
 	private long writePtr;
+	private long writeBasePtr;
+	private int writeBaseVertex;
+	private int writeVertexLimit = MAX_STATIC_VERTICES;
 	private final float[] cullLocalX = new float[ModelSorter.MAX_VERTEX_COUNT];
 	private final float[] cullLocalY = new float[ModelSorter.MAX_VERTEX_COUNT];
 	private final float[] cullLocalZ = new float[ModelSorter.MAX_VERTEX_COUNT];
 	private final float[] cullProjX = new float[ModelSorter.MAX_VERTEX_COUNT];
 	private final float[] cullProjY = new float[ModelSorter.MAX_VERTEX_COUNT];
 	private final float[] cullProjectScratch = new float[3];
+	private final ModelCacheEntry[] modelCacheBuckets = new ModelCacheEntry[MODEL_CACHE_BUCKETS];
+	private final ModelMeshArena modelMeshArena;
+	private final ModelInstanceBuffer modelInstanceBuffer;
+	private final ModelFaceIndexBuffer modelFaceIndexBuffer;
+	private final ModelComputeOutputBuffer modelComputeOutputBuffer;
+	private final ModelComputePipeline modelComputePipeline;
+	private int modelCacheSize;
+	private int modelInstanceCount;
+	private int modelInstanceOverflowCount;
+	private boolean modelInstanceFrameActive;
+	private long modelCacheHits;
+	private long modelCacheMisses;
 
 	private static final int MAX_PLANES = 4;
 
@@ -111,6 +172,7 @@ final class SceneRenderer implements AutoCloseable
 	static final int ZONE_SIZE = 8;
 	static final int ZONES_PER_SIDE = Constants.SCENE_SIZE / ZONE_SIZE;
 	static final int ZONE_COUNT = ZONES_PER_SIDE * ZONES_PER_SIDE;
+	private static final int TOPLEVEL_ZONE_OFFSET = SCENE_OFFSET / ZONE_SIZE;
 
 	private final int[] regionEnds = new int[LAYER_COUNT];
 	/** Per-layer, per-plane: vertex count after that plane's tiles emitted.
@@ -123,8 +185,23 @@ final class SceneRenderer implements AutoCloseable
 	 *  geometry outside the configured scene/fog radius. */
 	private final int[][][] zoneVertexStart = new int[LAYER_COUNT][MAX_PLANES][ZONE_COUNT];
 	private final int[][][] zoneVertexCount = new int[LAYER_COUNT][MAX_PLANES][ZONE_COUNT];
+	private final int[][][][] overlayZoneStart =
+		new int[FrameSync.FRAMES_IN_FLIGHT][LAYER_COUNT][MAX_PLANES][ZONE_COUNT];
+	private final int[][][][] overlayZoneCount =
+		new int[FrameSync.FRAMES_IN_FLIGHT][LAYER_COUNT][MAX_PLANES][ZONE_COUNT];
+	private final boolean[][] overlayZoneValid = new boolean[FrameSync.FRAMES_IN_FLIGHT][ZONE_COUNT];
+	private final boolean[] overlaySlotHasZones = new boolean[FrameSync.FRAMES_IN_FLIGHT];
+	private final int[] overlayNextVertex = new int[FrameSync.FRAMES_IN_FLIGHT];
 
 	private final boolean[] wireframe = new boolean[LAYER_COUNT];
+	private int[] priorityRangeStarts = new int[1024];
+	private int[] priorityRangeEnds = new int[1024];
+	private int[] prioritySkipPairs = new int[2048];
+	private int priorityRangeCount;
+	private int[] computePriorityFaceStarts = new int[256];
+	private int[] computePriorityFaceEnds = new int[256];
+	private int computePriorityRangeCount;
+	private int dynamicOpaqueEnd = -1;
 	/** Plane range to render this frame, forwarded from preSceneDraw's
 	 *  (minLevel, level, maxLevel). Roof hiding only applies above the
 	 *  current plane, matching the stock GPU plugin's zone renderer. */
@@ -144,8 +221,12 @@ final class SceneRenderer implements AutoCloseable
 	private int[] tileRoofStarts   = new int[2048];
 	private int[] tileRoofCounts   = new int[2048];
 	private int   tileRoofCount;
+	private boolean rebuildingOverlayZone;
 	/** Sorted [start, end) pairs of vertex sub-ranges to skip this frame. */
 	private int[] skipScratch = new int[256];
+	private final boolean[] dirtyZones = new boolean[ZONE_COUNT];
+	private final int[] dirtyZoneSlotMask = new int[ZONE_COUNT];
+	private int dirtyZoneCount;
 
 	private int vertexCount;
 	private boolean overflowed;
@@ -185,12 +266,37 @@ final class SceneRenderer implements AutoCloseable
 	{
 		vertexCount = 0;
 		tileRoofCount = 0;
+		java.util.Arrays.fill(dirtyZones, false);
+		java.util.Arrays.fill(dirtyZoneSlotMask, 0);
+		dirtyZoneCount = 0;
 		pendingRenderables.clear();
+		clearModelCache();
 		for (int i = 0; i < LAYER_COUNT; i++)
 		{
 			regionEnds[i] = 0;
 			for (int p = 0; p < MAX_PLANES; p++) planeEnds[i][p] = 0;
 		}
+		clearOverlayRanges();
+	}
+
+	void invalidateZone(Scene scene, int zx, int zz)
+	{
+		if (scene != null && scene.getWorldViewId() == net.runelite.api.WorldView.TOPLEVEL)
+		{
+			zx -= TOPLEVEL_ZONE_OFFSET;
+			zz -= TOPLEVEL_ZONE_OFFSET;
+		}
+		if (zx < 0 || zz < 0 || zx >= ZONES_PER_SIDE || zz >= ZONES_PER_SIDE)
+		{
+			return;
+		}
+		int zone = zx * ZONES_PER_SIDE + zz;
+		if (!dirtyZones[zone])
+		{
+			dirtyZones[zone] = true;
+			dirtyZoneCount++;
+		}
+		dirtyZoneSlotMask[zone] = 0;
 	}
 
 	/** Single instance reused across captures — all captures run on the
@@ -199,29 +305,65 @@ final class SceneRenderer implements AutoCloseable
 
 	SceneRenderer(VulkanDevice device, FrameSync sync,
 		RenderPass renderPass, TextureArray textureArray,
-		DrawCallbackStats stats, boolean alphaToCoverage)
+		DrawCallbackStats stats, boolean alphaToCoverage, boolean modelComputeDebugDraw)
 	{
 		this.device = device;
 		this.sync = sync;
 		this.stats = stats;
+		this.modelComputeDebugDraw = modelComputeDebugDraw;
 		this.fillPipeline = new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL, true,
 			renderPass.samples(), alphaToCoverage);
+		this.alphaPipeline = new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL,
+			true, false, true, renderPass.samples(), false, true);
+		this.priorityColorPipeline = new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL,
+			true, false, true, renderPass.samples(), alphaToCoverage);
+		this.priorityDepthPipeline = new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL,
+			true, true, false, renderPass.samples(), alphaToCoverage);
+		this.modelComputeDebugPipeline = ENABLE_MODEL_COMPUTE_PROTOTYPE
+			? new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL,
+				true, false, true, renderPass.samples(), false, true)
+			: null;
 		// fillModeNonSolid is required for VK_POLYGON_MODE_LINE; without it
 		// (llvmpipe, some embedded SoCs) wireframe collapses to FILL.
 		this.linePipeline = device.supportsFillModeNonSolid()
 			? new ScenePipeline(device, renderPass, VK_POLYGON_MODE_LINE, true,
 				renderPass.samples(), alphaToCoverage)
 			: null;
-		this.vbuf = new SceneVertexBuffer(device, BUFFER_BYTES, FrameSync.FRAMES_IN_FLIGHT,
+		this.vbuf = new SceneVertexBuffer(device, TOTAL_BUFFER_BYTES, FRAME_BUFFER_BYTES,
 			fillPipeline.descriptorSetLayout(), textureArray);
 		this.mapped = vbuf.mapped();
 		this.descriptorSet = vbuf.descriptorSet();
 		this.slotBytes = (int) vbuf.slotBytes();
+		this.modelMeshArena = new ModelMeshArena(device, MODEL_MESH_ARENA_BYTES);
+		this.modelInstanceBuffer = new ModelInstanceBuffer(device,
+			(long) MAX_MODEL_INSTANCES * MODEL_INSTANCE_STRIDE * FrameSync.FRAMES_IN_FLIGHT);
+		this.modelFaceIndexBuffer = new ModelFaceIndexBuffer(device,
+			(long) MODEL_COMPUTE_FACE_INDEX_SLOTS * Integer.BYTES * FrameSync.FRAMES_IN_FLIGHT);
+		this.modelComputeOutputBuffer = ENABLE_MODEL_COMPUTE_PROTOTYPE
+			? new ModelComputeOutputBuffer(device, MODEL_COMPUTE_OUTPUT_FRAME_BYTES * FrameSync.FRAMES_IN_FLIGHT)
+			: null;
+		this.modelComputePipeline = ENABLE_MODEL_COMPUTE_PROTOTYPE
+			? new ModelComputePipeline(device,
+				modelMeshArena.handle(), modelMeshArena.capacityBytes(),
+				modelInstanceBuffer.handle(), modelInstanceBuffer.frameBytes(),
+				modelFaceIndexBuffer.handle(), modelFaceIndexBuffer.frameBytes(),
+				modelComputeOutputBuffer.handle(), modelComputeOutputBuffer.frameBytes())
+			: null;
 	}
 
 	void setWireframe(Layer layer, boolean on)
 	{
 		wireframe[layer.ordinal()] = on;
+	}
+
+	void setModelComputeDebugDraw(boolean enabled)
+	{
+		modelComputeDebugDraw = false;
+	}
+
+	void setModelComputeReplacement(boolean enabled)
+	{
+		modelComputeReplacement = false;
 	}
 
 	void setLevelRange(int minLevel, int maxLevel)
@@ -248,17 +390,727 @@ final class SceneRenderer implements AutoCloseable
 	{
 		metrics.sceneVertices += regionEnds[LAST_STATIC.ordinal()];
 		metrics.totalVertices += vertexCount;
-		metrics.maxVertices += MAX_VERTICES;
+		metrics.maxVertices += MAX_LOGICAL_VERTICES;
 		metrics.roofRanges += tileRoofCount;
 		metrics.pendingRenderables += pendingRenderables.size();
+		metrics.dirtyZones += dirtyZoneCount;
+		metrics.modelCacheEntries += modelCacheSize;
+		metrics.modelCacheHits += modelCacheHits;
+		metrics.modelCacheMisses += modelCacheMisses;
+		metrics.modelMeshBytes += modelMeshArena.usedBytes();
+		metrics.modelMeshCapacityBytes += modelMeshArena.capacityBytes();
+		metrics.modelInstances += modelInstanceCount;
+		metrics.modelInstanceMax += MAX_MODEL_INSTANCES;
+		metrics.modelInstanceOverflows += modelInstanceOverflowCount;
+		metrics.modelComputeOutputBytes += modelComputeOutputBuffer == null ? 0L : modelComputeOutputBuffer.totalBytes();
+		metrics.modelComputeDebugDraw |= modelComputeDebugDraw;
+		metrics.modelComputeDebugFaces += modelComputeDebugFaceSlots;
+		metrics.modelComputeClippedFaces += modelComputeClippedFaces;
+		metrics.modelComputeTrackedFaces += modelComputeTrackedFaces;
+		metrics.modelComputeCandidateFaces += modelComputeCandidateFaces;
+		metrics.modelComputeReplacedFaces += modelComputeReplacedFaces;
+		metrics.modelComputeReplacedSortedFaces += modelComputeReplacedSortedFaces;
+		metrics.modelComputeReplacedPriorityFaces += modelComputeReplacedPriorityFaces;
+		metrics.modelComputeSortedFaces += modelComputeSortedFaces;
+		metrics.modelComputePriorityFaces += modelComputePriorityFaces;
+		metrics.modelComputeTransparentFaces += modelComputeTransparentFaces;
+		metrics.modelComputeTexturedFaces += modelComputeTexturedFaces;
+		metrics.modelComputeBiasedFaces += modelComputeBiasedFaces;
+		metrics.modelComputeOverrideFaces += modelComputeOverrideFaces;
+		metrics.modelComputeActorFaces += modelComputeActorFaces;
 		metrics.overflowed |= overflowed;
-		metrics.sceneBufferBytes += BUFFER_BYTES * FrameSync.FRAMES_IN_FLIGHT;
+		metrics.sceneBufferBytes += TOTAL_BUFFER_BYTES;
 	}
 
-	/** Per-frame (Model identity, worldX, worldZ) dedupe — collapses the
-	 *  "two heads on the player" case where multiple capture paths emit
-	 *  the same actor model at the same position. */
-	private final java.util.HashSet<Long> seenCaptures = new java.util.HashSet<>();
+	private int staticVertexCount()
+	{
+		return regionEnds[LAST_STATIC.ordinal()];
+	}
+
+	private void useStaticWriteArena()
+	{
+		writeBaseVertex = 0;
+		writeVertexLimit = MAX_STATIC_VERTICES;
+		writeBasePtr = MemoryUtil.memAddress(mapped);
+		writePtr = writeBasePtr;
+	}
+
+	private void useFrameWriteArena(int slot, int logicalVertex)
+	{
+		writeBaseVertex = staticVertexCount();
+		writeVertexLimit = writeBaseVertex + MAX_FRAME_VERTICES;
+		writeBasePtr = MemoryUtil.memAddress(mapped) + STATIC_BUFFER_BYTES + (long) slot * slotBytes;
+		setWriteCursor(logicalVertex);
+	}
+
+	private void setWriteCursor(int logicalVertex)
+	{
+		writePtr = writeBasePtr + (long) (logicalVertex - writeBaseVertex) * ScenePipeline.VERTEX_STRIDE;
+	}
+
+	private boolean reserveVertices(int vertices)
+	{
+		if (vertices < 0 || vertexCount > writeVertexLimit - vertices)
+		{
+			overflow();
+			return false;
+		}
+		return true;
+	}
+
+	private ModelCacheEntry modelInfo(Model model, boolean uploadMesh)
+	{
+		int faceCount = model.getFaceCount();
+		int vertexCount = model.getVerticesCount();
+		Object verticesX = model.getVerticesX();
+		Object verticesY = model.getVerticesY();
+		Object verticesZ = model.getVerticesZ();
+		Object faceIndices1 = model.getFaceIndices1();
+		Object faceIndices2 = model.getFaceIndices2();
+		Object faceIndices3 = model.getFaceIndices3();
+		Object faceColors1 = model.getFaceColors1();
+		Object faceColors2 = model.getFaceColors2();
+		Object faceColors3 = model.getFaceColors3();
+		Object faceTextures = model.getFaceTextures();
+		Object faceTransparencies = model.getFaceTransparencies();
+		Object faceBias = model.getFaceBias();
+		Object textureFaces = model.getTextureFaces();
+		Object texIndices1 = model.getTexIndices1();
+		Object texIndices2 = model.getTexIndices2();
+		Object texIndices3 = model.getTexIndices3();
+
+		int hash = 31 * faceCount + vertexCount;
+		hash = mix(hash, verticesX);
+		hash = mix(hash, verticesY);
+		hash = mix(hash, verticesZ);
+		hash = mix(hash, faceIndices1);
+		hash = mix(hash, faceIndices2);
+		hash = mix(hash, faceIndices3);
+		hash = mix(hash, faceColors1);
+		hash = mix(hash, faceColors2);
+		hash = mix(hash, faceColors3);
+		hash = mix(hash, faceTextures);
+		hash = mix(hash, faceTransparencies);
+		hash = mix(hash, faceBias);
+		hash = mix(hash, textureFaces);
+		hash = mix(hash, texIndices1);
+		hash = mix(hash, texIndices2);
+		hash = mix(hash, texIndices3);
+
+		int bucket = hash & MODEL_CACHE_BUCKET_MASK;
+		for (ModelCacheEntry entry = modelCacheBuckets[bucket]; entry != null; entry = entry.next)
+		{
+			if (entry.matches(hash, faceCount, vertexCount,
+				verticesX, verticesY, verticesZ,
+				faceIndices1, faceIndices2, faceIndices3,
+				faceColors1, faceColors2, faceColors3,
+				faceTextures, faceTransparencies, faceBias,
+				textureFaces, texIndices1, texIndices2, texIndices3))
+			{
+				modelCacheHits++;
+				if (uploadMesh && entry.meshOffset < 0L)
+				{
+					entry.uploadMesh(modelMeshArena);
+				}
+				return entry;
+			}
+		}
+
+		modelCacheMisses++;
+		if (modelCacheSize >= MAX_MODEL_CACHE_ENTRIES)
+		{
+			clearModelCache();
+			bucket = hash & MODEL_CACHE_BUCKET_MASK;
+		}
+		ModelCacheEntry cached = new ModelCacheEntry(hash, faceCount, vertexCount,
+			verticesX, verticesY, verticesZ,
+			faceIndices1, faceIndices2, faceIndices3,
+			faceColors1, faceColors2, faceColors3,
+			faceTextures, faceTransparencies, faceBias,
+			textureFaces, texIndices1, texIndices2, texIndices3,
+			modelCacheBuckets[bucket]);
+		if (uploadMesh)
+		{
+			cached.uploadMesh(modelMeshArena);
+		}
+		modelCacheBuckets[bucket] = cached;
+		modelCacheSize++;
+		return cached;
+	}
+
+	private void clearModelCache()
+	{
+		java.util.Arrays.fill(modelCacheBuckets, null);
+		modelCacheSize = 0;
+		modelMeshArena.reset();
+	}
+
+	private void recordModelInstance(ModelCacheEntry modelInfo, int orient, int worldX, int worldY, int worldZ, int renderMode)
+	{
+		recordModelInstance(modelInfo, orient, worldX, worldY, worldZ, renderMode,
+			Math.max(0, modelInfo.faceCount), -1);
+	}
+
+	private void recordModelInstance(ModelCacheEntry modelInfo, int orient, int worldX, int worldY, int worldZ, int renderMode,
+		int requestedFaces, int faceIndexOffset)
+	{
+		if (modelInfo.meshOffset < 0L)
+		{
+			return;
+		}
+		if (!modelInstanceFrameActive)
+		{
+			modelInstanceOverflowCount++;
+			return;
+		}
+		if (modelInstanceCount >= MAX_MODEL_INSTANCES)
+		{
+			modelInstanceOverflowCount++;
+			return;
+		}
+		int outputFaceOffset = modelComputeOutputFaceCursor;
+		int outputFaceCount = Math.max(0, requestedFaces);
+		int remainingOutputFaces = MODEL_COMPUTE_OUTPUT_FACE_SLOTS - modelComputeOutputFaceCursor;
+		if (remainingOutputFaces <= 0)
+		{
+			modelComputeClippedFaces += outputFaceCount;
+			outputFaceCount = 0;
+		}
+		else if (outputFaceCount > remainingOutputFaces)
+		{
+			modelComputeClippedFaces += outputFaceCount - remainingOutputFaces;
+			outputFaceCount = remainingOutputFaces;
+		}
+		modelComputeOutputFaceCursor += outputFaceCount;
+		modelComputeMaxFacesPerInstance = Math.max(modelComputeMaxFacesPerInstance, outputFaceCount);
+		if (renderMode == Renderable.RENDERMODE_SORTED_NO_DEPTH && outputFaceCount > 0)
+		{
+			recordComputePriorityRange(outputFaceOffset, outputFaceOffset + outputFaceCount);
+		}
+		modelInstanceBuffer.write(modelInstanceCount, modelInfo, orient, worldX, worldY, worldZ, renderMode,
+			outputFaceOffset, outputFaceCount, faceIndexOffset);
+		if (!modelComputeDebugHasOrigin)
+		{
+			modelComputeDebugHasOrigin = true;
+			modelComputeDebugX = worldX;
+			modelComputeDebugY = worldY;
+			modelComputeDebugZ = worldZ;
+		}
+		modelInstanceCount++;
+	}
+
+	private static int mix(int hash, Object ref)
+	{
+		return hash * 31 + System.identityHashCode(ref);
+	}
+
+	private static int arrayLength(Object array)
+	{
+		if (array instanceof int[])
+		{
+			return ((int[]) array).length;
+		}
+		if (array instanceof byte[])
+		{
+			return ((byte[]) array).length;
+		}
+		return 0;
+	}
+
+	private static int align4(int value)
+	{
+		return (value + 3) & ~3;
+	}
+
+	private static long align4(long value)
+	{
+		return (value + 3L) & ~3L;
+	}
+
+	private static int addAligned(int offset, int bytes)
+	{
+		return align4(offset + bytes);
+	}
+
+	private static int floatBytes(Object array, int count)
+	{
+		return array == null ? 0 : count * Float.BYTES;
+	}
+
+	private static int intBytes(Object array, int count)
+	{
+		return array == null ? 0 : count * Integer.BYTES;
+	}
+
+	private static int shortBytes(Object array, int count)
+	{
+		return array == null ? 0 : count * Short.BYTES;
+	}
+
+	private static int byteBytes(Object array, int count)
+	{
+		return array == null ? 0 : count;
+	}
+
+	private static long writeFloatArray(long p, float[] values, int count)
+	{
+		if (values == null)
+		{
+			return p;
+		}
+		int n = Math.min(count, values.length);
+		for (int i = 0; i < n; i++)
+		{
+			MemoryUtil.memPutFloat(p, values[i]);
+			p += Float.BYTES;
+		}
+		return p;
+	}
+
+	private static long writeIntArray(long p, int[] values, int count)
+	{
+		if (values == null)
+		{
+			return p;
+		}
+		int n = Math.min(count, values.length);
+		for (int i = 0; i < n; i++)
+		{
+			MemoryUtil.memPutInt(p, values[i]);
+			p += Integer.BYTES;
+		}
+		return p;
+	}
+
+	private static long writeShortArray(long p, short[] values, int count)
+	{
+		if (values == null)
+		{
+			return p;
+		}
+		int n = Math.min(count, values.length);
+		for (int i = 0; i < n; i++)
+		{
+			MemoryUtil.memPutShort(p, values[i]);
+			p += Short.BYTES;
+		}
+		return p;
+	}
+
+	private static long writeByteArray(long p, byte[] values, int count)
+	{
+		if (values == null)
+		{
+			return p;
+		}
+		int n = Math.min(count, values.length);
+		for (int i = 0; i < n; i++)
+		{
+			MemoryUtil.memPutByte(p++, values[i]);
+		}
+		return p;
+	}
+
+	private static int writeModelMeshSectionOffset(long header, int headerIndex, int currentOffset)
+	{
+		currentOffset = align4(currentOffset);
+		MemoryUtil.memPutInt(header + (long) headerIndex * Integer.BYTES, currentOffset);
+		return currentOffset;
+	}
+
+	private static final class ModelCacheEntry
+	{
+		ModelCacheEntry next;
+		final int hash;
+		final int faceCount;
+		final int vertexCount;
+		final Object verticesX, verticesY, verticesZ;
+		final Object faceIndices1, faceIndices2, faceIndices3;
+		final Object faceColors1, faceColors2, faceColors3;
+		final Object faceTextures, faceTransparencies, faceBias;
+		final Object textureFaces, texIndices1, texIndices2, texIndices3;
+		long meshOffset = -1L;
+		int meshBytes;
+		final int transparentFaces;
+		final boolean hasTransparentFaces;
+		final int texturedFaces;
+		final int biasedFaces;
+		final int flags;
+
+		ModelCacheEntry(int hash, int faceCount, int vertexCount,
+			Object verticesX, Object verticesY, Object verticesZ,
+			Object faceIndices1, Object faceIndices2, Object faceIndices3,
+			Object faceColors1, Object faceColors2, Object faceColors3,
+			Object faceTextures, Object faceTransparencies, Object faceBias,
+			Object textureFaces, Object texIndices1, Object texIndices2, Object texIndices3,
+			ModelCacheEntry next)
+		{
+			this.next = next;
+			this.hash = hash;
+			this.faceCount = faceCount;
+			this.vertexCount = vertexCount;
+			this.verticesX = verticesX;
+			this.verticesY = verticesY;
+			this.verticesZ = verticesZ;
+			this.faceIndices1 = faceIndices1;
+			this.faceIndices2 = faceIndices2;
+			this.faceIndices3 = faceIndices3;
+			this.faceColors1 = faceColors1;
+			this.faceColors2 = faceColors2;
+			this.faceColors3 = faceColors3;
+			this.faceTextures = faceTextures;
+			this.faceTransparencies = faceTransparencies;
+			this.faceBias = faceBias;
+			this.textureFaces = textureFaces;
+			this.texIndices1 = texIndices1;
+			this.texIndices2 = texIndices2;
+			this.texIndices3 = texIndices3;
+			this.transparentFaces = countTransparentFaces(faceCount, (byte[]) faceTransparencies);
+			this.hasTransparentFaces = transparentFaces > 0;
+			this.texturedFaces = countTexturedFaces(faceCount, (short[]) faceTextures);
+			this.biasedFaces = countNonZeroBytes(faceCount, (byte[]) faceBias);
+			this.flags = (((short[]) faceTextures) != null ? 1 : 0)
+				| (((byte[]) textureFaces) != null
+					&& ((int[]) texIndices1) != null
+					&& ((int[]) texIndices2) != null
+					&& ((int[]) texIndices3) != null ? 2 : 0);
+		}
+
+		void uploadMesh(ModelMeshArena arena)
+		{
+			int bytes = meshBytes();
+			long offset = arena.allocate(bytes);
+			if (offset < 0L)
+			{
+				arena.reset();
+				offset = arena.allocate(bytes);
+				if (offset < 0L)
+				{
+					return;
+				}
+			}
+			long p = arena.address() + offset;
+			long header = p;
+			int sectionOffset = MODEL_MESH_HEADER_BYTES;
+			sectionOffset = writeModelMeshSectionOffset(header, 0, sectionOffset);
+			sectionOffset += floatBytes(verticesX, vertexCount);
+			sectionOffset = writeModelMeshSectionOffset(header, 1, sectionOffset);
+			sectionOffset += floatBytes(verticesY, vertexCount);
+			sectionOffset = writeModelMeshSectionOffset(header, 2, sectionOffset);
+			sectionOffset += floatBytes(verticesZ, vertexCount);
+			sectionOffset = writeModelMeshSectionOffset(header, 3, sectionOffset);
+			sectionOffset += intBytes(faceIndices1, faceCount);
+			sectionOffset = writeModelMeshSectionOffset(header, 4, sectionOffset);
+			sectionOffset += intBytes(faceIndices2, faceCount);
+			sectionOffset = writeModelMeshSectionOffset(header, 5, sectionOffset);
+			sectionOffset += intBytes(faceIndices3, faceCount);
+			sectionOffset = writeModelMeshSectionOffset(header, 6, sectionOffset);
+			sectionOffset += intBytes(faceColors1, faceCount);
+			sectionOffset = writeModelMeshSectionOffset(header, 7, sectionOffset);
+			sectionOffset += intBytes(faceColors2, faceCount);
+			sectionOffset = writeModelMeshSectionOffset(header, 8, sectionOffset);
+			sectionOffset += intBytes(faceColors3, faceCount);
+			sectionOffset = writeModelMeshSectionOffset(header, 9, sectionOffset);
+			sectionOffset += shortBytes(faceTextures, faceCount);
+			sectionOffset = writeModelMeshSectionOffset(header, 10, sectionOffset);
+			sectionOffset += byteBytes(faceTransparencies, faceCount);
+			sectionOffset = writeModelMeshSectionOffset(header, 11, sectionOffset);
+			sectionOffset += byteBytes(faceBias, faceCount);
+			sectionOffset = writeModelMeshSectionOffset(header, 12, sectionOffset);
+			sectionOffset += byteBytes(textureFaces, arrayLength(textureFaces));
+			sectionOffset = writeModelMeshSectionOffset(header, 13, sectionOffset);
+			sectionOffset += intBytes(texIndices1, arrayLength(texIndices1));
+			sectionOffset = writeModelMeshSectionOffset(header, 14, sectionOffset);
+			sectionOffset += intBytes(texIndices2, arrayLength(texIndices2));
+			sectionOffset = writeModelMeshSectionOffset(header, 15, sectionOffset);
+			p += MODEL_MESH_HEADER_BYTES;
+			p = writeFloatArray(p, (float[]) verticesX, vertexCount);
+			p = align4(p);
+			p = writeFloatArray(p, (float[]) verticesY, vertexCount);
+			p = align4(p);
+			p = writeFloatArray(p, (float[]) verticesZ, vertexCount);
+			p = align4(p);
+			p = writeIntArray(p, (int[]) faceIndices1, faceCount);
+			p = align4(p);
+			p = writeIntArray(p, (int[]) faceIndices2, faceCount);
+			p = align4(p);
+			p = writeIntArray(p, (int[]) faceIndices3, faceCount);
+			p = align4(p);
+			p = writeIntArray(p, (int[]) faceColors1, faceCount);
+			p = align4(p);
+			p = writeIntArray(p, (int[]) faceColors2, faceCount);
+			p = align4(p);
+			p = writeIntArray(p, (int[]) faceColors3, faceCount);
+			p = align4(p);
+			p = writeShortArray(p, (short[]) faceTextures, faceCount);
+			p = align4(p);
+			p = writeByteArray(p, (byte[]) faceTransparencies, faceCount);
+			p = align4(p);
+			p = writeByteArray(p, (byte[]) faceBias, faceCount);
+			p = align4(p);
+			p = writeByteArray(p, (byte[]) textureFaces, arrayLength(textureFaces));
+			p = align4(p);
+			p = writeIntArray(p, (int[]) texIndices1, arrayLength(texIndices1));
+			p = align4(p);
+			p = writeIntArray(p, (int[]) texIndices2, arrayLength(texIndices2));
+			p = align4(p);
+			writeIntArray(p, (int[]) texIndices3, arrayLength(texIndices3));
+			arena.flush(offset, bytes);
+			meshOffset = offset;
+			meshBytes = bytes;
+		}
+
+		private int meshBytes()
+		{
+			int bytes = MODEL_MESH_HEADER_BYTES;
+			bytes = addAligned(bytes, floatBytes(verticesX, vertexCount));
+			bytes = addAligned(bytes, floatBytes(verticesY, vertexCount));
+			bytes = addAligned(bytes, floatBytes(verticesZ, vertexCount));
+			bytes = addAligned(bytes, intBytes(faceIndices1, faceCount));
+			bytes = addAligned(bytes, intBytes(faceIndices2, faceCount));
+			bytes = addAligned(bytes, intBytes(faceIndices3, faceCount));
+			bytes = addAligned(bytes, intBytes(faceColors1, faceCount));
+			bytes = addAligned(bytes, intBytes(faceColors2, faceCount));
+			bytes = addAligned(bytes, intBytes(faceColors3, faceCount));
+			bytes = addAligned(bytes, shortBytes(faceTextures, faceCount));
+			bytes = addAligned(bytes, byteBytes(faceTransparencies, faceCount));
+			bytes = addAligned(bytes, byteBytes(faceBias, faceCount));
+			bytes = addAligned(bytes, byteBytes(textureFaces, arrayLength(textureFaces)));
+			bytes = addAligned(bytes, intBytes(texIndices1, arrayLength(texIndices1)));
+			bytes = addAligned(bytes, intBytes(texIndices2, arrayLength(texIndices2)));
+			bytes = addAligned(bytes, intBytes(texIndices3, arrayLength(texIndices3)));
+			return bytes;
+		}
+
+		boolean matches(int hash, int faceCount, int vertexCount,
+			Object verticesX, Object verticesY, Object verticesZ,
+			Object faceIndices1, Object faceIndices2, Object faceIndices3,
+			Object faceColors1, Object faceColors2, Object faceColors3,
+			Object faceTextures, Object faceTransparencies, Object faceBias,
+			Object textureFaces, Object texIndices1, Object texIndices2, Object texIndices3)
+		{
+			return this.hash == hash
+				&& this.faceCount == faceCount
+				&& this.vertexCount == vertexCount
+				&& this.verticesX == verticesX
+				&& this.verticesY == verticesY
+				&& this.verticesZ == verticesZ
+				&& this.faceIndices1 == faceIndices1
+				&& this.faceIndices2 == faceIndices2
+				&& this.faceIndices3 == faceIndices3
+				&& this.faceColors1 == faceColors1
+				&& this.faceColors2 == faceColors2
+				&& this.faceColors3 == faceColors3
+				&& this.faceTextures == faceTextures
+				&& this.faceTransparencies == faceTransparencies
+				&& this.faceBias == faceBias
+				&& this.textureFaces == textureFaces
+				&& this.texIndices1 == texIndices1
+				&& this.texIndices2 == texIndices2
+				&& this.texIndices3 == texIndices3;
+		}
+	}
+
+	private static final class ModelMeshArena implements AutoCloseable
+	{
+		private final Buffer buffer;
+		private final long address;
+		private final long capacity;
+		private long used;
+
+		ModelMeshArena(VulkanDevice device, long capacity)
+		{
+			this.capacity = capacity;
+			this.buffer = new Buffer(device, capacity, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+			buffer.mapPersistent();
+			this.address = MemoryUtil.memAddress(buffer.mappedByteBuffer());
+		}
+
+		long allocate(int bytes)
+		{
+			int aligned = align4(bytes);
+			if (aligned <= 0 || used > capacity - aligned)
+			{
+				return -1L;
+			}
+			long offset = used;
+			used += aligned;
+			return offset;
+		}
+
+		void reset()
+		{
+			used = 0L;
+		}
+
+		void flush(long offset, int bytes)
+		{
+			buffer.flushRangeIfNeeded(offset, align4(bytes));
+		}
+
+		long address()
+		{
+			return address;
+		}
+
+		long usedBytes()
+		{
+			return used;
+		}
+
+		long capacityBytes()
+		{
+			return capacity;
+		}
+
+		long handle()
+		{
+			return buffer.handle();
+		}
+
+		@Override
+		public void close()
+		{
+			buffer.close();
+		}
+	}
+
+	private static final class ModelInstanceBuffer implements AutoCloseable
+	{
+		private final Buffer buffer;
+		private final long address;
+		private long frameAddress;
+
+		ModelInstanceBuffer(VulkanDevice device, long bytes)
+		{
+			this.buffer = new Buffer(device, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+			buffer.mapPersistent();
+			this.address = MemoryUtil.memAddress(buffer.mappedByteBuffer());
+		}
+
+		void beginFrame(int slot)
+		{
+			frameAddress = address + (long) slot * MAX_MODEL_INSTANCES * MODEL_INSTANCE_STRIDE;
+		}
+
+		long frameBytes()
+		{
+			return (long) MAX_MODEL_INSTANCES * MODEL_INSTANCE_STRIDE;
+		}
+
+		long handle()
+		{
+			return buffer.handle();
+		}
+
+		void write(int index, ModelCacheEntry model, int orient, int worldX, int worldY, int worldZ, int renderMode,
+			int outputFaceOffset, int outputFaceCount, int faceIndexOffset)
+		{
+			long p = frameAddress + (long) index * MODEL_INSTANCE_STRIDE;
+			MemoryUtil.memPutLong(p, model.meshOffset);
+			MemoryUtil.memPutInt(p + 8, model.meshBytes);
+			MemoryUtil.memPutInt(p + 12, model.faceCount);
+			MemoryUtil.memPutInt(p + 16, model.vertexCount);
+			MemoryUtil.memPutInt(p + 20, orient);
+			MemoryUtil.memPutInt(p + 24, worldX);
+			MemoryUtil.memPutInt(p + 28, worldY);
+			MemoryUtil.memPutInt(p + 32, worldZ);
+			MemoryUtil.memPutInt(p + 36, renderMode);
+			MemoryUtil.memPutInt(p + 40, outputFaceOffset);
+			MemoryUtil.memPutInt(p + 44, outputFaceCount);
+			MemoryUtil.memPutInt(p + 48, model.flags);
+			MemoryUtil.memPutInt(p + 52, faceIndexOffset);
+		}
+
+		@Override
+		public void close()
+		{
+			buffer.close();
+		}
+	}
+
+	private static final class ModelFaceIndexBuffer implements AutoCloseable
+	{
+		private final Buffer buffer;
+		private final long address;
+		private long frameAddress;
+
+		ModelFaceIndexBuffer(VulkanDevice device, long bytes)
+		{
+			this.buffer = new Buffer(device, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+			buffer.mapPersistent();
+			this.address = MemoryUtil.memAddress(buffer.mappedByteBuffer());
+		}
+
+		void beginFrame(int slot)
+		{
+			frameAddress = address + (long) slot * MODEL_COMPUTE_FACE_INDEX_SLOTS * Integer.BYTES;
+		}
+
+		long frameBytes()
+		{
+			return (long) MODEL_COMPUTE_FACE_INDEX_SLOTS * Integer.BYTES;
+		}
+
+		long handle()
+		{
+			return buffer.handle();
+		}
+
+		void write(int index, int value)
+		{
+			MemoryUtil.memPutInt(frameAddress + (long) index * Integer.BYTES, value);
+		}
+
+		@Override
+		public void close()
+		{
+			buffer.close();
+		}
+	}
+
+	private static final class ModelComputeOutputBuffer implements AutoCloseable
+	{
+		private final Buffer buffer;
+		private final long bytes;
+
+		ModelComputeOutputBuffer(VulkanDevice device, long bytes)
+		{
+			this.bytes = bytes;
+			this.buffer = new Buffer(device, bytes,
+				VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+		}
+
+		long frameBytes()
+		{
+			return MODEL_COMPUTE_OUTPUT_FRAME_BYTES;
+		}
+
+		long frameOffset(int slot)
+		{
+			return MODEL_COMPUTE_OUTPUT_FRAME_BYTES * slot;
+		}
+
+		long totalBytes()
+		{
+			return bytes;
+		}
+
+		long handle()
+		{
+			return buffer.handle();
+		}
+
+		@Override
+		public void close()
+		{
+			buffer.close();
+		}
+	}
 
 	/**
 	 * Drops the dynamic suffix; static layers preserved. Waits on this
@@ -273,12 +1125,101 @@ final class SceneRenderer implements AutoCloseable
 		{
 			vkWaitForFences(device.handle(), stack.longs(sync.inFlightFence()), true, Long.MAX_VALUE);
 		}
-		vertexCount = regionEnds[LAST_STATIC.ordinal()];
-		writePtr = MemoryUtil.memAddress(mapped)
-			+ (long) sync.currentFrame() * slotBytes
-			+ (long) vertexCount * ScenePipeline.VERTEX_STRIDE;
+		int slot = sync.currentFrame();
+		vertexCount = overlayNextVertex[slot];
+		useFrameWriteArena(slot, vertexCount);
+		modelInstanceBuffer.beginFrame(slot);
+		modelFaceIndexBuffer.beginFrame(slot);
+		modelInstanceCount = 0;
+		modelInstanceOverflowCount = 0;
+		modelInstanceFrameActive = true;
+		modelComputeDebugFaceSlots = 0;
+		modelComputeClippedFaces = 0;
+		modelComputeTrackedFaces = 0;
+		modelComputeCandidateFaces = 0;
+		modelComputeReplacedFaces = 0;
+		modelComputeReplacedSortedFaces = 0;
+		modelComputeReplacedPriorityFaces = 0;
+		modelComputeSortedFaces = 0;
+		modelComputePriorityFaces = 0;
+		modelComputeTransparentFaces = 0;
+		modelComputeTexturedFaces = 0;
+		modelComputeBiasedFaces = 0;
+		modelComputeOverrideFaces = 0;
+		modelComputeActorFaces = 0;
+		modelComputeOutputFaceCursor = 0;
+		modelComputeMaxFacesPerInstance = 0;
+		modelComputeFaceIndexCursor = 0;
+		modelComputeDebugHasOrigin = false;
 		overflowed = false;
-		seenCaptures.clear();
+		priorityRangeCount = 0;
+		computePriorityRangeCount = 0;
+		dynamicOpaqueEnd = -1;
+	}
+
+	void drawPass(int pass)
+	{
+		if (pass == DrawCallbacks.PASS_OPAQUE)
+		{
+			dynamicOpaqueEnd = vertexCount;
+		}
+	}
+
+	void rebuildDirtyZones(Scene scene)
+	{
+		if (scene == null || dirtyZoneCount == 0)
+		{
+			return;
+		}
+
+		Tile[][][] tiles = scene.getTiles();
+		if (tiles == null)
+		{
+			return;
+		}
+
+		int slot = sync.currentFrame();
+		int slotBit = 1 << slot;
+		int allSlots = (1 << FrameSync.FRAMES_IN_FLIGHT) - 1;
+		vertexCount = overlayNextVertex[slot];
+		useFrameWriteArena(slot, vertexCount);
+
+		final int planes = Math.min(tiles.length, MAX_PLANES);
+		final int sceneSize = Constants.SCENE_SIZE;
+		final int[][][] roofs = scene.getRoofs();
+		final byte[][][] tileSettings = scene.getExtendedTileSettings();
+		final int roofOffset = scene.getWorldViewId() == net.runelite.api.WorldView.TOPLEVEL
+			? (Constants.EXTENDED_SCENE_SIZE - Constants.SCENE_SIZE) / 2 : 0;
+
+		for (int zone = 0; zone < ZONE_COUNT; zone++)
+		{
+			if (!dirtyZones[zone] || (dirtyZoneSlotMask[zone] & slotBit) != 0)
+			{
+				continue;
+			}
+
+			clearOverlayZone(slot, zone);
+			rebuildingOverlayZone = true;
+			try
+			{
+				captureDirtyZone(scene, tiles, planes, sceneSize, roofs, tileSettings, roofOffset, slot, zone);
+			}
+			finally
+			{
+				rebuildingOverlayZone = false;
+			}
+			overlayZoneValid[slot][zone] = true;
+			overlaySlotHasZones[slot] = true;
+			dirtyZoneSlotMask[zone] |= slotBit;
+			if (dirtyZoneSlotMask[zone] == allSlots)
+			{
+				dirtyZones[zone] = false;
+				dirtyZoneCount--;
+			}
+		}
+
+		overlayNextVertex[slot] = vertexCount;
+		setWriteCursor(vertexCount);
 	}
 
 	/** Visits one tile (including any bridge tile underneath) within a layer pass. */
@@ -313,10 +1254,12 @@ final class SceneRenderer implements AutoCloseable
 			}
 		}
 		vertexCount = 0;
-		writePtr = MemoryUtil.memAddress(mapped);
+		useStaticWriteArena();
 		overflowed = false;
 		tileRoofCount = 0;
+		clearOverlayRanges();
 		pendingRenderables.clear();
+		clearModelCache();
 
 		Tile[][][] tiles = scene.getTiles();
 		if (tiles == null) return;
@@ -379,20 +1322,154 @@ final class SceneRenderer implements AutoCloseable
 			for (int p = planes; p < MAX_PLANES; p++)
 				planeEnds[i][p] = regionEnds[i];
 
-		copyStaticPrefixToAllSlots(vertexCount * ScenePipeline.VERTEX_STRIDE);
+		for (int slot = 0; slot < FrameSync.FRAMES_IN_FLIGHT; slot++)
+		{
+			overlayNextVertex[slot] = vertexCount;
+		}
 
 		log.debug("captureScene: {} vertices, {} roof tiles", vertexCount, tileRoofCount);
 	}
 
-	/** Mirror static prefix from slot 0 into every other slot so all
-	 *  FRAMES_IN_FLIGHT bindings see identical static geometry. */
-	private void copyStaticPrefixToAllSlots(int staticBytes)
+	private void clearOverlayRanges()
 	{
-		if (staticBytes <= 0) return;
-		long base = MemoryUtil.memAddress(mapped, 0);
-		for (int slot = 1; slot < FrameSync.FRAMES_IN_FLIGHT; slot++)
+		for (int slot = 0; slot < FrameSync.FRAMES_IN_FLIGHT; slot++)
 		{
-			MemoryUtil.memCopy(base, base + (long) slot * slotBytes, staticBytes);
+			overlayNextVertex[slot] = regionEnds[LAST_STATIC.ordinal()];
+			overlaySlotHasZones[slot] = false;
+			java.util.Arrays.fill(overlayZoneValid[slot], false);
+			for (int layer = 0; layer < LAYER_COUNT; layer++)
+			{
+				for (int plane = 0; plane < MAX_PLANES; plane++)
+				{
+					java.util.Arrays.fill(overlayZoneStart[slot][layer][plane], 0);
+					java.util.Arrays.fill(overlayZoneCount[slot][layer][plane], 0);
+				}
+			}
+		}
+	}
+
+	private void clearOverlayZone(int slot, int zone)
+	{
+		overlayZoneValid[slot][zone] = false;
+		for (int layer = 0; layer < LAYER_COUNT; layer++)
+		{
+			for (int plane = 0; plane < MAX_PLANES; plane++)
+			{
+				overlayZoneStart[slot][layer][plane][zone] = 0;
+				overlayZoneCount[slot][layer][plane][zone] = 0;
+			}
+		}
+	}
+
+	private void captureDirtyZone(Scene scene, Tile[][][] tiles, int planes, int sceneSize,
+								  int[][][] roofs, byte[][][] tileSettings, int roofOffset,
+								  int slot, int zone)
+	{
+		int zx = zone / ZONES_PER_SIDE;
+		int zy = zone % ZONES_PER_SIDE;
+		captureOverlayLayer(Layer.TERRAIN, tiles, planes, sceneSize,
+			roofs, tileSettings, roofOffset, slot, zone, zx, zy,
+			(cur, p, sx, sy) ->
+			{
+				SceneTilePaint paint = cur.getSceneTilePaint();
+				if (paint != null) captureTilePaint(scene, paint, p, sx, sy);
+				SceneTileModel m = cur.getSceneTileModel();
+				if (m != null) captureTileModel(m, sx, sy);
+			});
+
+		captureOverlayLayer(Layer.WALLS, tiles, planes, sceneSize,
+			roofs, tileSettings, roofOffset, slot, zone, zx, zy,
+			(cur, p, sx, sy) ->
+			{
+				WallObject w = cur.getWallObject();
+				if (w == null) return;
+				captureRenderable(w.getRenderable1(), 0, w.getX(), w.getZ(), w.getY());
+				captureRenderable(w.getRenderable2(), 0, w.getX(), w.getZ(), w.getY());
+			});
+
+		captureOverlayLayer(Layer.DECORATIVE, tiles, planes, sceneSize,
+			roofs, tileSettings, roofOffset, slot, zone, zx, zy,
+			(cur, p, sx, sy) ->
+			{
+				DecorativeObject d = cur.getDecorativeObject();
+				if (d == null) return;
+				captureRenderable(d.getRenderable(), 0,
+					d.getX() + d.getXOffset(), d.getZ(), d.getY() + d.getYOffset());
+				captureRenderable(d.getRenderable2(), 0,
+					d.getX() + d.getXOffset2(), d.getZ(), d.getY() + d.getYOffset2());
+			});
+
+		captureOverlayLayer(Layer.GROUND, tiles, planes, sceneSize,
+			roofs, tileSettings, roofOffset, slot, zone, zx, zy,
+			(cur, p, sx, sy) ->
+			{
+				GroundObject g = cur.getGroundObject();
+				if (g == null) return;
+				captureRenderable(g.getRenderable(), 0, g.getX(), g.getZ(), g.getY());
+			});
+
+		captureOverlayGameObjectsLayer(tiles, planes, sceneSize,
+			roofs, tileSettings, roofOffset, slot, zone, zx, zy);
+	}
+
+	private void captureOverlayLayer(Layer layer,
+		Tile[][][] tiles, int planes, int sceneSize,
+		int[][][] roofs, byte[][][] tileSettings, int roofOffset,
+		int slot, int zone, int zx, int zy, TileCapture body)
+	{
+		final int L = layer.ordinal();
+		int x0 = zx * ZONE_SIZE, x1 = Math.min(x0 + ZONE_SIZE, sceneSize);
+		int y0 = zy * ZONE_SIZE, y1 = Math.min(y0 + ZONE_SIZE, sceneSize);
+		for (int outputLevel = 0; outputLevel < planes; outputLevel++)
+		{
+			int start = vertexCount;
+			if (outputLevel == 0)
+			{
+				captureLayerPass(tiles, planes, x0, x1, y0, y1, 0, false,
+					roofs, tileSettings, roofOffset, body);
+				for (int sourceLevel = 0; sourceLevel < planes; sourceLevel++)
+				{
+					captureLayerPass(tiles, planes, x0, x1, y0, y1, sourceLevel, true,
+						roofs, tileSettings, roofOffset, body);
+				}
+			}
+			else
+			{
+				captureLayerPass(tiles, planes, x0, x1, y0, y1, outputLevel, false,
+					roofs, tileSettings, roofOffset, body);
+			}
+			overlayZoneStart[slot][L][outputLevel][zone] = start;
+			overlayZoneCount[slot][L][outputLevel][zone] = vertexCount - start;
+		}
+	}
+
+	private void captureOverlayGameObjectsLayer(Tile[][][] tiles, int planes, int sceneSize,
+		int[][][] roofs, byte[][][] tileSettings, int roofOffset,
+		int slot, int zone, int zx, int zy)
+	{
+		final int L = Layer.GAME_OBJECTS.ordinal();
+		int x0 = zx * ZONE_SIZE, x1 = Math.min(x0 + ZONE_SIZE, sceneSize);
+		int y0 = zy * ZONE_SIZE, y1 = Math.min(y0 + ZONE_SIZE, sceneSize);
+		for (int outputLevel = 0; outputLevel < planes; outputLevel++)
+		{
+			int start = vertexCount;
+			if (outputLevel == 0)
+			{
+				captureGameObjectsPass(tiles, planes, x0, x1, y0, y1, 0, false,
+					roofs, tileSettings, roofOffset);
+				for (int sourceLevel = 0; sourceLevel < planes; sourceLevel++)
+				{
+					captureGameObjectsPass(tiles, planes, x0, x1, y0, y1, sourceLevel, true,
+						roofs, tileSettings, roofOffset);
+				}
+			}
+			else
+			{
+				captureGameObjectsPass(tiles, planes, x0, x1, y0, y1, outputLevel, false,
+					roofs, tileSettings, roofOffset);
+			}
+			overlayZoneStart[slot][L][outputLevel][zone] = start;
+			overlayZoneCount[slot][L][outputLevel][zone] = vertexCount - start;
 		}
 	}
 
@@ -558,6 +1635,7 @@ final class SceneRenderer implements AutoCloseable
 	private void captureRenderable(Renderable r, int orient, int x, int y, int z)
 	{
 		if (r == null) return;
+		if (r instanceof net.runelite.api.Actor) return;
 		Model m = resolveModel(r);
 		if (m == null)
 		{
@@ -598,6 +1676,7 @@ final class SceneRenderer implements AutoCloseable
 			Model m = pr.model;
 			if (m == null)
 			{
+				if (pr.r instanceof net.runelite.api.Actor) continue;
 				m = resolveModel(pr.r);
 				if (m == null) continue;
 				pr.model = m;
@@ -630,7 +1709,7 @@ final class SceneRenderer implements AutoCloseable
 		// id. Texture array layer 0 is white, so +1 maps cleanly.
 		int texLayer = paint.getTexture() + 1;
 
-		if (vertexCount + 6 > MAX_VERTICES) { overflow(); return; }
+		if (!reserveVertices(6)) return;
 
 		writeHslVert(x0, swH, z0, swColor, 0f, 0f, texLayer);
 		writeHslVert(x1, seH, z0, seColor, 1f, 0f, texLayer);
@@ -663,7 +1742,7 @@ final class SceneRenderer implements AutoCloseable
 		float lz = sy << 7;
 
 		int faces = faceX.length;
-		if (vertexCount + faces * 3 > MAX_VERTICES) { overflow(); return; }
+		if (!reserveVertices(faces * 3)) return;
 
 		for (int i = 0; i < faces; i++)
 		{
@@ -685,16 +1764,8 @@ final class SceneRenderer implements AutoCloseable
 
 	void captureModel(Model m, int orient, int worldX, int worldY, int worldZ)
 	{
-		if (m == null || !markCaptureSeen(m, worldX, worldZ)) return;
+		if (m == null) return;
 		captureModelUnsorted(m, orient, worldX, worldY, worldZ);
-	}
-
-	private boolean markCaptureSeen(Model m, int worldX, int worldZ)
-	{
-		long key = ((long) System.identityHashCode(m) & 0xFFFFFFFFL)
-			| ((long) (worldX & 0xFFFF) << 32)
-			| ((long) (worldZ & 0xFFFF) << 48);
-		return seenCaptures.add(key);
 	}
 
 	private void captureModelUnsorted(Model m, int orient, int worldX, int worldY, int worldZ)
@@ -734,7 +1805,7 @@ final class SceneRenderer implements AutoCloseable
 		// face index arrays for assembled actor models (player composition,
 		// reused NPC bodies); fa.length reads stale trailing data.
 		int faces = m.getFaceCount();
-		if (vertexCount + faces * 3 > MAX_VERTICES) { overflow(); return; }
+		if (!reserveVertices(faces * 3)) return;
 
 		float[] uv = uvScratch;
 		int wrote = 0;
@@ -869,8 +1940,8 @@ final class SceneRenderer implements AutoCloseable
 	 * unsorted {@link #captureModel} stays in place for the actor walk,
 	 * which has no Projection of its own.
 	 *
-	 * <p>Same dedupe behavior as {@code captureModel} (Model identity +
-	 * world XZ).
+	 * <p>Stock GPU uploads every dynamic/temp callback independently, so this
+	 * path intentionally does not dedupe by model identity.
 	 */
 	void captureModelSorted(Projection proj, Model m, int orient, int worldX, int worldY, int worldZ)
 	{
@@ -879,15 +1950,73 @@ final class SceneRenderer implements AutoCloseable
 
 	void captureModelSorted(Projection proj, Model m, int orient, int worldX, int worldY, int worldZ, int renderMode)
 	{
+		captureModelSorted(proj, m, orient, worldX, worldY, worldZ, renderMode, false);
+	}
+
+	void captureModelSorted(Projection proj, Model m, int orient, int worldX, int worldY, int worldZ, int renderMode,
+		boolean actorModel)
+	{
 		if (m == null || proj == null) return;
-		if (!markCaptureSeen(m, worldX, worldZ)) return;
 
 		boolean detailedStats = stats.isDetailedModelStats();
 		boolean prioritySort = renderMode == Renderable.RENDERMODE_SORTED_NO_DEPTH;
-		boolean needsFaceSort = prioritySort || hasTransparentFaces(m);
-		if (!needsFaceSort && m.getFaceCount() <= OPAQUE_UNSORTED_FACE_THRESHOLD)
+		int priorityStart = prioritySort ? vertexCount : -1;
+		ModelCacheEntry modelInfo = modelInfo(m, false);
+		boolean needsFaceSort = prioritySort || modelInfo.hasTransparentFaces;
+		modelComputeTrackedFaces += modelInfo.faceCount;
+		if (needsFaceSort)
+		{
+			modelComputeSortedFaces += modelInfo.faceCount;
+		}
+		if (prioritySort)
+		{
+			modelComputePriorityFaces += modelInfo.faceCount;
+		}
+		if (modelInfo.hasTransparentFaces)
+		{
+			modelComputeTransparentFaces += modelInfo.faceCount;
+		}
+		if (modelInfo.texturedFaces > 0)
+		{
+			modelComputeTexturedFaces += modelInfo.faceCount;
+		}
+		if (modelInfo.biasedFaces > 0)
+		{
+			modelComputeBiasedFaces += modelInfo.faceCount;
+		}
+		if ((m.getOverrideAmount() & 0xFF) != 0)
+		{
+			modelComputeOverrideFaces += modelInfo.faceCount;
+		}
+		if (actorModel)
+		{
+			modelComputeActorFaces += modelInfo.faceCount;
+		}
+		if (!actorModel && isModelComputeCandidate(m, modelInfo, needsFaceSort))
+		{
+			modelComputeCandidateFaces += modelInfo.faceCount;
+		}
+		boolean replaceWithCompute = modelComputeReplacement && !actorModel
+			&& isModelComputeCandidate(m, modelInfo, needsFaceSort);
+		boolean recordForCompute = modelComputeDebugDraw || replaceWithCompute;
+		if (recordForCompute)
+		{
+			if (modelInfo.meshOffset < 0L)
+			{
+				modelInfo.uploadMesh(modelMeshArena);
+			}
+			recordModelInstance(modelInfo, orient, worldX, worldY, worldZ, renderMode);
+		}
+		if (replaceWithCompute)
+		{
+			modelComputeReplacedFaces += modelInfo.faceCount;
+			recordPriorityRange(priorityStart);
+			return;
+		}
+		if (!needsFaceSort && modelInfo.faceCount <= OPAQUE_UNSORTED_FACE_THRESHOLD)
 		{
 			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
+			recordPriorityRange(priorityStart);
 			return;
 		}
 
@@ -901,6 +2030,7 @@ final class SceneRenderer implements AutoCloseable
 				}
 				captureModelUnsorted(m, orient, worldX, worldY, worldZ);
 			}
+			recordPriorityRange(priorityStart);
 			return;
 		}
 
@@ -922,6 +2052,7 @@ final class SceneRenderer implements AutoCloseable
 				stats.sortFallbackModels.incrementAndGet();
 			}
 			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
+			recordPriorityRange(priorityStart);
 			return;
 		}
 
@@ -933,9 +2064,39 @@ final class SceneRenderer implements AutoCloseable
 				stats.sortFallbackModels.incrementAndGet();
 			}
 			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
+			recordPriorityRange(priorityStart);
 			return;
 		}
-		if (vertexCount + faces * 3 > MAX_VERTICES) { overflow(); return; }
+		boolean replaceSortedWithCompute = modelComputeReplacement && !actorModel
+			&& (m.getOverrideAmount() & 0xFF) == 0;
+		if (replaceSortedWithCompute)
+		{
+			if (modelComputeFaceIndexCursor <= MODEL_COMPUTE_FACE_INDEX_SLOTS - faces)
+			{
+				if (modelInfo.meshOffset < 0L)
+				{
+					modelInfo.uploadMesh(modelMeshArena);
+				}
+				int faceIndexOffset = modelComputeFaceIndexCursor;
+				for (int i = 0; i < faces; i++)
+				{
+					modelFaceIndexBuffer.write(faceIndexOffset + i, sorter.sortedFaces[i]);
+				}
+				modelComputeFaceIndexCursor += faces;
+				recordModelInstance(modelInfo, orient, worldX, worldY, worldZ, renderMode,
+					faces, faceIndexOffset);
+				modelComputeReplacedFaces += faces;
+				modelComputeReplacedSortedFaces += faces;
+				if (prioritySort)
+				{
+					modelComputeReplacedPriorityFaces += faces;
+				}
+				recordPriorityRange(priorityStart);
+				return;
+			}
+			modelInstanceOverflowCount++;
+		}
+		if (!reserveVertices(faces * 3)) return;
 
 		// Vertex positions are read by computeFaceUvs only; emit uses the
 		// sorter's already-rotated localX/Y/Z.
@@ -1083,7 +2244,7 @@ final class SceneRenderer implements AutoCloseable
 			if (needsFaceSort)
 			{
 				stats.fullSortModels.incrementAndGet();
-				stats.fullSortTransparentFaces.addAndGet(countTransparentFaces(m));
+				stats.fullSortTransparentFaces.addAndGet(modelInfo.transparentFaces);
 			}
 			else
 			{
@@ -1097,6 +2258,44 @@ final class SceneRenderer implements AutoCloseable
 			stats.texturedEmitFaces.addAndGet(texturedFaces);
 			stats.overrideEmitFaces.addAndGet(overrideFaces);
 		}
+		recordPriorityRange(priorityStart);
+	}
+
+	private void recordPriorityRange(int start)
+	{
+		if (start < 0 || vertexCount <= start)
+		{
+			return;
+		}
+		if (priorityRangeCount == priorityRangeStarts.length)
+		{
+			int newSize = priorityRangeStarts.length * 2;
+			priorityRangeStarts = java.util.Arrays.copyOf(priorityRangeStarts, newSize);
+			priorityRangeEnds = java.util.Arrays.copyOf(priorityRangeEnds, newSize);
+			prioritySkipPairs = java.util.Arrays.copyOf(prioritySkipPairs, newSize * 2);
+		}
+		priorityRangeStarts[priorityRangeCount] = start;
+		priorityRangeEnds[priorityRangeCount] = vertexCount;
+		prioritySkipPairs[priorityRangeCount * 2] = start;
+		prioritySkipPairs[priorityRangeCount * 2 + 1] = vertexCount;
+		priorityRangeCount++;
+	}
+
+	private void recordComputePriorityRange(int startFace, int endFace)
+	{
+		if (endFace <= startFace)
+		{
+			return;
+		}
+		if (computePriorityRangeCount == computePriorityFaceStarts.length)
+		{
+			int newSize = computePriorityFaceStarts.length * 2;
+			computePriorityFaceStarts = java.util.Arrays.copyOf(computePriorityFaceStarts, newSize);
+			computePriorityFaceEnds = java.util.Arrays.copyOf(computePriorityFaceEnds, newSize);
+		}
+		computePriorityFaceStarts[computePriorityRangeCount] = startFace;
+		computePriorityFaceEnds[computePriorityRangeCount] = endFace;
+		computePriorityRangeCount++;
 	}
 
 	private boolean captureModelCullOnlyFused(Projection proj, Model m, int orientation, int wx, int wy, int wz)
@@ -1214,7 +2413,7 @@ final class SceneRenderer implements AutoCloseable
 				continue;
 			}
 
-			if (vertexCount + wrote + 3 > MAX_VERTICES)
+			if (vertexCount + wrote > writeVertexLimit - 3)
 			{
 				overflow();
 				break;
@@ -1333,15 +2532,14 @@ final class SceneRenderer implements AutoCloseable
 		return true;
 	}
 
-	private static int countTransparentFaces(Model m)
+	private static int countTransparentFaces(int faceCount, byte[] transparencies)
 	{
-		byte[] transparencies = m.getFaceTransparencies();
 		if (transparencies == null)
 		{
 			return 0;
 		}
 		int transparent = 0;
-		int faces = Math.min(m.getFaceCount(), transparencies.length);
+		int faces = Math.min(faceCount, transparencies.length);
 		for (int i = 0; i < faces; i++)
 		{
 			if (transparencies[i] != 0)
@@ -1352,22 +2550,46 @@ final class SceneRenderer implements AutoCloseable
 		return transparent;
 	}
 
-	private static boolean hasTransparentFaces(Model m)
+	private static int countTexturedFaces(int faceCount, short[] textures)
 	{
-		byte[] transparencies = m.getFaceTransparencies();
-		if (transparencies == null)
+		if (textures == null)
 		{
-			return false;
+			return 0;
 		}
-		int faces = Math.min(m.getFaceCount(), transparencies.length);
+		int textured = 0;
+		int faces = Math.min(faceCount, textures.length);
 		for (int i = 0; i < faces; i++)
 		{
-			if (transparencies[i] != 0)
+			if (textures[i] != -1)
 			{
-				return true;
+				textured++;
 			}
 		}
-		return false;
+		return textured;
+	}
+
+	private static int countNonZeroBytes(int faceCount, byte[] values)
+	{
+		if (values == null)
+		{
+			return 0;
+		}
+		int count = 0;
+		int faces = Math.min(faceCount, values.length);
+		for (int i = 0; i < faces; i++)
+		{
+			if (values[i] != 0)
+			{
+				count++;
+			}
+		}
+		return count;
+	}
+
+	private static boolean isModelComputeCandidate(Model model, ModelCacheEntry info, boolean needsFaceSort)
+	{
+		return !needsFaceSort
+			&& (model.getOverrideAmount() & 0xFF) == 0;
 	}
 
 	private final float[] uvScratch = new float[6];
@@ -1441,7 +2663,9 @@ final class SceneRenderer implements AutoCloseable
 		// LANDMINE: bind at offset 0 and shift via firstVertex rather than
 		// byte-offset binding — MoltenVK's offset translation produces no
 		// visible geometry at hundreds-of-MB offsets on Apple Silicon.
-		final int slotFirstVertex = sync.currentFrame() * MAX_VERTICES;
+		final int slot = sync.currentFrame();
+		final int slotFirstVertex = MAX_STATIC_VERTICES + slot * MAX_FRAME_VERTICES - staticVertexCount();
+		final int staticFirstVertex = 0;
 		try (MemoryStack stack = stackPush())
 		{
 			vkCmdBindVertexBuffers(cmd, 0,
@@ -1470,6 +2694,14 @@ final class SceneRenderer implements AutoCloseable
 			fragPush.putFloat(smoothBanding);
 			fragPush.flip();
 
+			ByteBuffer alphaFragPush = stack.malloc(32);
+			alphaFragPush.putFloat(fogR).putFloat(fogG).putFloat(fogB).putFloat(brightness);
+			alphaFragPush.putFloat(textureLightMode);
+			alphaFragPush.putFloat((float) colorBlindMode);
+			alphaFragPush.putFloat(colorBlindIntensity);
+			alphaFragPush.putFloat(10f + smoothBanding);
+			alphaFragPush.flip();
+
 			// Skip-list of tile-roof ranges the engine wants hidden.
 			// recordRoofRange is called in captureScene order, so
 			// tileRoofStarts is already sorted by start.
@@ -1496,6 +2728,17 @@ final class SceneRenderer implements AutoCloseable
 			final int loMin = minPlane;
 			final int loCur = currentPlane;
 			final int loMax = maxPlane;
+			int radiusTiles = (int) Math.ceil(drawDistanceTiles + fogDepthTiles + 2f);
+			int radiusZones = Math.max(1, (radiusTiles + ZONE_SIZE - 1) / ZONE_SIZE);
+			boolean fullZoneRange = radiusZones >= ZONES_PER_SIDE;
+			int camTileX = clamp((int) Math.floor(cameraX / 128f), 0, Constants.SCENE_SIZE - 1);
+			int camTileZ = clamp((int) Math.floor(cameraZ / 128f), 0, Constants.SCENE_SIZE - 1);
+			int camZoneX = camTileX / ZONE_SIZE;
+			int camZoneZ = camTileZ / ZONE_SIZE;
+			int minZoneX = fullZoneRange ? 0 : Math.max(0, camZoneX - radiusZones);
+			int maxZoneX = fullZoneRange ? ZONES_PER_SIDE - 1 : Math.min(ZONES_PER_SIDE - 1, camZoneX + radiusZones);
+			int minZoneZ = fullZoneRange ? 0 : Math.max(0, camZoneZ - radiusZones);
+			int maxZoneZ = fullZoneRange ? ZONES_PER_SIDE - 1 : Math.min(ZONES_PER_SIDE - 1, camZoneZ + radiusZones);
 			int layerStart = 0;
 			for (int i = 0; i < LAYER_COUNT; i++)
 			{
@@ -1517,7 +2760,9 @@ final class SceneRenderer implements AutoCloseable
 
 				if (LAYERS[i] == Layer.DYNAMIC)
 				{
-					drawRange(cmd, layerStart, regionEnd, skipScratch, skipPairs, false, slotFirstVertex,
+					int dynamicStart = overlayNextVertex[slot];
+					int dynamicEnd = dynamicOpaqueEnd >= dynamicStart ? Math.min(dynamicOpaqueEnd, regionEnd) : regionEnd;
+					drawRange(cmd, dynamicStart, dynamicEnd, prioritySkipPairs, priorityRangeCount, priorityRangeCount > 0, slotFirstVertex,
 						want.layout(), vertPush, fragPush);
 				}
 				else
@@ -1528,20 +2773,291 @@ final class SceneRenderer implements AutoCloseable
 					// chopped when their roof id is hidden.
 					for (int p = loMin; p <= loMax; p++)
 					{
-						drawStaticPlane(cmd, i, p, layerStart, cameraX, cameraZ,
-							drawDistanceTiles, fogDepthTiles, skipScratch, skipPairs, p > loCur,
-							slotFirstVertex, want.layout(), vertPush, fragPush);
+						drawStaticPlane(cmd, i, p, layerStart,
+							fullZoneRange, minZoneX, maxZoneX, minZoneZ, maxZoneZ,
+							skipScratch, skipPairs, p > loCur,
+							slot, staticFirstVertex, want.layout(), vertPush, fragPush);
+						drawOverlayPlane(cmd, i, p, minZoneX, maxZoneX, minZoneZ, maxZoneZ,
+							skipScratch, skipPairs, p > loCur,
+							slot, slotFirstVertex, want.layout(), vertPush, fragPush);
 					}
 				}
 				layerStart = regionEnd;
 			}
+
+			drawModelComputeReplacement(cmd, slot, vertPush, fragPush);
+
+			if (priorityRangeCount > 0 || computePriorityRangeCount > 0)
+			{
+				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, priorityColorPipeline.handle());
+				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+					priorityColorPipeline.layout(), 0, stack.longs(descriptorSet), null);
+				drawPriorityRanges(cmd, slotFirstVertex, priorityColorPipeline.layout(), vertPush, fragPush);
+				drawModelComputePriorityRanges(cmd, slot, priorityColorPipeline.layout(), vertPush, fragPush);
+
+				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, priorityDepthPipeline.handle());
+				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+					priorityDepthPipeline.layout(), 0, stack.longs(descriptorSet), null);
+				drawPriorityRanges(cmd, slotFirstVertex, priorityDepthPipeline.layout(), vertPush, fragPush);
+				drawModelComputePriorityRanges(cmd, slot, priorityDepthPipeline.layout(), vertPush, fragPush);
+			}
+
+			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, alphaPipeline.handle());
+			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+				alphaPipeline.layout(), 0, stack.longs(descriptorSet), null);
+			drawAlphaPass(cmd, loMin, loMax, fullZoneRange, minZoneX, maxZoneX, minZoneZ, maxZoneZ,
+				skipScratch, skipPairs, loCur,
+				slot, staticFirstVertex, slotFirstVertex, alphaPipeline.layout(), vertPush, alphaFragPush);
+			drawModelComputeReplacementAlpha(cmd, slot, vertPush, alphaFragPush);
+			drawModelComputeDebug(cmd, slot, vertPush, fragPush);
+		}
+	}
+
+	void recordBeforeRenderPass(VkCommandBuffer cmd)
+	{
+		if (modelComputePipeline == null)
+		{
+			return;
+		}
+		modelComputePipeline.recordDispatch(cmd, sync.currentFrame(), modelInstanceCount,
+			modelComputeMaxFacesPerInstance, modelComputeDebugDraw && !modelComputeReplacement);
+		if (modelComputeDebugDraw || modelComputeReplacement)
+		{
+			try (MemoryStack stack = stackPush())
+			{
+				VkBufferMemoryBarrier.Buffer barrier = VkBufferMemoryBarrier.calloc(1, stack);
+				barrier.get(0)
+					.sType$Default()
+					.srcAccessMask(VK_ACCESS_SHADER_WRITE_BIT)
+					.dstAccessMask(VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT)
+					.srcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+					.dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+					.buffer(modelComputeOutputBuffer.handle())
+					.offset(modelComputeOutputBuffer.frameOffset(sync.currentFrame()))
+					.size(modelComputeOutputBuffer.frameBytes());
+				vkCmdPipelineBarrier(cmd,
+					VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+					VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
+					0, null, barrier, null);
+			}
+		}
+	}
+
+	private void drawModelComputeDebug(VkCommandBuffer cmd, int slot, ByteBuffer vertPush, ByteBuffer fragPush)
+	{
+		if (!modelComputeDebugDraw || modelComputeReplacement
+			|| modelComputeOutputBuffer == null || modelComputeDebugPipeline == null)
+		{
+			return;
+		}
+		int faceSlots = modelComputeOutputFaceCursor;
+		modelComputeDebugFaceSlots = faceSlots;
+		if (faceSlots <= 0)
+		{
+			return;
+		}
+		try (MemoryStack stack = stackPush())
+		{
+			vkCmdBindVertexBuffers(cmd, 0,
+				stack.longs(modelComputeOutputBuffer.handle()),
+				stack.longs(modelComputeOutputBuffer.frameOffset(slot)));
+			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, modelComputeDebugPipeline.handle());
+			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+				modelComputeDebugPipeline.layout(), 0, stack.longs(descriptorSet), null);
+			vkCmdPushConstants(cmd, modelComputeDebugPipeline.layout(), VK_SHADER_STAGE_VERTEX_BIT, 0, vertPush);
+			vkCmdPushConstants(cmd, modelComputeDebugPipeline.layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
+			vkCmdDraw(cmd, faceSlots * 3, 1, 0, 0);
+			vkCmdBindVertexBuffers(cmd, 0,
+				stack.longs(vbuf.handle()),
+				stack.longs(0L));
+		}
+	}
+
+	private void drawModelComputeReplacement(VkCommandBuffer cmd, int slot, ByteBuffer vertPush, ByteBuffer fragPush)
+	{
+		if (!modelComputeReplacement || modelComputeOutputBuffer == null || fillPipeline == null)
+		{
+			return;
+		}
+		int faceSlots = modelComputeOutputFaceCursor;
+		modelComputeDebugFaceSlots = faceSlots;
+		if (faceSlots <= 0)
+		{
+			return;
+		}
+		try (MemoryStack stack = stackPush())
+		{
+			vkCmdBindVertexBuffers(cmd, 0,
+				stack.longs(modelComputeOutputBuffer.handle()),
+				stack.longs(modelComputeOutputBuffer.frameOffset(slot)));
+			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fillPipeline.handle());
+			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+				fillPipeline.layout(), 0, stack.longs(descriptorSet), null);
+			vkCmdPushConstants(cmd, fillPipeline.layout(), VK_SHADER_STAGE_VERTEX_BIT, 0, vertPush);
+			vkCmdPushConstants(cmd, fillPipeline.layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
+			drawComputeFaceRangeWithSkips(cmd, 0, faceSlots, fillPipeline.layout(), vertPush, fragPush);
+			vkCmdBindVertexBuffers(cmd, 0,
+				stack.longs(vbuf.handle()),
+				stack.longs(0L));
+		}
+	}
+
+	private void drawModelComputeReplacementAlpha(VkCommandBuffer cmd, int slot, ByteBuffer vertPush, ByteBuffer alphaFragPush)
+	{
+		if (!modelComputeReplacement || modelComputeOutputBuffer == null || alphaPipeline == null)
+		{
+			return;
+		}
+		int faceSlots = modelComputeOutputFaceCursor;
+		if (faceSlots <= 0)
+		{
+			return;
+		}
+		try (MemoryStack stack = stackPush())
+		{
+			vkCmdBindVertexBuffers(cmd, 0,
+				stack.longs(modelComputeOutputBuffer.handle()),
+				stack.longs(modelComputeOutputBuffer.frameOffset(slot)));
+			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, alphaPipeline.handle());
+			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+				alphaPipeline.layout(), 0, stack.longs(descriptorSet), null);
+			vkCmdPushConstants(cmd, alphaPipeline.layout(), VK_SHADER_STAGE_VERTEX_BIT, 0, vertPush);
+			vkCmdPushConstants(cmd, alphaPipeline.layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 96, alphaFragPush);
+			drawComputeFaceRangeWithSkips(cmd, 0, faceSlots, alphaPipeline.layout(), vertPush, alphaFragPush);
+			vkCmdBindVertexBuffers(cmd, 0,
+				stack.longs(vbuf.handle()),
+				stack.longs(0L));
+		}
+	}
+
+	private void drawModelComputePriorityRanges(VkCommandBuffer cmd, int slot, long pipelineLayout,
+		ByteBuffer vertPush, ByteBuffer fragPush)
+	{
+		if (!modelComputeReplacement || modelComputeOutputBuffer == null || computePriorityRangeCount == 0)
+		{
+			return;
+		}
+		try (MemoryStack stack = stackPush())
+		{
+			vkCmdBindVertexBuffers(cmd, 0,
+				stack.longs(modelComputeOutputBuffer.handle()),
+				stack.longs(modelComputeOutputBuffer.frameOffset(slot)));
+			for (int i = 0; i < computePriorityRangeCount; i++)
+			{
+				int start = computePriorityFaceStarts[i];
+				int end = computePriorityFaceEnds[i];
+				if (end <= start)
+				{
+					continue;
+				}
+				vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, vertPush);
+				vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
+				vkCmdDraw(cmd, (end - start) * 3, 1, start * 3, 0);
+			}
+			vkCmdBindVertexBuffers(cmd, 0,
+				stack.longs(vbuf.handle()),
+				stack.longs(0L));
+		}
+	}
+
+	private void drawComputeFaceRangeWithSkips(VkCommandBuffer cmd, int startFace, int endFace,
+		long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
+	{
+		int cursor = startFace;
+		for (int i = 0; i < computePriorityRangeCount; i++)
+		{
+			int skipStart = Math.max(startFace, computePriorityFaceStarts[i]);
+			int skipEnd = Math.min(endFace, computePriorityFaceEnds[i]);
+			if (skipEnd <= skipStart)
+			{
+				continue;
+			}
+			if (cursor < skipStart)
+			{
+				drawComputeFaceRange(cmd, cursor, skipStart, pipelineLayout, vertPush, fragPush);
+			}
+			cursor = Math.max(cursor, skipEnd);
+		}
+		if (cursor < endFace)
+		{
+			drawComputeFaceRange(cmd, cursor, endFace, pipelineLayout, vertPush, fragPush);
+		}
+	}
+
+	private static void drawComputeFaceRange(VkCommandBuffer cmd, int startFace, int endFace,
+		long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
+	{
+		if (endFace <= startFace)
+		{
+			return;
+		}
+		vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, vertPush);
+		vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
+		vkCmdDraw(cmd, (endFace - startFace) * 3, 1, startFace * 3, 0);
+	}
+
+	private int layerStartFor(int layer)
+	{
+		return layer == 0 ? 0 : regionEnds[layer - 1];
+	}
+
+	private void drawAlphaPass(VkCommandBuffer cmd, int loMin, int loMax,
+							   boolean fullZoneRange, int minZoneX, int maxZoneX, int minZoneZ, int maxZoneZ,
+							   int[] skips, int skipPairs, int currentPlane,
+							   int slot, int staticFirstVertex, int slotFirstVertex,
+							   long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
+	{
+		for (int i = 0; i < LAYER_COUNT; i++)
+		{
+			int layerStart = layerStartFor(i);
+			int regionEnd = i == LAYER_COUNT - 1 ? vertexCount : regionEnds[i];
+			if (regionEnd <= layerStart)
+			{
+				continue;
+			}
+			if (LAYERS[i] == Layer.DYNAMIC)
+			{
+				int dynamicStart = overlayNextVertex[slot];
+				int dynamicEnd = dynamicOpaqueEnd >= dynamicStart ? Math.min(dynamicOpaqueEnd, regionEnd) : regionEnd;
+				drawRange(cmd, dynamicStart, dynamicEnd, prioritySkipPairs, priorityRangeCount,
+					false, slotFirstVertex, pipelineLayout, vertPush, fragPush);
+			}
+			else
+			{
+				for (int p = loMin; p <= loMax; p++)
+				{
+					drawStaticPlane(cmd, i, p, layerStart,
+						fullZoneRange, minZoneX, maxZoneX, minZoneZ, maxZoneZ,
+						skips, skipPairs, p > currentPlane,
+						slot, staticFirstVertex, pipelineLayout, vertPush, fragPush);
+					drawOverlayPlane(cmd, i, p, minZoneX, maxZoneX, minZoneZ, maxZoneZ,
+						skips, skipPairs, p > currentPlane,
+						slot, slotFirstVertex, pipelineLayout, vertPush, fragPush);
+				}
+			}
+		}
+	}
+
+	private void drawPriorityRanges(VkCommandBuffer cmd, int slotFirstVertex,
+									long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
+	{
+		for (int i = 0; i < priorityRangeCount; i++)
+		{
+			int start = priorityRangeStarts[i];
+			int end = priorityRangeEnds[i];
+			if (end <= start)
+			{
+				continue;
+			}
+			drawRange(cmd, start, end, skipScratch, 0, false,
+				slotFirstVertex, pipelineLayout, vertPush, fragPush);
 		}
 	}
 
 	private void drawStaticPlane(VkCommandBuffer cmd, int layer, int plane, int layerStart,
-								 float cameraX, float cameraZ, float drawDistanceTiles, float fogDepthTiles,
+								 boolean fullZoneRange, int minZoneX, int maxZoneX, int minZoneZ, int maxZoneZ,
 								 int[] skips, int skipPairs, boolean applySkips,
-								 int slotFirstVertex, long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
+								 int slot, int slotFirstVertex, long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
 	{
 		int planeStart = plane == 0 ? layerStart : planeEnds[layer][plane - 1];
 		int planeEnd = planeEnds[layer][plane];
@@ -1550,35 +3066,96 @@ final class SceneRenderer implements AutoCloseable
 			return;
 		}
 
-		int radiusTiles = (int) Math.ceil(drawDistanceTiles + fogDepthTiles + 2f);
-		int radiusZones = Math.max(1, (radiusTiles + ZONE_SIZE - 1) / ZONE_SIZE);
-		if (radiusZones >= ZONES_PER_SIDE)
+		if (fullZoneRange)
 		{
-			drawRange(cmd, planeStart, planeEnd, skips, skipPairs, applySkips,
-				slotFirstVertex, pipelineLayout, vertPush, fragPush);
-			return;
+			if (overlaySlotHasZones[slot] && (!applySkips || skipPairs == 0))
+			{
+				int overlayPairs = 0;
+				for (int zoneIdx = 0; zoneIdx < ZONE_COUNT; zoneIdx++)
+				{
+					if (!overlayZoneValid[slot][zoneIdx])
+					{
+						continue;
+					}
+					int count = zoneVertexCount[layer][plane][zoneIdx];
+					if (count <= 0)
+					{
+						continue;
+					}
+					if (overlayPairs * 2 + 2 > skips.length)
+					{
+						skipScratch = java.util.Arrays.copyOf(skips, skips.length * 2);
+						skips = skipScratch;
+					}
+					int start = zoneVertexStart[layer][plane][zoneIdx];
+					skips[overlayPairs * 2] = start;
+					skips[overlayPairs * 2 + 1] = start + count;
+					overlayPairs++;
+				}
+				drawRange(cmd, planeStart, planeEnd, skips, overlayPairs, overlayPairs > 0,
+					slotFirstVertex, pipelineLayout, vertPush, fragPush);
+				return;
+			}
+			if (overlaySlotHasZones[slot])
+			{
+				// When roof skips are active, keep the simple per-zone path so
+				// roof and overlay skip lists cannot fight each other.
+			}
+			else
+			{
+				drawRange(cmd, planeStart, planeEnd, skips, skipPairs, applySkips,
+					slotFirstVertex, pipelineLayout, vertPush, fragPush);
+				return;
+			}
 		}
-
-		int camTileX = clamp((int) Math.floor(cameraX / 128f), 0, Constants.SCENE_SIZE - 1);
-		int camTileZ = clamp((int) Math.floor(cameraZ / 128f), 0, Constants.SCENE_SIZE - 1);
-		int camZoneX = camTileX / ZONE_SIZE;
-		int camZoneZ = camTileZ / ZONE_SIZE;
-		int minZoneX = Math.max(0, camZoneX - radiusZones);
-		int maxZoneX = Math.min(ZONES_PER_SIDE - 1, camZoneX + radiusZones);
-		int minZoneZ = Math.max(0, camZoneZ - radiusZones);
-		int maxZoneZ = Math.min(ZONES_PER_SIDE - 1, camZoneZ + radiusZones);
 
 		for (int zx = minZoneX; zx <= maxZoneX; zx++)
 		{
 			for (int zz = minZoneZ; zz <= maxZoneZ; zz++)
 			{
 				int zoneIdx = zx * ZONES_PER_SIDE + zz;
+				if (overlayZoneValid[slot][zoneIdx])
+				{
+					continue;
+				}
 				int count = zoneVertexCount[layer][plane][zoneIdx];
 				if (count <= 0)
 				{
 					continue;
 				}
 				int start = zoneVertexStart[layer][plane][zoneIdx];
+				drawRange(cmd, start, start + count, skips, skipPairs, applySkips,
+					slotFirstVertex, pipelineLayout, vertPush, fragPush);
+			}
+		}
+	}
+
+	private void drawOverlayPlane(VkCommandBuffer cmd, int layer, int plane,
+								  int minZoneX, int maxZoneX, int minZoneZ, int maxZoneZ,
+								  int[] skips, int skipPairs, boolean applySkips,
+								  int slot, int slotFirstVertex, long pipelineLayout,
+								  ByteBuffer vertPush, ByteBuffer fragPush)
+	{
+		if (!overlaySlotHasZones[slot])
+		{
+			return;
+		}
+
+		for (int zx = minZoneX; zx <= maxZoneX; zx++)
+		{
+			for (int zz = minZoneZ; zz <= maxZoneZ; zz++)
+			{
+				int zoneIdx = zx * ZONES_PER_SIDE + zz;
+				if (!overlayZoneValid[slot][zoneIdx])
+				{
+					continue;
+				}
+				int count = overlayZoneCount[slot][layer][plane][zoneIdx];
+				if (count <= 0)
+				{
+					continue;
+				}
+				int start = overlayZoneStart[slot][layer][plane][zoneIdx];
 				drawRange(cmd, start, start + count, skips, skipPairs, applySkips,
 					slotFirstVertex, pipelineLayout, vertPush, fragPush);
 			}
@@ -1649,6 +3226,10 @@ final class SceneRenderer implements AutoCloseable
 
 	private void recordRoofRange(int roofId, int vertexStart, int vertexCount)
 	{
+		if (rebuildingOverlayZone)
+		{
+			return;
+		}
 		if (tileRoofCount == tileRoofIds.length)
 		{
 			int newSize = tileRoofIds.length * 2;
@@ -1720,8 +3301,17 @@ final class SceneRenderer implements AutoCloseable
 	public void close()
 	{
 		vkDeviceWaitIdle(device.handle());
+		if (modelComputePipeline != null) modelComputePipeline.close();
+		if (modelComputeOutputBuffer != null) modelComputeOutputBuffer.close();
+		modelFaceIndexBuffer.close();
+		modelInstanceBuffer.close();
+		modelMeshArena.close();
 		vbuf.close();
 		fillPipeline.close();
+		alphaPipeline.close();
+		priorityColorPipeline.close();
+		priorityDepthPipeline.close();
+		if (modelComputeDebugPipeline != null) modelComputeDebugPipeline.close();
 		if (linePipeline != null) linePipeline.close();
 	}
 

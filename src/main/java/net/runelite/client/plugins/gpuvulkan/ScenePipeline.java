@@ -63,6 +63,19 @@ final class ScenePipeline implements AutoCloseable
 	ScenePipeline(VulkanDevice device, RenderPass renderPass, int polygonMode, boolean depthTest,
 				  int samples, boolean alphaToCoverage)
 	{
+		this(device, renderPass, polygonMode, depthTest, depthTest, true, samples, alphaToCoverage);
+	}
+
+	ScenePipeline(VulkanDevice device, RenderPass renderPass, int polygonMode, boolean depthTest,
+				  boolean depthWrite, boolean colorWrite, int samples, boolean alphaToCoverage)
+	{
+		this(device, renderPass, polygonMode, depthTest, depthWrite, colorWrite, samples, alphaToCoverage, false);
+	}
+
+	ScenePipeline(VulkanDevice device, RenderPass renderPass, int polygonMode, boolean depthTest,
+				  boolean depthWrite, boolean colorWrite, int samples, boolean alphaToCoverage,
+				  boolean forceBlend)
+	{
 		this.device = device;
 		Disposables tmp = new Disposables();
 		try (MemoryStack stack = stackPush())
@@ -127,21 +140,17 @@ final class ScenePipeline implements AutoCloseable
 					// (tent drapes, banners, water surfaces) visible.
 					.alphaToCoverageEnable(alphaToCoverage && samples != VK_SAMPLE_COUNT_1_BIT);
 
-			// When MSAA is on, alpha-to-coverage above handles translucency
-			// via sample-mask dithering, so the blend stage stays disabled
-			// (output sample-count is determined by alpha, color writes are
-			// per-sample opaque). When MSAA is OFF, alpha-to-coverage is a
-			// no-op and the frag shader's `alpha = 1 - trans/255` would just
-			// be discarded — leaving translucent geometry (drapes, banners,
-			// glow tips) rendering fully opaque. Enable standard src-over
-			// blending in that case so we get *some* translucency at the
-			// cost of order-dependent compositing (no sorted alpha pass).
-			boolean blendFallback = samples == VK_SAMPLE_COUNT_1_BIT;
+			// The dedicated alpha pass forces standard src-over blending with
+			// depth writes off, matching stock GPU's transparent-face rule. The
+			// normal fill pipeline keeps its historical single-sample fallback.
+			boolean blendFallback = forceBlend || samples == VK_SAMPLE_COUNT_1_BIT;
 			VkPipelineColorBlendAttachmentState.Buffer blend =
 				VkPipelineColorBlendAttachmentState.calloc(1, stack);
 			blend.get(0)
-				.colorWriteMask(VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
-					| VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT)
+				.colorWriteMask(colorWrite
+					? VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
+						| VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT
+					: 0)
 				.blendEnable(blendFallback)
 				.srcColorBlendFactor(VK_BLEND_FACTOR_SRC_ALPHA)
 				.dstColorBlendFactor(VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA)
@@ -159,7 +168,7 @@ final class ScenePipeline implements AutoCloseable
 			VkPipelineDepthStencilStateCreateInfo depth =
 				VkPipelineDepthStencilStateCreateInfo.calloc(stack).sType$Default()
 					.depthTestEnable(depthTest)
-					.depthWriteEnable(depthTest)
+					.depthWriteEnable(depthWrite)
 					.depthCompareOp(VK_COMPARE_OP_GREATER)
 					.depthBoundsTestEnable(false)
 					.stencilTestEnable(false);

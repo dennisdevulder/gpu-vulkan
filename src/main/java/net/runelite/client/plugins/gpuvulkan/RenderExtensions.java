@@ -102,6 +102,21 @@ final class RenderExtensions implements AutoCloseable
 		forEachExtension("invalidateCapturedScene", VulkanRenderExtension::invalidateCapturedScene);
 	}
 
+	void invalidateZone(Scene scene, int zx, int zz)
+	{
+		forEachExtension("invalidateZone", extension -> extension.invalidateZone(scene, zx, zz));
+	}
+
+	void rebuildDirtyZones(Scene scene)
+	{
+		forEachExtension("rebuildDirtyZones", extension -> extension.rebuildDirtyZones(scene));
+	}
+
+	void drawPass(int pass)
+	{
+		forEachExtension("drawPass", extension -> extension.drawPass(pass));
+	}
+
 	void captureModel(Model model, int orientation, int worldX, int worldY, int worldZ)
 	{
 		for (int i = 0; i < extensions.size(); )
@@ -140,12 +155,18 @@ final class RenderExtensions implements AutoCloseable
 
 	void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ, int renderMode)
 	{
+		captureModel(projection, model, orientation, worldX, worldY, worldZ, renderMode, false);
+	}
+
+	void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ,
+		int renderMode, boolean actorModel)
+	{
 		for (int i = 0; i < extensions.size(); )
 		{
 			VulkanRenderExtension extension = extensions.get(i);
 			try
 			{
-				extension.captureModel(projection, model, orientation, worldX, worldY, worldZ, renderMode);
+				extension.captureModel(projection, model, orientation, worldX, worldY, worldZ, renderMode, actorModel);
 				i++;
 			}
 			catch (RuntimeException e)

@@ -20,6 +20,7 @@ final class BaseRenderer implements VulkanRenderExtension
 		sceneRenderer = context.createSceneRenderer();
 		interfaceRenderer = new InterfaceRenderer(context.renderer());
 		applyWireframeConfig();
+		applyModelComputeDebugConfig();
 	}
 
 	@Override
@@ -36,6 +37,11 @@ final class BaseRenderer implements VulkanRenderExtension
 		if (event.getKey() != null && event.getKey().startsWith("wireframe"))
 		{
 			applyWireframeConfig();
+		}
+		if ("modelComputeDebugDraw".equals(event.getKey())
+			|| "modelComputeReplacement".equals(event.getKey()))
+		{
+			applyModelComputeDebugConfig();
 		}
 	}
 
@@ -59,6 +65,27 @@ final class BaseRenderer implements VulkanRenderExtension
 	{
 		if (sceneRenderer == null) return;
 		sceneRenderer.invalidateCapturedScene();
+	}
+
+	@Override
+	public void invalidateZone(Scene scene, int zx, int zz)
+	{
+		if (sceneRenderer == null) return;
+		sceneRenderer.invalidateZone(scene, zx, zz);
+	}
+
+	@Override
+	public void rebuildDirtyZones(Scene scene)
+	{
+		if (sceneRenderer == null) return;
+		sceneRenderer.rebuildDirtyZones(scene);
+	}
+
+	@Override
+	public void drawPass(int pass)
+	{
+		if (sceneRenderer == null) return;
+		sceneRenderer.drawPass(pass);
 	}
 
 	@Override
@@ -93,6 +120,15 @@ final class BaseRenderer implements VulkanRenderExtension
 	}
 
 	@Override
+	public void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ,
+		int renderMode, boolean actorModel)
+	{
+		if (config != null && config.benchmarkSkipDynamicCapture()) return;
+		if (sceneRenderer == null) return;
+		sceneRenderer.captureModel(projection, model, orientation, worldX, worldY, worldZ, renderMode, actorModel);
+	}
+
+	@Override
 	public void setLevelRange(int minLevel, int maxLevel)
 	{
 		if (sceneRenderer == null) return;
@@ -123,6 +159,10 @@ final class BaseRenderer implements VulkanRenderExtension
 	@Override
 	public void recordBeforeRenderPass(VkCommandBuffer commandBuffer)
 	{
+		if (sceneRenderer != null)
+		{
+			sceneRenderer.recordBeforeRenderPass(commandBuffer);
+		}
 		if (config != null && config.benchmarkSkipUi()) return;
 		if (interfaceRenderer == null) return;
 		interfaceRenderer.recordCopyToImage(commandBuffer);
@@ -168,5 +208,12 @@ final class BaseRenderer implements VulkanRenderExtension
 		sceneRenderer.setWireframeGround(config.wireframeGround());
 		sceneRenderer.setWireframeGameObjects(config.wireframeGameObjects());
 		sceneRenderer.setWireframeDynamic(config.wireframeDynamic());
+	}
+
+	private void applyModelComputeDebugConfig()
+	{
+		if (sceneRenderer == null || config == null) return;
+		sceneRenderer.setModelComputeDebugDraw(false);
+		sceneRenderer.setModelComputeReplacement(false);
 	}
 }

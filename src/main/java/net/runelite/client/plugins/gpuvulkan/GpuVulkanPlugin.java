@@ -11,8 +11,6 @@ import net.runelite.api.Client;
 import net.runelite.api.GameObject;
 import net.runelite.api.GameState;
 import net.runelite.api.Model;
-import net.runelite.api.NPC;
-import net.runelite.api.Player;
 import net.runelite.api.Projection;
 import net.runelite.api.Renderable;
 import net.runelite.api.Scene;
@@ -30,6 +28,7 @@ import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.plugins.PluginManager;
+import net.runelite.client.ui.DrawManager;
 import net.runelite.client.ui.overlay.OverlayManager;
 
 @PluginDescriptor(
@@ -56,6 +55,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 
 	@Inject
 	private OverlayManager overlayManager;
+
+	@Inject
+	private DrawManager drawManager;
 
 	private Disposables disposables;
 	private VulkanInstance instance;
@@ -94,11 +96,6 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	/** Set by the JVM shutdown hook so in-flight callbacks bail out before
 	 *  the disposables stack tears down Vulkan objects. */
 	private static volatile boolean shuttingDown;
-
-	/** Cached from {@code drawDynamic}/{@code drawTemp}. {@code drawScene}
-	 *  doesn't pass a Projection, so {@link #captureActor} reuses the
-	 *  previous one; null on the first frame after plugin enable. */
-	private volatile net.runelite.api.Projection lastWorldProjection;
 
 	@Override
 	protected void startUp()
@@ -304,6 +301,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 
 				renderer = new VulkanRenderer(device, renderPass, renderExtensions,
 					swapchain, depthBuffer, msaaColor, framebuffers, sync, stats);
+				renderer.setDrawManager(drawManager);
 				disposables.add(renderer);
 
 				log.info("Vulkan ready: {} ({}x{}, {} swapchain images)",
@@ -680,84 +678,29 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	@Override
 	public void drawScene(double cameraX, double cameraY, double cameraZ, double cameraPitch, double cameraYaw, int plane)
 	{
-		stats.drawScene.incrementAndGet();
-		stats.lastCamX = cameraX;
-		stats.lastCamY = cameraY;
-		stats.lastCamZ = cameraZ;
-		stats.lastCamPlane = plane;
+		boolean statsEnabled = stats.isEnabled();
+		if (statsEnabled)
+		{
+			stats.drawScene.incrementAndGet();
+			stats.lastCamX = cameraX;
+			stats.lastCamY = cameraY;
+			stats.lastCamZ = cameraZ;
+			stats.lastCamPlane = plane;
+		}
 		// Camera doubles here come from a different reference frame than
 		// preSceneDraw's floats — we use preSceneDraw's exclusively for the
 		// projection MVP, so don't overwrite them here.
 		if (renderExtensions != null)
 		{
-			long start = stats.startNanos();
+			long start = statsEnabled ? System.nanoTime() : 0L;
 			renderExtensions.beginFrame();
 			stats.addNanos(stats.beginFrameNanos, start);
-			if (config.manualActorCapture())
-			{
-				start = stats.startNanos();
-				captureActors();
-				stats.addNanos(stats.actorCaptureNanos, start);
-			}
-			start = stats.startNanos();
+			start = statsEnabled ? System.nanoTime() : 0L;
+			renderExtensions.rebuildDirtyZones(capturedScene);
+			stats.addNanos(stats.sceneCaptureNanos, start);
+			start = statsEnabled ? System.nanoTime() : 0L;
 			renderExtensions.captureDynamicPending();
 			stats.addNanos(stats.pendingCaptureNanos, start);
-		}
-	}
-
-	/** Per-frame dedupe — engine occasionally surfaces the local player
-	 *  via both getNpcs() and getPlayers() during worldview transitions. */
-	private final java.util.IdentityHashMap<net.runelite.api.Actor, Boolean> seenActors
-		= new java.util.IdentityHashMap<>();
-
-	/**
-	 * Walks NPCs + Players every frame. The engine's frustum culling drops
-	 * actors for whole frames as the camera pans, which would otherwise
-	 * leave the player flickering — iterating the lists ourselves bypasses
-	 * that.
-	 *
-	 * <p>Local player is captured FIRST. The scene pipeline uses
-	 * {@code VK_COMPARE_OP_GREATER} (strict), so at exactly equal z — two
-	 * actors sharing a tile — the second-drawn fragment is discarded and
-	 * the first-drawn wins. Capturing the user's character first makes
-	 * sure they stay visible when an NPC or another player stands on the
-	 * same square.
-	 */
-	private void captureActors()
-	{
-		seenActors.clear();
-		Player local = client.getLocalPlayer();
-		if (local != null && seenActors.put(local, Boolean.TRUE) == null)
-		{
-			captureActor(local);
-		}
-		java.util.List<NPC> npcs = client.getNpcs();
-		if (npcs != null)
-		{
-			for (NPC npc : npcs) if (npc != null && seenActors.put(npc, Boolean.TRUE) == null) captureActor(npc);
-		}
-		java.util.List<Player> players = client.getPlayers();
-		if (players != null)
-		{
-			for (Player p : players) if (p != null && seenActors.put(p, Boolean.TRUE) == null) captureActor(p);
-		}
-	}
-
-	private void captureActor(net.runelite.api.Actor actor)
-	{
-		net.runelite.api.coords.LocalPoint loc = actor.getLocalLocation();
-		if (loc == null) return;
-		Model m = actor.getModel();
-		if (m == null) return;
-		int tileH = net.runelite.api.Perspective.getTileHeight(client, loc, client.getPlane());
-		net.runelite.api.Projection proj = lastWorldProjection;
-		if (proj != null)
-		{
-			renderExtensions.captureModel(proj, m, actor.getCurrentOrientation(), loc.getX(), tileH, loc.getY(), renderModeOf(actor));
-		}
-		else
-		{
-			renderExtensions.captureModel(m, actor.getCurrentOrientation(), loc.getX(), tileH, loc.getY());
 		}
 	}
 
@@ -771,7 +714,10 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		float cameraX, float cameraY, float cameraZ, float cameraPitch, float cameraYaw,
 		int minLevel, int level, int maxLevel, Set<Integer> hideRoofIds)
 	{
-		stats.preSceneDraw.incrementAndGet();
+		if (stats.isEnabled())
+		{
+			stats.preSceneDraw.incrementAndGet();
+		}
 		// Scene-reference fallback: swapScene/loadScene callbacks don't fire
 		// in this engine version (recon shows swap=0 load=0), so the only
 		// reliable signal that the scene has been swapped is the Scene object
@@ -800,13 +746,19 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	@Override
 	public void postDrawScene()
 	{
-		stats.postDrawScene.incrementAndGet();
+		if (stats.isEnabled())
+		{
+			stats.postDrawScene.incrementAndGet();
+		}
 	}
 
 	@Override
 	public void swapScene(Scene scene)
 	{
-		stats.swapScene.incrementAndGet();
+		if (stats.isEnabled())
+		{
+			stats.swapScene.incrementAndGet();
+		}
 		// Belt-and-braces. The primary trigger is the reference check in
 		// preSceneDraw (engine doesn't reliably call swapScene), but if it
 		// does, preSceneDraw's check will see scene == capturedScene and
@@ -830,7 +782,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	{
 		if (renderExtensions == null) return;
 		prepareScene(scene);
-		long start = stats.startNanos();
+		long start = stats.isEnabled() ? System.nanoTime() : 0L;
 		renderExtensions.captureScene(scene);
 		stats.addNanos(stats.sceneCaptureNanos, start);
 	}
@@ -861,7 +813,33 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		lines.add("verts: " + compactCount(metrics.totalVertices) + " / " + compactCount(metrics.maxVertices));
 		lines.add("static: " + compactCount(metrics.sceneVertices));
 		lines.add("roofs: " + metrics.roofRanges);
+		lines.add("dirty zones: " + metrics.dirtyZones);
 		lines.add("pending: " + metrics.pendingRenderables);
+		lines.add("model cache: " + compactCount(metrics.modelCacheEntries)
+			+ " h/m " + compactCount(metrics.modelCacheHits) + "/" + compactCount(metrics.modelCacheMisses));
+		lines.add("model mesh: " + mib(metrics.modelMeshBytes) + " / "
+			+ mib(metrics.modelMeshCapacityBytes) + " MiB");
+		lines.add("model inst: " + compactCount(metrics.modelInstances) + " / "
+			+ compactCount(metrics.modelInstanceMax) + " o=" + metrics.modelInstanceOverflows);
+		if (metrics.modelComputeOutputBytes > 0L)
+		{
+			lines.add("model out: " + mib(metrics.modelComputeOutputBytes) + " MiB");
+		}
+		lines.add("model dbg: " + (metrics.modelComputeDebugDraw ? "on" : "off")
+			+ " f=" + compactCount(metrics.modelComputeDebugFaces)
+			+ " clip=" + compactCount(metrics.modelComputeClippedFaces));
+		lines.add("model cand: " + compactCount(metrics.modelComputeCandidateFaces)
+			+ " / " + compactCount(metrics.modelComputeTrackedFaces));
+		lines.add("model repl: " + compactCount(metrics.modelComputeReplacedFaces)
+			+ " s=" + compactCount(metrics.modelComputeReplacedSortedFaces)
+			+ " p=" + compactCount(metrics.modelComputeReplacedPriorityFaces));
+		lines.add("model block: s=" + compactCount(metrics.modelComputeSortedFaces)
+			+ " p=" + compactCount(metrics.modelComputePriorityFaces)
+			+ " tr=" + compactCount(metrics.modelComputeTransparentFaces)
+			+ " t=" + compactCount(metrics.modelComputeTexturedFaces)
+			+ " b=" + compactCount(metrics.modelComputeBiasedFaces)
+			+ " o=" + compactCount(metrics.modelComputeOverrideFaces)
+			+ " a=" + compactCount(metrics.modelComputeActorFaces));
 		lines.add("overflow: " + (metrics.overflowed ? "yes" : "no"));
 		lines.add("scene/pre/post: " + stats.drawSceneCount() + " / "
 			+ stats.preSceneDrawCount() + " / " + stats.postDrawSceneCount());
@@ -885,6 +863,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			{
 				overlayManager.add(debugOverlay);
 				debugOverlayRegistered = true;
+				stats.setOverlayStatsEnabled(true);
 			}
 		}
 		else
@@ -899,6 +878,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		{
 			overlayManager.remove(debugOverlay);
 			debugOverlayRegistered = false;
+			stats.setOverlayStatsEnabled(false);
 		}
 	}
 
@@ -929,7 +909,10 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	@Override
 	public void loadScene(Scene scene)
 	{
-		stats.loadScene.incrementAndGet();
+		if (stats.isEnabled())
+		{
+			stats.loadScene.incrementAndGet();
+		}
 	}
 
 	// Wired up but unused — engine doesn't fire either loadScene overload
@@ -937,64 +920,84 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	@Override
 	public void loadScene(net.runelite.api.WorldView worldView, Scene scene)
 	{
-		stats.loadScene.incrementAndGet();
+		if (stats.isEnabled())
+		{
+			stats.loadScene.incrementAndGet();
+		}
+	}
+
+	@Override
+	public void invalidateZone(Scene scene, int zx, int zz)
+	{
+		if (renderExtensions != null)
+		{
+			renderExtensions.invalidateZone(scene, zx, zz);
+		}
 	}
 
 	@Override
 	public void drawScenePaint(Scene scene, SceneTilePaint paint, int plane, int tileX, int tileZ)
 	{
-		stats.drawScenePaint.incrementAndGet();
+		if (stats.isEnabled())
+		{
+			stats.drawScenePaint.incrementAndGet();
+		}
 	}
 
 	@Override
 	public void drawSceneTileModel(Scene scene, SceneTileModel model, int tileX, int tileZ)
 	{
-		stats.drawSceneTileModel.incrementAndGet();
+		if (stats.isEnabled())
+		{
+			stats.drawSceneTileModel.incrementAndGet();
+		}
 	}
 
 	@Override
 	public void drawZoneOpaque(Projection entityProjection, Scene scene, int zx, int zz)
 	{
-		stats.drawZoneOpaque.incrementAndGet();
+		if (stats.isEnabled())
+		{
+			stats.drawZoneOpaque.incrementAndGet();
+		}
 	}
 
 	@Override
 	public void drawZoneAlpha(Projection entityProjection, Scene scene, int level, int zx, int zz)
 	{
-		stats.drawZoneAlpha.incrementAndGet();
+		if (stats.isEnabled())
+		{
+			stats.drawZoneAlpha.incrementAndGet();
+		}
 	}
 
 	@Override
 	public void drawDynamic(Projection worldProjection, Scene scene, TileObject tileObject, Renderable r, Model m, int orient, int x, int y, int z)
 	{
-		stats.drawDynamic.incrementAndGet();
-		stats.recordModel(m);
-		if (config.manualActorCapture())
+		if (stats.isEnabled())
 		{
-			// Null tileObject + Actor renderable = the engine's actor pipeline
-			// emission; captureActors() handles those in manual mode. Without
-			// the skip the local player renders twice.
-			if (tileObject == null) return;
-			if (r instanceof net.runelite.api.Actor) return;
+			stats.drawDynamic.incrementAndGet();
+			stats.recordModel(m);
 		}
-		lastWorldProjection = worldProjection;
-		if (renderExtensions != null) renderExtensions.captureModel(worldProjection, m, orient, x, y, z, renderModeOf(r));
+		boolean actorModel = r instanceof net.runelite.api.Actor || tileObject == null;
+		if (renderExtensions != null) renderExtensions.captureModel(worldProjection, m, orient, x, y, z,
+			renderModeOf(r), actorModel);
 	}
 
 	@Override
 	public void drawTemp(Projection worldProjection, Scene scene, GameObject gameObject, Model m, int orient, int x, int y, int z)
 	{
-		stats.drawTemp.incrementAndGet();
-		stats.recordModel(m);
-		if (config.manualActorCapture())
+		if (stats.isEnabled())
 		{
-			// Null gameObject = engine emitting an actor via the temp pipeline;
-			// captureActors() already drew it in manual mode.
-			if (gameObject == null) return;
+			stats.drawTemp.incrementAndGet();
+			stats.recordModel(m);
 		}
-		lastWorldProjection = worldProjection;
+		if (gameObject == null)
+		{
+			return;
+		}
 		if (renderExtensions != null) renderExtensions.captureModel(worldProjection, m, orient, x, y, z,
-			gameObject == null ? Renderable.RENDERMODE_DEFAULT : renderModeOf(gameObject.getRenderable()));
+			renderModeOf(gameObject.getRenderable()), false);
 	}
 
 	private static int renderModeOf(Renderable renderable)
@@ -1005,14 +1008,24 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	@Override
 	public void drawPass(Projection entityProjection, Scene scene, int pass)
 	{
-		stats.drawPass.incrementAndGet();
+		if (stats.isEnabled())
+		{
+			stats.drawPass.incrementAndGet();
+		}
+		if (renderExtensions != null)
+		{
+			renderExtensions.drawPass(pass);
+		}
 	}
 
 	@Override
 	public void draw(Projection projection, Scene scene, Renderable renderable, int orientation, int x, int y, int z, long hash)
 	{
-		stats.drawSingle.incrementAndGet();
-		if (renderable instanceof Model) stats.recordModel((Model) renderable);
+		if (stats.isEnabled())
+		{
+			stats.drawSingle.incrementAndGet();
+			if (renderable instanceof Model) stats.recordModel((Model) renderable);
+		}
 		// Don't delete the rest of this method. Projectiles, spell
 		// animations and the home-teleport graphic stop rendering without
 		// it — even though the stats counter above says this method never
@@ -1021,14 +1034,16 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		if (renderable instanceof net.runelite.api.Actor) return;
 		Model m = (renderable instanceof Model) ? (Model) renderable : renderable.getModel();
 		if (m == null) return;
-		lastWorldProjection = projection;
-		renderExtensions.captureModel(projection, m, orientation, x, y, z, renderModeOf(renderable));
+		renderExtensions.captureModel(projection, m, orientation, x, y, z, renderModeOf(renderable), false);
 	}
 
 	@Override
 	public void animate(Texture texture, int diff)
 	{
-		stats.animate.incrementAndGet();
+		if (stats.isEnabled())
+		{
+			stats.animate.incrementAndGet();
+		}
 	}
 
 	// ---- Guice ----------------------------------------------------------

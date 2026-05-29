@@ -4,6 +4,7 @@ import java.util.Set;
 import net.runelite.api.Model;
 import net.runelite.api.Projection;
 import net.runelite.api.Scene;
+import org.lwjgl.vulkan.VkCommandBuffer;
 
 /**
  * Backend-provided scene renderer for extensions that want the stock
@@ -18,6 +19,18 @@ public interface VulkanSceneRenderer extends AutoCloseable
 
 	void invalidateCapturedScene();
 
+	default void invalidateZone(Scene scene, int zx, int zz)
+	{
+	}
+
+	default void rebuildDirtyZones(Scene scene)
+	{
+	}
+
+	default void drawPass(int pass)
+	{
+	}
+
 	void captureScene(Scene scene);
 
 	void captureModel(Model model, int orientation, int worldX, int worldY, int worldZ);
@@ -27,6 +40,12 @@ public interface VulkanSceneRenderer extends AutoCloseable
 	default void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ, int renderMode)
 	{
 		captureModel(projection, model, orientation, worldX, worldY, worldZ);
+	}
+
+	default void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ,
+		int renderMode, boolean actorModel)
+	{
+		captureModel(projection, model, orientation, worldX, worldY, worldZ, renderMode);
 	}
 
 	default void setLevelRange(int minLevel, int currentLevel, int maxLevel)
@@ -52,7 +71,19 @@ public interface VulkanSceneRenderer extends AutoCloseable
 
 	void setWireframeDynamic(boolean enabled);
 
+	default void setModelComputeDebugDraw(boolean enabled)
+	{
+	}
+
+	default void setModelComputeReplacement(boolean enabled)
+	{
+	}
+
 	void recordDraw(VulkanFrameContext frame);
+
+	default void recordBeforeRenderPass(VkCommandBuffer commandBuffer)
+	{
+	}
 
 	@Override
 	void close();

@@ -106,13 +106,6 @@ public interface GpuVulkanPluginConfig extends Config
 	default boolean hideUnrelatedMaps() { return true; }
 
 	@ConfigItem(
-		keyName = "manualActorCapture",
-		name = "Manual actor capture",
-		description = "Fallback path that walks every player/NPC each frame to avoid actor flicker. Higher CPU cost; leave off unless actors flicker."
-	)
-	default boolean manualActorCapture() { return false; }
-
-	@ConfigItem(
 		keyName = "benchmarkSkipUi",
 		name = "Skip UI upload",
 		description = "Benchmark only: skip UI texture upload/draw to isolate scene renderer cost.",
@@ -217,6 +210,24 @@ public interface GpuVulkanPluginConfig extends Config
 		section = DEBUG_SECTION
 	)
 	default boolean debugOverlay() { return false; }
+
+	@ConfigItem(
+		keyName = "modelComputeDebugDraw",
+		name = "Model compute debug draw",
+		description = "Draw the experimental GPU-generated model probe geometry over the normal scene. Development only; visuals are intentionally incomplete.",
+		section = DEBUG_SECTION,
+		position = 1
+	)
+	default boolean modelComputeDebugDraw() { return false; }
+
+	@ConfigItem(
+		keyName = "modelComputeReplacement",
+		name = "Model compute replacement (disabled)",
+		description = "Disabled until the compute path matches the normal model renderer without duplicate or frozen actors.",
+		section = DEBUG_SECTION,
+		position = 2
+	)
+	default boolean modelComputeReplacement() { return false; }
 
 	@ConfigSection(
 		name = "Wireframe",

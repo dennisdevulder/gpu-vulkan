@@ -11,9 +11,10 @@ final class DefaultVulkanSceneRenderer implements VulkanSceneRenderer
 
 	DefaultVulkanSceneRenderer(VulkanDevice device, FrameSync sync,
 		RenderPass renderPass, TextureArray textureArray,
-		DrawCallbackStats stats, boolean alphaToCoverage)
+		DrawCallbackStats stats, boolean alphaToCoverage, boolean modelComputeDebugDraw)
 	{
-		this.sceneRenderer = new SceneRenderer(device, sync, renderPass, textureArray, stats, alphaToCoverage);
+		this.sceneRenderer = new SceneRenderer(device, sync, renderPass, textureArray, stats,
+			alphaToCoverage, modelComputeDebugDraw);
 	}
 
 	@Override
@@ -32,6 +33,24 @@ final class DefaultVulkanSceneRenderer implements VulkanSceneRenderer
 	public void invalidateCapturedScene()
 	{
 		sceneRenderer.invalidateCapturedScene();
+	}
+
+	@Override
+	public void invalidateZone(Scene scene, int zx, int zz)
+	{
+		sceneRenderer.invalidateZone(scene, zx, zz);
+	}
+
+	@Override
+	public void rebuildDirtyZones(Scene scene)
+	{
+		sceneRenderer.rebuildDirtyZones(scene);
+	}
+
+	@Override
+	public void drawPass(int pass)
+	{
+		sceneRenderer.drawPass(pass);
 	}
 
 	@Override
@@ -56,6 +75,13 @@ final class DefaultVulkanSceneRenderer implements VulkanSceneRenderer
 	public void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ, int renderMode)
 	{
 		sceneRenderer.captureModelSorted(projection, model, orientation, worldX, worldY, worldZ, renderMode);
+	}
+
+	@Override
+	public void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ,
+		int renderMode, boolean actorModel)
+	{
+		sceneRenderer.captureModelSorted(projection, model, orientation, worldX, worldY, worldZ, renderMode, actorModel);
 	}
 
 	@Override
@@ -119,6 +145,18 @@ final class DefaultVulkanSceneRenderer implements VulkanSceneRenderer
 	}
 
 	@Override
+	public void setModelComputeDebugDraw(boolean enabled)
+	{
+		sceneRenderer.setModelComputeDebugDraw(enabled);
+	}
+
+	@Override
+	public void setModelComputeReplacement(boolean enabled)
+	{
+		sceneRenderer.setModelComputeReplacement(enabled);
+	}
+
+	@Override
 	public void recordDraw(VulkanFrameContext frame)
 	{
 		sceneRenderer.recordDraw(frame.commandBuffer(), frame.sceneMvp(), frame.brightness(),
@@ -126,6 +164,12 @@ final class DefaultVulkanSceneRenderer implements VulkanSceneRenderer
 			frame.fogR(), frame.fogG(), frame.fogB(), frame.gameTick(),
 			frame.textureLightMode(), frame.colorBlindMode(), frame.colorBlindIntensity(),
 			frame.smoothBanding());
+	}
+
+	@Override
+	public void recordBeforeRenderPass(org.lwjgl.vulkan.VkCommandBuffer commandBuffer)
+	{
+		sceneRenderer.recordBeforeRenderPass(commandBuffer);
 	}
 
 	@Override

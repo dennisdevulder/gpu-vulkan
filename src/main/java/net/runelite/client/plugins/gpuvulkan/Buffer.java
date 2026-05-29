@@ -132,6 +132,37 @@ final class Buffer implements AutoCloseable
 		flushRangeIfNeeded(0, size);
 	}
 
+	void invalidateIfNeeded()
+	{
+		invalidateRangeIfNeeded(0, size);
+	}
+
+	void invalidateRangeIfNeeded(long offset, long rangeSize)
+	{
+		if ((memoryPropertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0)
+		{
+			return;
+		}
+		if (rangeSize <= 0)
+		{
+			return;
+		}
+		long atom = Math.max(1L, device.nonCoherentAtomSize());
+		long alignedOffset = offset - (offset % atom);
+		long end = Math.min(size, offset + rangeSize);
+		long alignedEnd = Math.min(size, ((end + atom - 1L) / atom) * atom);
+		long alignedSize = alignedEnd - alignedOffset;
+		try (MemoryStack stack = stackPush())
+		{
+			VkMappedMemoryRange.Buffer range = VkMappedMemoryRange.calloc(1, stack)
+				.sType$Default()
+				.memory(memory)
+				.offset(alignedOffset)
+				.size(alignedSize);
+			Vk.check("vkInvalidateMappedMemoryRanges", vkInvalidateMappedMemoryRanges(device.handle(), range));
+		}
+	}
+
 	void flushRangeIfNeeded(long offset, long rangeSize)
 	{
 		if ((memoryPropertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0)
