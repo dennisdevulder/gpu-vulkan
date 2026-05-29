@@ -22,6 +22,9 @@ public final class GpuVulkanDebugMetrics
 	int modelComputeClippedFaces;
 	int modelComputeTrackedFaces;
 	int modelComputeCandidateFaces;
+	int modelComputeReplacedFaces;
+	int modelComputeReplacedSortedFaces;
+	int modelComputeReplacedPriorityFaces;
 	int modelComputeSortedFaces;
 	int modelComputePriorityFaces;
 	int modelComputeTransparentFaces;

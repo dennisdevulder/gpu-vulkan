@@ -1,16 +1,24 @@
 package net.runelite.client.plugins.gpuvulkan;
 
+import java.awt.Image;
+import java.awt.image.BufferedImage;
+import java.awt.image.DataBufferInt;
+import java.nio.ByteBuffer;
 import java.nio.IntBuffer;
 import java.nio.LongBuffer;
+import java.nio.ByteOrder;
 import lombok.extern.slf4j.Slf4j;
+import net.runelite.client.ui.DrawManager;
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.KHRSwapchain;
+import org.lwjgl.vulkan.VkBufferImageCopy;
 import org.lwjgl.vulkan.VkClearValue;
 import org.lwjgl.vulkan.VkCommandBuffer;
 import org.lwjgl.vulkan.VkCommandBufferAllocateInfo;
 import org.lwjgl.vulkan.VkCommandBufferBeginInfo;
 import org.lwjgl.vulkan.VkCommandPoolCreateInfo;
+import org.lwjgl.vulkan.VkImageMemoryBarrier;
 import org.lwjgl.vulkan.VkPresentInfoKHR;
 import org.lwjgl.vulkan.VkRect2D;
 import org.lwjgl.vulkan.VkRenderPassBeginInfo;
@@ -42,6 +50,8 @@ final class VulkanRenderer implements AutoCloseable
 	private final DepthBuffer depthBuffer;
 	private final MsaaColorBuffer msaaColor; // null when MSAA is disabled
 	private final Framebuffers framebuffers;
+	private final ScreenshotReadback screenshotReadback;
+	private DrawManager drawManager;
 	/** macOS-only — custom-present path. Null on Linux (we use {@link #swapchain}). */
 	private final MetalDrawableSet metalDrawables;
 	/** Convenience flag; mirrors {@code metalDrawables != null}. */
@@ -86,6 +96,7 @@ final class VulkanRenderer implements AutoCloseable
 		this.framebuffers = framebuffers;
 		this.sync = sync;
 		this.stats = stats;
+		this.screenshotReadback = new ScreenshotReadback(device);
 		// On macOS the swapchain is still created (we need its surface
 		// capabilities for format selection and its initial extent), but
 		// vkAcquireNextImageKHR / vkQueuePresentKHR are bypassed — we
@@ -118,6 +129,11 @@ final class VulkanRenderer implements AutoCloseable
 				commandBuffers[i] = new VkCommandBuffer(pBufs.get(i), device.handle());
 			}
 		}
+	}
+
+	void setDrawManager(DrawManager drawManager)
+	{
+		this.drawManager = drawManager;
 	}
 
 	void markSwapchainStale()
@@ -252,12 +268,13 @@ final class VulkanRenderer implements AutoCloseable
 		vkResetCommandBuffer(cmd, 0);
 		start = stats.startNanos();
 		recordClearPass(stack, cmd, framebuffers.get(imageIdx),
-			swapchain.width(), swapchain.height());
+			swapchain.width(), swapchain.height(), swapchain.image(imageIdx));
 		stats.addNanos(stats.commandRecordNanos, start);
 
 		start = stats.startNanos();
 		submit(stack, cmd, imageIdx);
 		stats.addNanos(stats.submitNanos, start);
+		processDrawComplete();
 		start = stats.startNanos();
 		int present = present(stack, imageIdx);
 		stats.addNanos(stats.presentNanos, start);
@@ -330,16 +347,35 @@ final class VulkanRenderer implements AutoCloseable
 		VkCommandBuffer cmd = commandBuffers[sync.currentFrame()];
 		vkResetCommandBuffer(cmd, 0);
 		start = stats.startNanos();
-		recordClearPass(stack, cmd, entry.framebuffer, width, height);
+		recordClearPass(stack, cmd, entry.framebuffer, width, height, entry.image);
 		stats.addNanos(stats.commandRecordNanos, start);
 
 		start = stats.startNanos();
 		submitNoSemaphores(stack, cmd);
 		stats.addNanos(stats.submitNanos, start);
+		processDrawComplete();
 
 		start = stats.startNanos();
 		MacOSMetalHelper.presentDrawable(drawable, device.metalCommandQueue());
 		stats.addNanos(stats.presentNanos, start);
+	}
+
+	private void processDrawComplete()
+	{
+		DrawManager dm = drawManager;
+		if (dm != null)
+		{
+			dm.processDrawComplete(this::screenshot);
+		}
+	}
+
+	private Image screenshot()
+	{
+		if (vkGetFenceStatus(device.handle(), sync.inFlightFence()) == VK_NOT_READY)
+		{
+			vkWaitForFences(device.handle(), sync.inFlightFence(), true, Long.MAX_VALUE);
+		}
+		return screenshotReadback.toImage();
 	}
 
 	@Override
@@ -350,6 +386,7 @@ final class VulkanRenderer implements AutoCloseable
 		{
 			metalDrawables.close();
 		}
+		screenshotReadback.close();
 		// vkDestroyCommandPool implicitly frees all command buffers allocated
 		// from it (per spec). Don't pre-reset them: that was added as a
 		// defensive measure for the validation layer's tracking, but with
@@ -379,7 +416,8 @@ final class VulkanRenderer implements AutoCloseable
 	}
 
 	private void recordClearPass(MemoryStack stack, VkCommandBuffer cmd,
-								 long framebuffer, int targetWidth, int targetHeight)
+								 long framebuffer, int targetWidth, int targetHeight,
+								 long targetImage)
 	{
 		VkCommandBufferBeginInfo begin = VkCommandBufferBeginInfo.calloc(stack)
 			.sType$Default()
@@ -504,7 +542,124 @@ final class VulkanRenderer implements AutoCloseable
 		// from DrawCallbacks.draw(int) to the ui.frag push constant.
 		vkCmdEndRenderPass(cmd);
 
+		screenshotReadback.recordCopy(cmd, targetImage, targetWidth, targetHeight);
+
 		Vk.check("vkEndCommandBuffer", vkEndCommandBuffer(cmd));
+	}
+
+	private static final class ScreenshotReadback implements AutoCloseable
+	{
+		private final VulkanDevice device;
+		private Buffer buffer;
+		private int width;
+		private int height;
+
+		private ScreenshotReadback(VulkanDevice device)
+		{
+			this.device = device;
+		}
+
+		private void recordCopy(VkCommandBuffer cmd, long image, int width, int height)
+		{
+			ensureBuffer(width, height);
+			try (MemoryStack stack = stackPush())
+			{
+				transition(stack, cmd, image,
+					KHRSwapchain.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+					VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+					VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+					VK_PIPELINE_STAGE_TRANSFER_BIT,
+					0,
+					VK_ACCESS_TRANSFER_READ_BIT);
+
+				VkBufferImageCopy.Buffer region = VkBufferImageCopy.calloc(1, stack);
+				region.get(0)
+					.bufferOffset(0)
+					.bufferRowLength(0)
+					.bufferImageHeight(0)
+					.imageOffset(o -> o.set(0, 0, 0))
+					.imageExtent(e -> e.width(width).height(height).depth(1));
+				region.get(0).imageSubresource()
+					.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
+					.mipLevel(0)
+					.baseArrayLayer(0).layerCount(1);
+				vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+					buffer.handle(), region);
+
+				transition(stack, cmd, image,
+					VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+					KHRSwapchain.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+					VK_PIPELINE_STAGE_TRANSFER_BIT,
+					VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+					VK_ACCESS_TRANSFER_READ_BIT,
+					0);
+			}
+		}
+
+		private void transition(MemoryStack stack, VkCommandBuffer cmd, long image,
+								int oldLayout, int newLayout, int srcStage, int dstStage,
+								int srcAccess, int dstAccess)
+		{
+			VkImageMemoryBarrier.Buffer barrier = VkImageMemoryBarrier.calloc(1, stack);
+			barrier.get(0)
+				.sType$Default()
+				.srcAccessMask(srcAccess)
+				.dstAccessMask(dstAccess)
+				.oldLayout(oldLayout)
+				.newLayout(newLayout)
+				.srcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+				.dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+				.image(image)
+				.subresourceRange(r -> r
+					.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
+					.baseMipLevel(0).levelCount(1)
+					.baseArrayLayer(0).layerCount(1));
+			vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, null, null, barrier);
+		}
+
+		private Image toImage()
+		{
+			if (buffer == null || width <= 0 || height <= 0)
+			{
+				return null;
+			}
+			buffer.invalidateIfNeeded();
+			BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+			int[] dst = ((DataBufferInt) image.getRaster().getDataBuffer()).getData();
+			ByteBuffer bytes = buffer.mappedByteBuffer().duplicate();
+			bytes.clear();
+			bytes.order(ByteOrder.LITTLE_ENDIAN).asIntBuffer().get(dst, 0, width * height);
+			return image;
+		}
+
+		private void ensureBuffer(int width, int height)
+		{
+			if (buffer != null && this.width == width && this.height == height)
+			{
+				return;
+			}
+			if (buffer != null)
+			{
+				buffer.close();
+			}
+			this.width = width;
+			this.height = height;
+			buffer = new Buffer(device, (long) width * height * Integer.BYTES,
+				VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+				VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+			buffer.mapPersistent();
+		}
+
+		@Override
+		public void close()
+		{
+			if (buffer != null)
+			{
+				buffer.close();
+				buffer = null;
+			}
+		}
 	}
 
 	private void submit(MemoryStack stack, VkCommandBuffer cmd, int imageIdx)

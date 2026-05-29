@@ -55,7 +55,8 @@ final class MacOSMetalHelper
 			if (in == null)
 			{
 				throw new RuntimeException("librlmtl.dylib not on classpath at "
-					+ resourcePath + " — re-run vkdev to build the native helper.");
+					+ resourcePath + " — rebuild the jar on macOS with ./gradlew shadowJar "
+					+ "so compileMacOSMetalHelper can package the native helper.");
 			}
 			File temp = File.createTempFile("librlmtl", ".dylib");
 			temp.deleteOnExit();

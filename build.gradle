@@ -64,6 +64,8 @@ def gpuVulkanShaderOut = layout.buildDirectory
 	.dir('generated/resources/net/runelite/client/plugins/gpuvulkan')
 	.get()
 	.asFile
+def gpuVulkanNativeSrc = file('src/main/native/rlmtl.m')
+def gpuVulkanNativeOut = new File(gpuVulkanShaderOut, 'librlmtl.dylib')
 def glslangValidator = providers.environmentVariable('GLSLANG').getOrElse('glslangValidator')
 
 def compileGpuVulkanShaders = tasks.register('compileGpuVulkanShaders') {
@@ -89,6 +91,34 @@ def compileGpuVulkanShaders = tasks.register('compileGpuVulkanShaders') {
 	}
 }
 
+def compileMacOSMetalHelper = tasks.register('compileMacOSMetalHelper') {
+	group = 'build'
+	description = 'Compile the macOS CAMetalLayer/JAWT helper used by Vulkan present.'
+
+	inputs.file(gpuVulkanNativeSrc)
+	outputs.file(gpuVulkanNativeOut)
+	onlyIf { System.getProperty('os.name', '').toLowerCase().contains('mac') }
+
+	doLast {
+		gpuVulkanShaderOut.mkdirs()
+		def javaHome = System.getenv('JAVA_HOME') ?: System.getProperty('java.home')
+		exec {
+			commandLine 'clang',
+				'-fno-objc-arc',
+				'-shared',
+				'-dynamiclib',
+				'-framework', 'Cocoa',
+				'-framework', 'QuartzCore',
+				'-framework', 'Metal',
+				'-I', "${javaHome}/include",
+				'-I', "${javaHome}/include/darwin",
+				'-Wl,-undefined,dynamic_lookup',
+				gpuVulkanNativeSrc.absolutePath,
+				'-o', gpuVulkanNativeOut.absolutePath
+		}
+	}
+}
+
 sourceSets {
 	main {
 		resources {
@@ -99,6 +129,7 @@ sourceSets {
 
 processResources {
 	dependsOn compileGpuVulkanShaders
+	dependsOn compileMacOSMetalHelper
 	from(projectDir) {
 		include 'runelite-plugin.properties'
 	}
@@ -115,7 +146,7 @@ tasks.withType(Test).configureEach {
 tasks.register('run', JavaExec) {
 	classpath = sourceSets.test.runtimeClasspath
 	mainClass = pluginMainClass
-	jvmArgs '-ea'
+	jvmArgs '-ea', '--add-exports=java.desktop/com.apple.eawt=ALL-UNNAMED'
 	args '--developer-mode', '--debug'
 }
 
@@ -124,7 +155,8 @@ tasks.register('shadowJar', Jar) {
 	manifest {
 		attributes(
 			'Main-Class': pluginMainClass,
-			'Multi-Release': true
+			'Multi-Release': true,
+			'Add-Exports': 'java.desktop/com.apple.eawt'
 		)
 	}
 
@@ -145,4 +177,31 @@ tasks.register('shadowJar', Jar) {
 	group = BasePlugin.BUILD_GROUP
 	archiveClassifier = 'shadow'
 	archiveFileName = "${rootProject.name}-${project.version}-all.jar"
+}
+
+tasks.register('pluginJar', Jar) {
+	dependsOn configurations.runtimeClasspath, 'classes'
+	manifest {
+		attributes(
+			'Multi-Release': true,
+			'Add-Exports': 'java.desktop/com.apple.eawt'
+		)
+	}
+
+	duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+	from sourceSets.main.output
+	from {
+		configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+	}
+
+	exclude 'META-INF/INDEX.LIST'
+	exclude 'META-INF/*.SF'
+	exclude 'META-INF/*.DSA'
+	exclude 'META-INF/*.RSA'
+	exclude '**/module-info.class'
+	exclude 'runelite-plugin.properties'
+
+	group = BasePlugin.BUILD_GROUP
+	archiveClassifier = 'plugin'
+	archiveFileName = "${rootProject.name}-${project.version}-plugin.jar"
 }

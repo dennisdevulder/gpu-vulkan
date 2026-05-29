@@ -222,8 +222,8 @@ public interface GpuVulkanPluginConfig extends Config
 
 	@ConfigItem(
 		keyName = "modelComputeReplacement",
-		name = "Model compute replacement",
-		description = "Experimental: replace eligible dynamic CPU model emission with GPU-generated Vulkan vertices. Development only; enable when testing.",
+		name = "Model compute replacement (disabled)",
+		description = "Disabled until the compute path matches the normal model renderer without duplicate or frozen actors.",
 		section = DEBUG_SECTION,
 		position = 2
 	)

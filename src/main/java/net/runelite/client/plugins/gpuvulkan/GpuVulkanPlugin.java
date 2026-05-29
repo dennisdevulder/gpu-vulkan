@@ -830,6 +830,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			+ " clip=" + compactCount(metrics.modelComputeClippedFaces));
 		lines.add("model cand: " + compactCount(metrics.modelComputeCandidateFaces)
 			+ " / " + compactCount(metrics.modelComputeTrackedFaces));
+		lines.add("model repl: " + compactCount(metrics.modelComputeReplacedFaces)
+			+ " s=" + compactCount(metrics.modelComputeReplacedSortedFaces)
+			+ " p=" + compactCount(metrics.modelComputeReplacedPriorityFaces));
 		lines.add("model block: s=" + compactCount(metrics.modelComputeSortedFaces)
 			+ " p=" + compactCount(metrics.modelComputePriorityFaces)
 			+ " tr=" + compactCount(metrics.modelComputeTransparentFaces)
@@ -976,8 +979,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			stats.drawDynamic.incrementAndGet();
 			stats.recordModel(m);
 		}
+		boolean actorModel = r instanceof net.runelite.api.Actor || tileObject == null;
 		if (renderExtensions != null) renderExtensions.captureModel(worldProjection, m, orient, x, y, z,
-			renderModeOf(r), r instanceof net.runelite.api.Actor);
+			renderModeOf(r), actorModel);
 	}
 
 	@Override

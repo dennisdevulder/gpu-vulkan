@@ -126,6 +126,9 @@ final class SceneRenderer implements AutoCloseable
 	private int modelComputeClippedFaces;
 	private int modelComputeTrackedFaces;
 	private int modelComputeCandidateFaces;
+	private int modelComputeReplacedFaces;
+	private int modelComputeReplacedSortedFaces;
+	private int modelComputeReplacedPriorityFaces;
 	private int modelComputeSortedFaces;
 	private int modelComputePriorityFaces;
 	private int modelComputeTransparentFaces;
@@ -355,12 +358,12 @@ final class SceneRenderer implements AutoCloseable
 
 	void setModelComputeDebugDraw(boolean enabled)
 	{
-		modelComputeDebugDraw = enabled;
+		modelComputeDebugDraw = false;
 	}
 
 	void setModelComputeReplacement(boolean enabled)
 	{
-		modelComputeReplacement = enabled;
+		modelComputeReplacement = false;
 	}
 
 	void setLevelRange(int minLevel, int maxLevel)
@@ -405,6 +408,9 @@ final class SceneRenderer implements AutoCloseable
 		metrics.modelComputeClippedFaces += modelComputeClippedFaces;
 		metrics.modelComputeTrackedFaces += modelComputeTrackedFaces;
 		metrics.modelComputeCandidateFaces += modelComputeCandidateFaces;
+		metrics.modelComputeReplacedFaces += modelComputeReplacedFaces;
+		metrics.modelComputeReplacedSortedFaces += modelComputeReplacedSortedFaces;
+		metrics.modelComputeReplacedPriorityFaces += modelComputeReplacedPriorityFaces;
 		metrics.modelComputeSortedFaces += modelComputeSortedFaces;
 		metrics.modelComputePriorityFaces += modelComputePriorityFaces;
 		metrics.modelComputeTransparentFaces += modelComputeTransparentFaces;
@@ -1131,6 +1137,9 @@ final class SceneRenderer implements AutoCloseable
 		modelComputeClippedFaces = 0;
 		modelComputeTrackedFaces = 0;
 		modelComputeCandidateFaces = 0;
+		modelComputeReplacedFaces = 0;
+		modelComputeReplacedSortedFaces = 0;
+		modelComputeReplacedPriorityFaces = 0;
 		modelComputeSortedFaces = 0;
 		modelComputePriorityFaces = 0;
 		modelComputeTransparentFaces = 0;
@@ -2000,6 +2009,7 @@ final class SceneRenderer implements AutoCloseable
 		}
 		if (replaceWithCompute)
 		{
+			modelComputeReplacedFaces += modelInfo.faceCount;
 			recordPriorityRange(priorityStart);
 			return;
 		}
@@ -2075,6 +2085,12 @@ final class SceneRenderer implements AutoCloseable
 				modelComputeFaceIndexCursor += faces;
 				recordModelInstance(modelInfo, orient, worldX, worldY, worldZ, renderMode,
 					faces, faceIndexOffset);
+				modelComputeReplacedFaces += faces;
+				modelComputeReplacedSortedFaces += faces;
+				if (prioritySort)
+				{
+					modelComputeReplacedPriorityFaces += faces;
+				}
 				recordPriorityRange(priorityStart);
 				return;
 			}

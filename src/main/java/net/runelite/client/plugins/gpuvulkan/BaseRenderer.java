@@ -213,7 +213,7 @@ final class BaseRenderer implements VulkanRenderExtension
 	private void applyModelComputeDebugConfig()
 	{
 		if (sceneRenderer == null || config == null) return;
-		sceneRenderer.setModelComputeDebugDraw(config.modelComputeDebugDraw());
-		sceneRenderer.setModelComputeReplacement(config.modelComputeReplacement());
+		sceneRenderer.setModelComputeDebugDraw(false);
+		sceneRenderer.setModelComputeReplacement(false);
 	}
 }
