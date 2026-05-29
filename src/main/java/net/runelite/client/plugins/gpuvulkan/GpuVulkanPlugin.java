@@ -803,6 +803,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		{
 			renderExtensions.collectDebugMetrics(metrics);
 		}
+		metrics.uiUploadBytes += stats.uiUploadBytes.get();
+		metrics.screenshotReadbackBytes += stats.screenshotReadbackBytes.get();
 
 		lines.add("GPU Vulkan");
 		lines.add("device: " + compactDeviceName(device == null ? "not ready" : device.deviceName()));
@@ -840,6 +842,11 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			+ " b=" + compactCount(metrics.modelComputeBiasedFaces)
 			+ " o=" + compactCount(metrics.modelComputeOverrideFaces)
 			+ " a=" + compactCount(metrics.modelComputeActorFaces));
+		lines.add("vk draws: " + compactCount(metrics.sceneDrawCalls)
+			+ " v=" + compactCount(metrics.sceneDrawVertices)
+			+ " pc=" + compactCount(metrics.scenePushConstants));
+		lines.add("upload/read: " + mib(metrics.uiUploadBytes) + " / "
+			+ mib(metrics.screenshotReadbackBytes) + " MiB");
 		lines.add("overflow: " + (metrics.overflowed ? "yes" : "no"));
 		lines.add("scene/pre/post: " + stats.drawSceneCount() + " / "
 			+ stats.preSceneDrawCount() + " / " + stats.postDrawSceneCount());

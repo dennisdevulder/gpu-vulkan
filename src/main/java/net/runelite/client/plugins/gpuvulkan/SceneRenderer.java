@@ -418,6 +418,9 @@ final class SceneRenderer implements AutoCloseable
 		metrics.modelComputeBiasedFaces += modelComputeBiasedFaces;
 		metrics.modelComputeOverrideFaces += modelComputeOverrideFaces;
 		metrics.modelComputeActorFaces += modelComputeActorFaces;
+		metrics.sceneDrawCalls += stats.sceneDrawCalls.get();
+		metrics.sceneDrawVertices += stats.sceneDrawVertices.get();
+		metrics.scenePushConstants += stats.scenePushConstants.get();
 		metrics.overflowed |= overflowed;
 		metrics.sceneBufferBytes += TOTAL_BUFFER_BYTES;
 	}
@@ -3243,7 +3246,7 @@ final class SceneRenderer implements AutoCloseable
 		tileRoofCount++;
 	}
 
-	private static void drawRange(VkCommandBuffer cmd, int start, int end, int[] skips, int pairCount,
+	private void drawRange(VkCommandBuffer cmd, int start, int end, int[] skips, int pairCount,
 								  boolean applySkips, int slotFirstVertex,
 								  long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
 	{
@@ -3260,12 +3263,13 @@ final class SceneRenderer implements AutoCloseable
 		vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,   0,  vertPush);
 		vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
 		vkCmdDraw(cmd, end - start, 1, slotFirstVertex + start, 0);
+		recordDrawCall(end - start);
 	}
 
 	/** Issue {@code vkCmdDraw} calls covering [start, end) but skipping each
 	 *  [skips[2k], skips[2k+1]) sub-range. {@code skips} must be sorted by
 	 *  start. Overlapping skip ranges are merged on the fly. */
-	private static void drawWithSkips(VkCommandBuffer cmd, int start, int end, int[] skips, int pairCount, int slotFirstVertex,
+	private void drawWithSkips(VkCommandBuffer cmd, int start, int end, int[] skips, int pairCount, int slotFirstVertex,
 									  long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
 	{
 		int cursor = start;
@@ -3282,6 +3286,7 @@ final class SceneRenderer implements AutoCloseable
 					vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,   0,  vertPush);
 					vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
 					vkCmdDraw(cmd, n, 1, slotFirstVertex + cursor, 0);
+					recordDrawCall(n);
 				}
 			}
 			cursor = Math.max(cursor, e);
@@ -3292,7 +3297,15 @@ final class SceneRenderer implements AutoCloseable
 			vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,   0,  vertPush);
 			vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
 			vkCmdDraw(cmd, end - cursor, 1, slotFirstVertex + cursor, 0);
+			recordDrawCall(end - cursor);
 		}
+	}
+
+	private void recordDrawCall(int vertices)
+	{
+		stats.sceneDrawCalls.incrementAndGet();
+		stats.sceneDrawVertices.addAndGet(vertices);
+		stats.scenePushConstants.addAndGet(2);
 	}
 
 	int vertexCount() { return vertexCount; }

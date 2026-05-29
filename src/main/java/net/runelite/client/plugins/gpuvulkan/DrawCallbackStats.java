@@ -6,15 +6,13 @@ import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Model;
 
 /**
- * Throwaway recon for M6 — counts every {@code DrawCallbacks} invocation and
- * aggregates Model vertex/face totals so we can see what shape the OSRS
- * client's per-frame data actually has. Logs a compact one-line summary
- * once per second from {@link #maybeLog}.
+ * Flight recorder for the Vulkan draw path. The counters are deliberately
+ * cheap and opt-in so performance work can explain which renderer contract
+ * surface changed: callbacks, CPU timings, draw submission shape, uploads,
+ * readbacks, and model emission.
  *
  * <p>All counters are atomic because the OSRS scene compute can spin up
  * {@code DrawCallbacks.RENDER_THREADS_MASK} threads.
- *
- * <p>Will be deleted when M7 starts rendering scene geometry for real.
  */
 @Slf4j
 final class DrawCallbackStats
@@ -77,6 +75,11 @@ final class DrawCallbackStats
 	final Counter fullSortTransparentFaces = new Counter();
 	final Counter texturedEmitFaces = new Counter();
 	final Counter overrideEmitFaces = new Counter();
+	final Counter sceneDrawCalls = new Counter();
+	final Counter sceneDrawVertices = new Counter();
+	final Counter scenePushConstants = new Counter();
+	final Counter uiUploadBytes = new Counter();
+	final Counter screenshotReadbackBytes = new Counter();
 
 	// Sample fields — last-write-wins, fine for "what's the camera at"
 	volatile double lastCamX;
@@ -180,10 +183,15 @@ final class DrawCallbackStats
 		long beginFrame = beginFrameNanos.getAndSet(0);
 		long pendingCapture = pendingCaptureNanos.getAndSet(0);
 		long sceneCapture = sceneCaptureNanos.getAndSet(0);
+		long sceneDrawCallCount = sceneDrawCalls.getAndSet(0);
+		long sceneDrawVertexCount = sceneDrawVertices.getAndSet(0);
+		long scenePushConstantCount = scenePushConstants.getAndSet(0);
+		long uiBytes = uiUploadBytes.getAndSet(0);
+		long screenshotBytes = screenshotReadbackBytes.getAndSet(0);
 		if (!detailedModelStats)
 		{
 			log.info(String.format(
-				"recon | scene=%d preSD=%d postSD=%d swap=%d load=%d | paint=%d tileModel=%d | zoneOpq=%d zoneAlpha=%d | dyn=%d temp=%d pass=%d single=%d | cam=(%.1f, %.1f, %.1f) plane=%d | anim=%d | cpu/frame avg ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f | scene avg ms: begin=%.2f pending=%.2f staticCaptureTotal=%.2f",
+				"recon | scene=%d preSD=%d postSD=%d swap=%d load=%d | paint=%d tileModel=%d | zoneOpq=%d zoneAlpha=%d | dyn=%d temp=%d pass=%d single=%d | cam=(%.1f, %.1f, %.1f) plane=%d | anim=%d | submit: draws=%d drawVerts=%d pushes=%d uiBytes=%d readbackBytes=%d | cpu/frame avg ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f | scene avg ms: begin=%.2f pending=%.2f staticCaptureTotal=%.2f",
 				drawSceneCount,
 				preSceneDraw.getAndSet(0),
 				postDrawScene.getAndSet(0),
@@ -199,6 +207,11 @@ final class DrawCallbackStats
 				drawSingle.getAndSet(0),
 				lastCamX, lastCamY, lastCamZ, lastCamPlane,
 				animate.getAndSet(0),
+				sceneDrawCallCount,
+				sceneDrawVertexCount,
+				scenePushConstantCount,
+				uiBytes,
+				screenshotBytes,
 				avgMs(drawFrame, frameCount),
 				avgMs(fenceWait, frameCount),
 				avgMs(uiUpload, frameCount),
@@ -235,7 +248,7 @@ final class DrawCallbackStats
 		long overrideFaceCount = overrideEmitFaces.getAndSet(0);
 
 			log.info(String.format(
-				"recon | scene=%d preSD=%d postSD=%d swap=%d load=%d | paint=%d tileModel=%d | zoneOpq=%d zoneAlpha=%d | dyn=%d temp=%d pass=%d single=%d | dynVerts=%d dynFaces=%d maxF=%d | cam=(%.1f, %.1f, %.1f) plane=%d | anim=%d | cpu/frame avg ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f | scene avg ms: begin=%.2f pending=%.2f staticCaptureTotal=%.2f | model ms: sort=%.2f full=%.2f cull=%.2f emit=%.2f sortedEmit=%.2f unsortedEmit=%.2f uv=%.2f | models sorted=%d full=%d cull=%d unsorted=%d fallback=%d | faces sorted=%d unsorted=%d tex=%d override=%d fullTrans=%d",
+				"recon | scene=%d preSD=%d postSD=%d swap=%d load=%d | paint=%d tileModel=%d | zoneOpq=%d zoneAlpha=%d | dyn=%d temp=%d pass=%d single=%d | dynVerts=%d dynFaces=%d maxF=%d | cam=(%.1f, %.1f, %.1f) plane=%d | anim=%d | submit: draws=%d drawVerts=%d pushes=%d uiBytes=%d readbackBytes=%d | cpu/frame avg ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f | scene avg ms: begin=%.2f pending=%.2f staticCaptureTotal=%.2f | model ms: sort=%.2f full=%.2f cull=%.2f emit=%.2f sortedEmit=%.2f unsortedEmit=%.2f uv=%.2f | models sorted=%d full=%d cull=%d unsorted=%d fallback=%d | faces sorted=%d unsorted=%d tex=%d override=%d fullTrans=%d",
 			drawSceneCount,
 			preSceneDraw.getAndSet(0),
 			postDrawScene.getAndSet(0),
@@ -254,6 +267,11 @@ final class DrawCallbackStats
 			maxDynamicFaces.getAndSet(0),
 			lastCamX, lastCamY, lastCamZ, lastCamPlane,
 			animate.getAndSet(0),
+			sceneDrawCallCount,
+			sceneDrawVertexCount,
+			scenePushConstantCount,
+			uiBytes,
+			screenshotBytes,
 			avgMs(drawFrame, frameCount),
 			avgMs(fenceWait, frameCount),
 			avgMs(uiUpload, frameCount),

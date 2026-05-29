@@ -45,6 +45,8 @@ final class VulkanRenderer implements AutoCloseable
 	private final RenderExtensions renderExtensions;
 	private final FrameSync sync;
 	private final DrawCallbackStats stats;
+	private final boolean skipScreenshotReadback =
+		Boolean.parseBoolean(System.getProperty("vkgpu.skipScreenshotReadback", "false"));
 
 	private final Swapchain swapchain;
 	private final DepthBuffer depthBuffer;
@@ -215,6 +217,7 @@ final class VulkanRenderer implements AutoCloseable
 			// CPU-side memcpy into the persistently-mapped staging buffer. Done
 			// before recording the command buffer so the GPU read sees it.
 			start = stats.startNanos();
+			stats.uiUploadBytes.addAndGet((long) uiWidth * uiHeight * Integer.BYTES);
 			renderExtensions.uploadUiPixels(uiPixels, uiWidth, uiHeight);
 			stats.addNanos(stats.uiUploadNanos, start);
 
@@ -371,6 +374,10 @@ final class VulkanRenderer implements AutoCloseable
 
 	private Image screenshot()
 	{
+		if (skipScreenshotReadback)
+		{
+			return null;
+		}
 		if (vkGetFenceStatus(device.handle(), sync.inFlightFence()) == VK_NOT_READY)
 		{
 			vkWaitForFences(device.handle(), sync.inFlightFence(), true, Long.MAX_VALUE);
@@ -542,7 +549,11 @@ final class VulkanRenderer implements AutoCloseable
 		// from DrawCallbacks.draw(int) to the ui.frag push constant.
 		vkCmdEndRenderPass(cmd);
 
-		screenshotReadback.recordCopy(cmd, targetImage, targetWidth, targetHeight);
+		if (!skipScreenshotReadback)
+		{
+			stats.screenshotReadbackBytes.addAndGet((long) targetWidth * targetHeight * Integer.BYTES);
+			screenshotReadback.recordCopy(cmd, targetImage, targetWidth, targetHeight);
+		}
 
 		Vk.check("vkEndCommandBuffer", vkEndCommandBuffer(cmd));
 	}

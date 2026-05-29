@@ -32,6 +32,11 @@ public final class GpuVulkanDebugMetrics
 	int modelComputeBiasedFaces;
 	int modelComputeOverrideFaces;
 	int modelComputeActorFaces;
+	long sceneDrawCalls;
+	long sceneDrawVertices;
+	long scenePushConstants;
+	long uiUploadBytes;
+	long screenshotReadbackBytes;
 	boolean overflowed;
 	long sceneBufferBytes;
 }
