@@ -17,6 +17,7 @@ struct ModelInstance
 	int outputFaceOffset;
 	int outputFaceCount;
 	int flags;
+	int faceIndexOffset;
 };
 
 layout(set = 0, binding = 0, std430) readonly buffer ModelMeshData
@@ -32,6 +33,11 @@ layout(set = 0, binding = 1, std430) readonly buffer ModelInstances
 layout(set = 0, binding = 2, std430) writeonly buffer GeneratedVertices
 {
 	uint vertexWords[];
+};
+
+layout(set = 0, binding = 3, std430) readonly buffer SortedFaceIndices
+{
+	int faceIndices[];
 };
 
 layout(push_constant) uniform Push
@@ -217,6 +223,9 @@ void main()
 		return;
 	}
 	uint vertexBase = (uint(instance.outputFaceOffset) + faceSlot) * 36u;
+	uint faceIndex = instance.faceIndexOffset >= 0
+		? uint(faceIndices[uint(instance.faceIndexOffset) + faceSlot])
+		: faceSlot;
 
 	uint meshBaseWord = instance.meshOffsetLo >> 2;
 	uint verticesXOffset = meshWords[meshBaseWord + HEADER_VERTICES_X];
@@ -236,19 +245,19 @@ void main()
 	uint texBOffset = meshWords[meshBaseWord + HEADER_TEX_B];
 	uint texCOffset = meshWords[meshBaseWord + HEADER_TEX_C];
 
-	if (faceSlot >= uint(instance.faceCount))
+	if (faceIndex >= uint(instance.faceCount))
 	{
 		return;
 	}
 
-	int ia = readInt(meshBaseWord, faceAOffset, faceSlot);
-	int ib = readInt(meshBaseWord, faceBOffset, faceSlot);
-	int ic = readInt(meshBaseWord, faceCOffset, faceSlot);
-	int colorA = readInt(meshBaseWord, colorAOffset, faceSlot);
-	int colorB = readInt(meshBaseWord, colorBOffset, faceSlot);
-	int colorC = readInt(meshBaseWord, colorCOffset, faceSlot);
-	uint trans = uint(readByte(meshBaseWord, transparencyOffset, faceSlot));
-	uint bias = uint(readByte(meshBaseWord, biasOffset, faceSlot));
+	int ia = readInt(meshBaseWord, faceAOffset, faceIndex);
+	int ib = readInt(meshBaseWord, faceBOffset, faceIndex);
+	int ic = readInt(meshBaseWord, faceCOffset, faceIndex);
+	int colorA = readInt(meshBaseWord, colorAOffset, faceIndex);
+	int colorB = readInt(meshBaseWord, colorBOffset, faceIndex);
+	int colorC = readInt(meshBaseWord, colorCOffset, faceIndex);
+	uint trans = uint(readByte(meshBaseWord, transparencyOffset, faceIndex));
+	uint bias = uint(readByte(meshBaseWord, biasOffset, faceIndex));
 	if (ia < 0 || ib < 0 || ic < 0)
 	{
 		writeDegenerateFace(vertexBase);
@@ -294,7 +303,7 @@ void main()
 	uint texLayer = 0u;
 	if ((instance.flags & MODEL_FLAG_HAS_TEXTURES) != 0)
 	{
-		int faceTexture = readShort(meshBaseWord, faceTextureOffset, faceSlot);
+		int faceTexture = readShort(meshBaseWord, faceTextureOffset, faceIndex);
 		if (faceTexture != -1)
 		{
 			texLayer = uint(faceTexture + 1);
@@ -303,7 +312,7 @@ void main()
 				computeFaceUvs(uvA, uvB, uvC,
 					meshBaseWord, verticesXOffset, verticesYOffset, verticesZOffset,
 					textureFacesOffset, texAOffset, texBOffset, texCOffset,
-					faceSlot, uia, uib, uic);
+					faceIndex, uia, uib, uic);
 			}
 			else
 			{

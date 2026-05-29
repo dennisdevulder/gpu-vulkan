@@ -96,12 +96,13 @@ final class SceneRenderer implements AutoCloseable
 	private static final int MODEL_CACHE_BUCKET_MASK = MODEL_CACHE_BUCKETS - 1;
 	private static final long MODEL_MESH_ARENA_BYTES = 64L * 1024L * 1024L;
 	private static final int MAX_MODEL_INSTANCES = 65_536;
-	private static final int MODEL_INSTANCE_STRIDE = 52;
+	private static final int MODEL_INSTANCE_STRIDE = 56;
 	private static final int MODEL_MESH_HEADER_INTS = 16;
 	private static final int MODEL_MESH_HEADER_BYTES = MODEL_MESH_HEADER_INTS * Integer.BYTES;
 	private static final long MODEL_COMPUTE_OUTPUT_FRAME_BYTES = 32L * 1024L * 1024L;
 	private static final int MODEL_COMPUTE_OUTPUT_FACE_SLOTS =
 		(int) (MODEL_COMPUTE_OUTPUT_FRAME_BYTES / (3L * ScenePipeline.VERTEX_STRIDE));
+	private static final int MODEL_COMPUTE_FACE_INDEX_SLOTS = MODEL_COMPUTE_OUTPUT_FACE_SLOTS;
 	private static final boolean ENABLE_MODEL_COMPUTE_PROTOTYPE = true;
 	private static final int SCENE_OFFSET = (Constants.EXTENDED_SCENE_SIZE - Constants.SCENE_SIZE) / 2;
 	private static final float[] HSL_RGB = buildHslRgbTable();
@@ -134,6 +135,7 @@ final class SceneRenderer implements AutoCloseable
 	private int modelComputeActorFaces;
 	private int modelComputeOutputFaceCursor;
 	private int modelComputeMaxFacesPerInstance;
+	private int modelComputeFaceIndexCursor;
 	private boolean modelComputeDebugHasOrigin;
 	private int modelComputeDebugX;
 	private int modelComputeDebugY;
@@ -151,6 +153,7 @@ final class SceneRenderer implements AutoCloseable
 	private final ModelCacheEntry[] modelCacheBuckets = new ModelCacheEntry[MODEL_CACHE_BUCKETS];
 	private final ModelMeshArena modelMeshArena;
 	private final ModelInstanceBuffer modelInstanceBuffer;
+	private final ModelFaceIndexBuffer modelFaceIndexBuffer;
 	private final ModelComputeOutputBuffer modelComputeOutputBuffer;
 	private final ModelComputePipeline modelComputePipeline;
 	private int modelCacheSize;
@@ -192,6 +195,9 @@ final class SceneRenderer implements AutoCloseable
 	private int[] priorityRangeEnds = new int[1024];
 	private int[] prioritySkipPairs = new int[2048];
 	private int priorityRangeCount;
+	private int[] computePriorityFaceStarts = new int[256];
+	private int[] computePriorityFaceEnds = new int[256];
+	private int computePriorityRangeCount;
 	private int dynamicOpaqueEnd = -1;
 	/** Plane range to render this frame, forwarded from preSceneDraw's
 	 *  (minLevel, level, maxLevel). Roof hiding only applies above the
@@ -328,6 +334,8 @@ final class SceneRenderer implements AutoCloseable
 		this.modelMeshArena = new ModelMeshArena(device, MODEL_MESH_ARENA_BYTES);
 		this.modelInstanceBuffer = new ModelInstanceBuffer(device,
 			(long) MAX_MODEL_INSTANCES * MODEL_INSTANCE_STRIDE * FrameSync.FRAMES_IN_FLIGHT);
+		this.modelFaceIndexBuffer = new ModelFaceIndexBuffer(device,
+			(long) MODEL_COMPUTE_FACE_INDEX_SLOTS * Integer.BYTES * FrameSync.FRAMES_IN_FLIGHT);
 		this.modelComputeOutputBuffer = ENABLE_MODEL_COMPUTE_PROTOTYPE
 			? new ModelComputeOutputBuffer(device, MODEL_COMPUTE_OUTPUT_FRAME_BYTES * FrameSync.FRAMES_IN_FLIGHT)
 			: null;
@@ -335,6 +343,7 @@ final class SceneRenderer implements AutoCloseable
 			? new ModelComputePipeline(device,
 				modelMeshArena.handle(), modelMeshArena.capacityBytes(),
 				modelInstanceBuffer.handle(), modelInstanceBuffer.frameBytes(),
+				modelFaceIndexBuffer.handle(), modelFaceIndexBuffer.frameBytes(),
 				modelComputeOutputBuffer.handle(), modelComputeOutputBuffer.frameBytes())
 			: null;
 	}
@@ -532,6 +541,13 @@ final class SceneRenderer implements AutoCloseable
 
 	private void recordModelInstance(ModelCacheEntry modelInfo, int orient, int worldX, int worldY, int worldZ, int renderMode)
 	{
+		recordModelInstance(modelInfo, orient, worldX, worldY, worldZ, renderMode,
+			Math.max(0, modelInfo.faceCount), -1);
+	}
+
+	private void recordModelInstance(ModelCacheEntry modelInfo, int orient, int worldX, int worldY, int worldZ, int renderMode,
+		int requestedFaces, int faceIndexOffset)
+	{
 		if (modelInfo.meshOffset < 0L)
 		{
 			return;
@@ -547,7 +563,7 @@ final class SceneRenderer implements AutoCloseable
 			return;
 		}
 		int outputFaceOffset = modelComputeOutputFaceCursor;
-		int outputFaceCount = Math.max(0, modelInfo.faceCount);
+		int outputFaceCount = Math.max(0, requestedFaces);
 		int remainingOutputFaces = MODEL_COMPUTE_OUTPUT_FACE_SLOTS - modelComputeOutputFaceCursor;
 		if (remainingOutputFaces <= 0)
 		{
@@ -561,8 +577,12 @@ final class SceneRenderer implements AutoCloseable
 		}
 		modelComputeOutputFaceCursor += outputFaceCount;
 		modelComputeMaxFacesPerInstance = Math.max(modelComputeMaxFacesPerInstance, outputFaceCount);
+		if (renderMode == Renderable.RENDERMODE_SORTED_NO_DEPTH && outputFaceCount > 0)
+		{
+			recordComputePriorityRange(outputFaceOffset, outputFaceOffset + outputFaceCount);
+		}
 		modelInstanceBuffer.write(modelInstanceCount, modelInfo, orient, worldX, worldY, worldZ, renderMode,
-			outputFaceOffset, outputFaceCount);
+			outputFaceOffset, outputFaceCount, faceIndexOffset);
 		if (!modelComputeDebugHasOrigin)
 		{
 			modelComputeDebugHasOrigin = true;
@@ -980,7 +1000,7 @@ final class SceneRenderer implements AutoCloseable
 		}
 
 		void write(int index, ModelCacheEntry model, int orient, int worldX, int worldY, int worldZ, int renderMode,
-			int outputFaceOffset, int outputFaceCount)
+			int outputFaceOffset, int outputFaceCount, int faceIndexOffset)
 		{
 			long p = frameAddress + (long) index * MODEL_INSTANCE_STRIDE;
 			MemoryUtil.memPutLong(p, model.meshOffset);
@@ -995,6 +1015,48 @@ final class SceneRenderer implements AutoCloseable
 			MemoryUtil.memPutInt(p + 40, outputFaceOffset);
 			MemoryUtil.memPutInt(p + 44, outputFaceCount);
 			MemoryUtil.memPutInt(p + 48, model.flags);
+			MemoryUtil.memPutInt(p + 52, faceIndexOffset);
+		}
+
+		@Override
+		public void close()
+		{
+			buffer.close();
+		}
+	}
+
+	private static final class ModelFaceIndexBuffer implements AutoCloseable
+	{
+		private final Buffer buffer;
+		private final long address;
+		private long frameAddress;
+
+		ModelFaceIndexBuffer(VulkanDevice device, long bytes)
+		{
+			this.buffer = new Buffer(device, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+			buffer.mapPersistent();
+			this.address = MemoryUtil.memAddress(buffer.mappedByteBuffer());
+		}
+
+		void beginFrame(int slot)
+		{
+			frameAddress = address + (long) slot * MODEL_COMPUTE_FACE_INDEX_SLOTS * Integer.BYTES;
+		}
+
+		long frameBytes()
+		{
+			return (long) MODEL_COMPUTE_FACE_INDEX_SLOTS * Integer.BYTES;
+		}
+
+		long handle()
+		{
+			return buffer.handle();
+		}
+
+		void write(int index, int value)
+		{
+			MemoryUtil.memPutInt(frameAddress + (long) index * Integer.BYTES, value);
 		}
 
 		@Override
@@ -1061,6 +1123,7 @@ final class SceneRenderer implements AutoCloseable
 		vertexCount = overlayNextVertex[slot];
 		useFrameWriteArena(slot, vertexCount);
 		modelInstanceBuffer.beginFrame(slot);
+		modelFaceIndexBuffer.beginFrame(slot);
 		modelInstanceCount = 0;
 		modelInstanceOverflowCount = 0;
 		modelInstanceFrameActive = true;
@@ -1077,9 +1140,11 @@ final class SceneRenderer implements AutoCloseable
 		modelComputeActorFaces = 0;
 		modelComputeOutputFaceCursor = 0;
 		modelComputeMaxFacesPerInstance = 0;
+		modelComputeFaceIndexCursor = 0;
 		modelComputeDebugHasOrigin = false;
 		overflowed = false;
 		priorityRangeCount = 0;
+		computePriorityRangeCount = 0;
 		dynamicOpaqueEnd = -1;
 	}
 
@@ -1992,6 +2057,29 @@ final class SceneRenderer implements AutoCloseable
 			recordPriorityRange(priorityStart);
 			return;
 		}
+		boolean replaceSortedWithCompute = modelComputeReplacement && !actorModel
+			&& (m.getOverrideAmount() & 0xFF) == 0;
+		if (replaceSortedWithCompute)
+		{
+			if (modelComputeFaceIndexCursor <= MODEL_COMPUTE_FACE_INDEX_SLOTS - faces)
+			{
+				if (modelInfo.meshOffset < 0L)
+				{
+					modelInfo.uploadMesh(modelMeshArena);
+				}
+				int faceIndexOffset = modelComputeFaceIndexCursor;
+				for (int i = 0; i < faces; i++)
+				{
+					modelFaceIndexBuffer.write(faceIndexOffset + i, sorter.sortedFaces[i]);
+				}
+				modelComputeFaceIndexCursor += faces;
+				recordModelInstance(modelInfo, orient, worldX, worldY, worldZ, renderMode,
+					faces, faceIndexOffset);
+				recordPriorityRange(priorityStart);
+				return;
+			}
+			modelInstanceOverflowCount++;
+		}
 		if (!reserveVertices(faces * 3)) return;
 
 		// Vertex positions are read by computeFaceUvs only; emit uses the
@@ -2175,6 +2263,23 @@ final class SceneRenderer implements AutoCloseable
 		prioritySkipPairs[priorityRangeCount * 2] = start;
 		prioritySkipPairs[priorityRangeCount * 2 + 1] = vertexCount;
 		priorityRangeCount++;
+	}
+
+	private void recordComputePriorityRange(int startFace, int endFace)
+	{
+		if (endFace <= startFace)
+		{
+			return;
+		}
+		if (computePriorityRangeCount == computePriorityFaceStarts.length)
+		{
+			int newSize = computePriorityFaceStarts.length * 2;
+			computePriorityFaceStarts = java.util.Arrays.copyOf(computePriorityFaceStarts, newSize);
+			computePriorityFaceEnds = java.util.Arrays.copyOf(computePriorityFaceEnds, newSize);
+		}
+		computePriorityFaceStarts[computePriorityRangeCount] = startFace;
+		computePriorityFaceEnds[computePriorityRangeCount] = endFace;
+		computePriorityRangeCount++;
 	}
 
 	private boolean captureModelCullOnlyFused(Projection proj, Model m, int orientation, int wx, int wy, int wz)
@@ -2666,17 +2771,19 @@ final class SceneRenderer implements AutoCloseable
 
 			drawModelComputeReplacement(cmd, slot, vertPush, fragPush);
 
-			if (priorityRangeCount > 0)
+			if (priorityRangeCount > 0 || computePriorityRangeCount > 0)
 			{
 				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, priorityColorPipeline.handle());
 				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
 					priorityColorPipeline.layout(), 0, stack.longs(descriptorSet), null);
 				drawPriorityRanges(cmd, slotFirstVertex, priorityColorPipeline.layout(), vertPush, fragPush);
+				drawModelComputePriorityRanges(cmd, slot, priorityColorPipeline.layout(), vertPush, fragPush);
 
 				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, priorityDepthPipeline.handle());
 				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
 					priorityDepthPipeline.layout(), 0, stack.longs(descriptorSet), null);
 				drawPriorityRanges(cmd, slotFirstVertex, priorityDepthPipeline.layout(), vertPush, fragPush);
+				drawModelComputePriorityRanges(cmd, slot, priorityDepthPipeline.layout(), vertPush, fragPush);
 			}
 
 			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, alphaPipeline.handle());
@@ -2685,6 +2792,7 @@ final class SceneRenderer implements AutoCloseable
 			drawAlphaPass(cmd, loMin, loMax, fullZoneRange, minZoneX, maxZoneX, minZoneZ, maxZoneZ,
 				skipScratch, skipPairs, loCur,
 				slot, staticFirstVertex, slotFirstVertex, alphaPipeline.layout(), vertPush, alphaFragPush);
+			drawModelComputeReplacementAlpha(cmd, slot, vertPush, alphaFragPush);
 			drawModelComputeDebug(cmd, slot, vertPush, fragPush);
 		}
 	}
@@ -2771,11 +2879,105 @@ final class SceneRenderer implements AutoCloseable
 				fillPipeline.layout(), 0, stack.longs(descriptorSet), null);
 			vkCmdPushConstants(cmd, fillPipeline.layout(), VK_SHADER_STAGE_VERTEX_BIT, 0, vertPush);
 			vkCmdPushConstants(cmd, fillPipeline.layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
-			vkCmdDraw(cmd, faceSlots * 3, 1, 0, 0);
+			drawComputeFaceRangeWithSkips(cmd, 0, faceSlots, fillPipeline.layout(), vertPush, fragPush);
 			vkCmdBindVertexBuffers(cmd, 0,
 				stack.longs(vbuf.handle()),
 				stack.longs(0L));
 		}
+	}
+
+	private void drawModelComputeReplacementAlpha(VkCommandBuffer cmd, int slot, ByteBuffer vertPush, ByteBuffer alphaFragPush)
+	{
+		if (!modelComputeReplacement || modelComputeOutputBuffer == null || alphaPipeline == null)
+		{
+			return;
+		}
+		int faceSlots = modelComputeOutputFaceCursor;
+		if (faceSlots <= 0)
+		{
+			return;
+		}
+		try (MemoryStack stack = stackPush())
+		{
+			vkCmdBindVertexBuffers(cmd, 0,
+				stack.longs(modelComputeOutputBuffer.handle()),
+				stack.longs(modelComputeOutputBuffer.frameOffset(slot)));
+			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, alphaPipeline.handle());
+			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+				alphaPipeline.layout(), 0, stack.longs(descriptorSet), null);
+			vkCmdPushConstants(cmd, alphaPipeline.layout(), VK_SHADER_STAGE_VERTEX_BIT, 0, vertPush);
+			vkCmdPushConstants(cmd, alphaPipeline.layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 96, alphaFragPush);
+			drawComputeFaceRangeWithSkips(cmd, 0, faceSlots, alphaPipeline.layout(), vertPush, alphaFragPush);
+			vkCmdBindVertexBuffers(cmd, 0,
+				stack.longs(vbuf.handle()),
+				stack.longs(0L));
+		}
+	}
+
+	private void drawModelComputePriorityRanges(VkCommandBuffer cmd, int slot, long pipelineLayout,
+		ByteBuffer vertPush, ByteBuffer fragPush)
+	{
+		if (!modelComputeReplacement || modelComputeOutputBuffer == null || computePriorityRangeCount == 0)
+		{
+			return;
+		}
+		try (MemoryStack stack = stackPush())
+		{
+			vkCmdBindVertexBuffers(cmd, 0,
+				stack.longs(modelComputeOutputBuffer.handle()),
+				stack.longs(modelComputeOutputBuffer.frameOffset(slot)));
+			for (int i = 0; i < computePriorityRangeCount; i++)
+			{
+				int start = computePriorityFaceStarts[i];
+				int end = computePriorityFaceEnds[i];
+				if (end <= start)
+				{
+					continue;
+				}
+				vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, vertPush);
+				vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
+				vkCmdDraw(cmd, (end - start) * 3, 1, start * 3, 0);
+			}
+			vkCmdBindVertexBuffers(cmd, 0,
+				stack.longs(vbuf.handle()),
+				stack.longs(0L));
+		}
+	}
+
+	private void drawComputeFaceRangeWithSkips(VkCommandBuffer cmd, int startFace, int endFace,
+		long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
+	{
+		int cursor = startFace;
+		for (int i = 0; i < computePriorityRangeCount; i++)
+		{
+			int skipStart = Math.max(startFace, computePriorityFaceStarts[i]);
+			int skipEnd = Math.min(endFace, computePriorityFaceEnds[i]);
+			if (skipEnd <= skipStart)
+			{
+				continue;
+			}
+			if (cursor < skipStart)
+			{
+				drawComputeFaceRange(cmd, cursor, skipStart, pipelineLayout, vertPush, fragPush);
+			}
+			cursor = Math.max(cursor, skipEnd);
+		}
+		if (cursor < endFace)
+		{
+			drawComputeFaceRange(cmd, cursor, endFace, pipelineLayout, vertPush, fragPush);
+		}
+	}
+
+	private static void drawComputeFaceRange(VkCommandBuffer cmd, int startFace, int endFace,
+		long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
+	{
+		if (endFace <= startFace)
+		{
+			return;
+		}
+		vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, vertPush);
+		vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
+		vkCmdDraw(cmd, (endFace - startFace) * 3, 1, startFace * 3, 0);
 	}
 
 	private int layerStartFor(int layer)
@@ -3085,6 +3287,7 @@ final class SceneRenderer implements AutoCloseable
 		vkDeviceWaitIdle(device.handle());
 		if (modelComputePipeline != null) modelComputePipeline.close();
 		if (modelComputeOutputBuffer != null) modelComputeOutputBuffer.close();
+		modelFaceIndexBuffer.close();
 		modelInstanceBuffer.close();
 		modelMeshArena.close();
 		vbuf.close();

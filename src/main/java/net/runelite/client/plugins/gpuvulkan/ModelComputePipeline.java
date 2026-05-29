@@ -34,7 +34,8 @@ final class ModelComputePipeline implements AutoCloseable
 	private long pipeline;
 
 	ModelComputePipeline(VulkanDevice device, long meshBuffer, long meshBytes,
-		long instanceBuffer, long instanceFrameBytes, long outputBuffer, long outputFrameBytes)
+		long instanceBuffer, long instanceFrameBytes, long faceIndexBuffer, long faceIndexFrameBytes,
+		long outputBuffer, long outputFrameBytes)
 	{
 		this.device = device;
 		long shaderModule = VK_NULL_HANDLE;
@@ -43,7 +44,7 @@ final class ModelComputePipeline implements AutoCloseable
 			shaderModule = createShaderModule(loadResource("model_instance.comp.spv"));
 			ByteBuffer entry = stack.UTF8("main");
 
-			VkDescriptorSetLayoutBinding.Buffer bindings = VkDescriptorSetLayoutBinding.calloc(3, stack);
+			VkDescriptorSetLayoutBinding.Buffer bindings = VkDescriptorSetLayoutBinding.calloc(4, stack);
 			bindings.get(0)
 				.binding(0)
 				.descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
@@ -59,6 +60,11 @@ final class ModelComputePipeline implements AutoCloseable
 				.descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
 				.descriptorCount(1)
 				.stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
+			bindings.get(3)
+				.binding(3)
+				.descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
+				.descriptorCount(1)
+				.stageFlags(VK_SHADER_STAGE_COMPUTE_BIT);
 
 			VkDescriptorSetLayoutCreateInfo dsInfo = VkDescriptorSetLayoutCreateInfo.calloc(stack)
 				.sType$Default()
@@ -68,6 +74,7 @@ final class ModelComputePipeline implements AutoCloseable
 				vkCreateDescriptorSetLayout(device.handle(), dsInfo, null, pDsl));
 			descriptorSetLayout = pDsl.get(0);
 			createDescriptorSets(meshBuffer, meshBytes, instanceBuffer, instanceFrameBytes,
+				faceIndexBuffer, faceIndexFrameBytes,
 				outputBuffer, outputFrameBytes, stack);
 
 			VkPushConstantRange.Buffer pc = VkPushConstantRange.calloc(1, stack);
@@ -166,13 +173,14 @@ final class ModelComputePipeline implements AutoCloseable
 	}
 
 	private void createDescriptorSets(long meshBuffer, long meshBytes,
-		long instanceBuffer, long instanceFrameBytes, long outputBuffer, long outputFrameBytes,
+		long instanceBuffer, long instanceFrameBytes, long faceIndexBuffer, long faceIndexFrameBytes,
+		long outputBuffer, long outputFrameBytes,
 		MemoryStack stack)
 	{
 		VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.calloc(1, stack);
 		poolSizes.get(0)
 			.type(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
-			.descriptorCount(3 * FrameSync.FRAMES_IN_FLIGHT);
+			.descriptorCount(4 * FrameSync.FRAMES_IN_FLIGHT);
 
 		VkDescriptorPoolCreateInfo poolInfo = VkDescriptorPoolCreateInfo.calloc(stack)
 			.sType$Default()
@@ -202,14 +210,15 @@ final class ModelComputePipeline implements AutoCloseable
 		}
 
 		VkDescriptorBufferInfo.Buffer bufferInfo =
-			VkDescriptorBufferInfo.calloc(3 * FrameSync.FRAMES_IN_FLIGHT, stack);
+			VkDescriptorBufferInfo.calloc(4 * FrameSync.FRAMES_IN_FLIGHT, stack);
 		VkWriteDescriptorSet.Buffer writes =
-			VkWriteDescriptorSet.calloc(3 * FrameSync.FRAMES_IN_FLIGHT, stack);
+			VkWriteDescriptorSet.calloc(4 * FrameSync.FRAMES_IN_FLIGHT, stack);
 		for (int i = 0; i < FrameSync.FRAMES_IN_FLIGHT; i++)
 		{
-			int meshInfo = i * 3;
+			int meshInfo = i * 4;
 			int instanceInfo = meshInfo + 1;
-			int outputInfo = meshInfo + 2;
+			int faceIndexInfo = meshInfo + 2;
+			int outputInfo = meshInfo + 3;
 
 			bufferInfo.get(meshInfo)
 				.buffer(meshBuffer)
@@ -219,6 +228,10 @@ final class ModelComputePipeline implements AutoCloseable
 				.buffer(instanceBuffer)
 				.offset(instanceFrameBytes * i)
 				.range(instanceFrameBytes);
+			bufferInfo.get(faceIndexInfo)
+				.buffer(faceIndexBuffer)
+				.offset(faceIndexFrameBytes * i)
+				.range(faceIndexFrameBytes);
 			bufferInfo.get(outputInfo)
 				.buffer(outputBuffer)
 				.offset(outputFrameBytes * i)
@@ -245,6 +258,13 @@ final class ModelComputePipeline implements AutoCloseable
 				.descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
 				.descriptorCount(1)
 				.pBufferInfo(VkDescriptorBufferInfo.create(bufferInfo.get(outputInfo).address(), 1));
+			writes.get(faceIndexInfo)
+				.sType$Default()
+				.dstSet(descriptorSets[i])
+				.dstBinding(3)
+				.descriptorType(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
+				.descriptorCount(1)
+				.pBufferInfo(VkDescriptorBufferInfo.create(bufferInfo.get(faceIndexInfo).address(), 1));
 		}
 		vkUpdateDescriptorSets(device.handle(), writes, null);
 	}
