@@ -831,9 +831,12 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		lines.add("model cand: " + compactCount(metrics.modelComputeCandidateFaces)
 			+ " / " + compactCount(metrics.modelComputeTrackedFaces));
 		lines.add("model block: s=" + compactCount(metrics.modelComputeSortedFaces)
+			+ " p=" + compactCount(metrics.modelComputePriorityFaces)
+			+ " tr=" + compactCount(metrics.modelComputeTransparentFaces)
 			+ " t=" + compactCount(metrics.modelComputeTexturedFaces)
 			+ " b=" + compactCount(metrics.modelComputeBiasedFaces)
-			+ " o=" + compactCount(metrics.modelComputeOverrideFaces));
+			+ " o=" + compactCount(metrics.modelComputeOverrideFaces)
+			+ " a=" + compactCount(metrics.modelComputeActorFaces));
 		lines.add("overflow: " + (metrics.overflowed ? "yes" : "no"));
 		lines.add("scene/pre/post: " + stats.drawSceneCount() + " / "
 			+ stats.preSceneDrawCount() + " / " + stats.postDrawSceneCount());
@@ -973,7 +976,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			stats.drawDynamic.incrementAndGet();
 			stats.recordModel(m);
 		}
-		if (renderExtensions != null) renderExtensions.captureModel(worldProjection, m, orient, x, y, z, renderModeOf(r));
+		if (renderExtensions != null) renderExtensions.captureModel(worldProjection, m, orient, x, y, z,
+			renderModeOf(r), r instanceof net.runelite.api.Actor);
 	}
 
 	@Override
@@ -989,7 +993,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			return;
 		}
 		if (renderExtensions != null) renderExtensions.captureModel(worldProjection, m, orient, x, y, z,
-			renderModeOf(gameObject.getRenderable()));
+			renderModeOf(gameObject.getRenderable()), false);
 	}
 
 	private static int renderModeOf(Renderable renderable)
@@ -1026,7 +1030,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		if (renderable instanceof net.runelite.api.Actor) return;
 		Model m = (renderable instanceof Model) ? (Model) renderable : renderable.getModel();
 		if (m == null) return;
-		renderExtensions.captureModel(projection, m, orientation, x, y, z, renderModeOf(renderable));
+		renderExtensions.captureModel(projection, m, orientation, x, y, z, renderModeOf(renderable), false);
 	}
 
 	@Override

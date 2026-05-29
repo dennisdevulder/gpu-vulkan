@@ -47,6 +47,12 @@ public interface VulkanRenderExtension extends AutoCloseable
 		captureModel(projection, model, orientation, worldX, worldY, worldZ);
 	}
 
+	default void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ,
+		int renderMode, boolean actorModel)
+	{
+		captureModel(projection, model, orientation, worldX, worldY, worldZ, renderMode);
+	}
+
 	default void setLevelRange(int minLevel, int currentLevel, int maxLevel)
 	{
 		setLevelRange(minLevel, maxLevel);

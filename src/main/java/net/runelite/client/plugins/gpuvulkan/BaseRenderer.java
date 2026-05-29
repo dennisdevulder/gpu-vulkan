@@ -120,6 +120,15 @@ final class BaseRenderer implements VulkanRenderExtension
 	}
 
 	@Override
+	public void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ,
+		int renderMode, boolean actorModel)
+	{
+		if (config != null && config.benchmarkSkipDynamicCapture()) return;
+		if (sceneRenderer == null) return;
+		sceneRenderer.captureModel(projection, model, orientation, worldX, worldY, worldZ, renderMode, actorModel);
+	}
+
+	@Override
 	public void setLevelRange(int minLevel, int maxLevel)
 	{
 		if (sceneRenderer == null) return;

@@ -23,9 +23,12 @@ public final class GpuVulkanDebugMetrics
 	int modelComputeTrackedFaces;
 	int modelComputeCandidateFaces;
 	int modelComputeSortedFaces;
+	int modelComputePriorityFaces;
+	int modelComputeTransparentFaces;
 	int modelComputeTexturedFaces;
 	int modelComputeBiasedFaces;
 	int modelComputeOverrideFaces;
+	int modelComputeActorFaces;
 	boolean overflowed;
 	long sceneBufferBytes;
 }

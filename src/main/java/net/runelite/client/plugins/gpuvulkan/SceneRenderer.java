@@ -96,7 +96,7 @@ final class SceneRenderer implements AutoCloseable
 	private static final int MODEL_CACHE_BUCKET_MASK = MODEL_CACHE_BUCKETS - 1;
 	private static final long MODEL_MESH_ARENA_BYTES = 64L * 1024L * 1024L;
 	private static final int MAX_MODEL_INSTANCES = 65_536;
-	private static final int MODEL_INSTANCE_STRIDE = 48;
+	private static final int MODEL_INSTANCE_STRIDE = 52;
 	private static final int MODEL_MESH_HEADER_INTS = 16;
 	private static final int MODEL_MESH_HEADER_BYTES = MODEL_MESH_HEADER_INTS * Integer.BYTES;
 	private static final long MODEL_COMPUTE_OUTPUT_FRAME_BYTES = 32L * 1024L * 1024L;
@@ -126,9 +126,12 @@ final class SceneRenderer implements AutoCloseable
 	private int modelComputeTrackedFaces;
 	private int modelComputeCandidateFaces;
 	private int modelComputeSortedFaces;
+	private int modelComputePriorityFaces;
+	private int modelComputeTransparentFaces;
 	private int modelComputeTexturedFaces;
 	private int modelComputeBiasedFaces;
 	private int modelComputeOverrideFaces;
+	private int modelComputeActorFaces;
 	private int modelComputeOutputFaceCursor;
 	private int modelComputeMaxFacesPerInstance;
 	private boolean modelComputeDebugHasOrigin;
@@ -394,9 +397,12 @@ final class SceneRenderer implements AutoCloseable
 		metrics.modelComputeTrackedFaces += modelComputeTrackedFaces;
 		metrics.modelComputeCandidateFaces += modelComputeCandidateFaces;
 		metrics.modelComputeSortedFaces += modelComputeSortedFaces;
+		metrics.modelComputePriorityFaces += modelComputePriorityFaces;
+		metrics.modelComputeTransparentFaces += modelComputeTransparentFaces;
 		metrics.modelComputeTexturedFaces += modelComputeTexturedFaces;
 		metrics.modelComputeBiasedFaces += modelComputeBiasedFaces;
 		metrics.modelComputeOverrideFaces += modelComputeOverrideFaces;
+		metrics.modelComputeActorFaces += modelComputeActorFaces;
 		metrics.overflowed |= overflowed;
 		metrics.sceneBufferBytes += TOTAL_BUFFER_BYTES;
 	}
@@ -703,6 +709,7 @@ final class SceneRenderer implements AutoCloseable
 		final boolean hasTransparentFaces;
 		final int texturedFaces;
 		final int biasedFaces;
+		final int flags;
 
 		ModelCacheEntry(int hash, int faceCount, int vertexCount,
 			Object verticesX, Object verticesY, Object verticesZ,
@@ -736,6 +743,11 @@ final class SceneRenderer implements AutoCloseable
 			this.hasTransparentFaces = transparentFaces > 0;
 			this.texturedFaces = countTexturedFaces(faceCount, (short[]) faceTextures);
 			this.biasedFaces = countNonZeroBytes(faceCount, (byte[]) faceBias);
+			this.flags = (((short[]) faceTextures) != null ? 1 : 0)
+				| (((byte[]) textureFaces) != null
+					&& ((int[]) texIndices1) != null
+					&& ((int[]) texIndices2) != null
+					&& ((int[]) texIndices3) != null ? 2 : 0);
 		}
 
 		void uploadMesh(ModelMeshArena arena)
@@ -982,6 +994,7 @@ final class SceneRenderer implements AutoCloseable
 			MemoryUtil.memPutInt(p + 36, renderMode);
 			MemoryUtil.memPutInt(p + 40, outputFaceOffset);
 			MemoryUtil.memPutInt(p + 44, outputFaceCount);
+			MemoryUtil.memPutInt(p + 48, model.flags);
 		}
 
 		@Override
@@ -1056,9 +1069,12 @@ final class SceneRenderer implements AutoCloseable
 		modelComputeTrackedFaces = 0;
 		modelComputeCandidateFaces = 0;
 		modelComputeSortedFaces = 0;
+		modelComputePriorityFaces = 0;
+		modelComputeTransparentFaces = 0;
 		modelComputeTexturedFaces = 0;
 		modelComputeBiasedFaces = 0;
 		modelComputeOverrideFaces = 0;
+		modelComputeActorFaces = 0;
 		modelComputeOutputFaceCursor = 0;
 		modelComputeMaxFacesPerInstance = 0;
 		modelComputeDebugHasOrigin = false;
@@ -1860,6 +1876,12 @@ final class SceneRenderer implements AutoCloseable
 
 	void captureModelSorted(Projection proj, Model m, int orient, int worldX, int worldY, int worldZ, int renderMode)
 	{
+		captureModelSorted(proj, m, orient, worldX, worldY, worldZ, renderMode, false);
+	}
+
+	void captureModelSorted(Projection proj, Model m, int orient, int worldX, int worldY, int worldZ, int renderMode,
+		boolean actorModel)
+	{
 		if (m == null || proj == null) return;
 
 		boolean detailedStats = stats.isDetailedModelStats();
@@ -1871,6 +1893,14 @@ final class SceneRenderer implements AutoCloseable
 		if (needsFaceSort)
 		{
 			modelComputeSortedFaces += modelInfo.faceCount;
+		}
+		if (prioritySort)
+		{
+			modelComputePriorityFaces += modelInfo.faceCount;
+		}
+		if (modelInfo.hasTransparentFaces)
+		{
+			modelComputeTransparentFaces += modelInfo.faceCount;
 		}
 		if (modelInfo.texturedFaces > 0)
 		{
@@ -1884,11 +1914,16 @@ final class SceneRenderer implements AutoCloseable
 		{
 			modelComputeOverrideFaces += modelInfo.faceCount;
 		}
-		if (isModelComputeCandidate(m, modelInfo, needsFaceSort))
+		if (actorModel)
+		{
+			modelComputeActorFaces += modelInfo.faceCount;
+		}
+		if (!actorModel && isModelComputeCandidate(m, modelInfo, needsFaceSort))
 		{
 			modelComputeCandidateFaces += modelInfo.faceCount;
 		}
-		boolean replaceWithCompute = modelComputeReplacement && isModelComputeCandidate(m, modelInfo, needsFaceSort);
+		boolean replaceWithCompute = modelComputeReplacement && !actorModel
+			&& isModelComputeCandidate(m, modelInfo, needsFaceSort);
 		boolean recordForCompute = modelComputeDebugDraw || replaceWithCompute;
 		if (recordForCompute)
 		{
@@ -2433,7 +2468,6 @@ final class SceneRenderer implements AutoCloseable
 	private static boolean isModelComputeCandidate(Model model, ModelCacheEntry info, boolean needsFaceSort)
 	{
 		return !needsFaceSort
-			&& info.texturedFaces == 0
 			&& (model.getOverrideAmount() & 0xFF) == 0;
 	}
 

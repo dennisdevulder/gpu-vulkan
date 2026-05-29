@@ -78,6 +78,13 @@ final class DefaultVulkanSceneRenderer implements VulkanSceneRenderer
 	}
 
 	@Override
+	public void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ,
+		int renderMode, boolean actorModel)
+	{
+		sceneRenderer.captureModelSorted(projection, model, orientation, worldX, worldY, worldZ, renderMode, actorModel);
+	}
+
+	@Override
 	public void setLevelRange(int minLevel, int maxLevel)
 	{
 		sceneRenderer.setLevelRange(minLevel, maxLevel);

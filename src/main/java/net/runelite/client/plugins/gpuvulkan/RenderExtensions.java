@@ -155,12 +155,18 @@ final class RenderExtensions implements AutoCloseable
 
 	void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ, int renderMode)
 	{
+		captureModel(projection, model, orientation, worldX, worldY, worldZ, renderMode, false);
+	}
+
+	void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ,
+		int renderMode, boolean actorModel)
+	{
 		for (int i = 0; i < extensions.size(); )
 		{
 			VulkanRenderExtension extension = extensions.get(i);
 			try
 			{
-				extension.captureModel(projection, model, orientation, worldX, worldY, worldZ, renderMode);
+				extension.captureModel(projection, model, orientation, worldX, worldY, worldZ, renderMode, actorModel);
 				i++;
 			}
 			catch (RuntimeException e)
