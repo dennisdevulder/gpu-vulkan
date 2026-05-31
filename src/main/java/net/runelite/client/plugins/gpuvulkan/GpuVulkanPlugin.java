@@ -1,3 +1,27 @@
+/*
+ * Copyright (c) 2026, Dennis de Vulder
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
 package net.runelite.client.plugins.gpuvulkan;
 
 import com.google.inject.Provides;
@@ -33,8 +57,8 @@ import net.runelite.client.ui.overlay.OverlayManager;
 
 @PluginDescriptor(
 	name = "GPU (Vulkan)",
-	description = "Vulkan-backed renderer (alternative to the OpenGL GPU plugin)",
-	tags = {"vulkan", "renderer", "gpu"},
+	description = "Experimental Vulkan-backed GPU renderer",
+	tags = {"vulkan", "renderer", "gpu", "experimental"},
 	enabledByDefault = false,
 	loadInSafeMode = false
 )
@@ -803,6 +827,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		{
 			renderExtensions.collectDebugMetrics(metrics);
 		}
+		metrics.uiUploadBytes += stats.uiUploadBytes.get();
+		metrics.screenshotReadbackBytes += stats.screenshotReadbackBytes.get();
 
 		lines.add("GPU Vulkan");
 		lines.add("device: " + compactDeviceName(device == null ? "not ready" : device.deviceName()));
@@ -817,29 +843,13 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		lines.add("pending: " + metrics.pendingRenderables);
 		lines.add("model cache: " + compactCount(metrics.modelCacheEntries)
 			+ " h/m " + compactCount(metrics.modelCacheHits) + "/" + compactCount(metrics.modelCacheMisses));
-		lines.add("model mesh: " + mib(metrics.modelMeshBytes) + " / "
-			+ mib(metrics.modelMeshCapacityBytes) + " MiB");
-		lines.add("model inst: " + compactCount(metrics.modelInstances) + " / "
-			+ compactCount(metrics.modelInstanceMax) + " o=" + metrics.modelInstanceOverflows);
-		if (metrics.modelComputeOutputBytes > 0L)
-		{
-			lines.add("model out: " + mib(metrics.modelComputeOutputBytes) + " MiB");
-		}
-		lines.add("model dbg: " + (metrics.modelComputeDebugDraw ? "on" : "off")
-			+ " f=" + compactCount(metrics.modelComputeDebugFaces)
-			+ " clip=" + compactCount(metrics.modelComputeClippedFaces));
-		lines.add("model cand: " + compactCount(metrics.modelComputeCandidateFaces)
-			+ " / " + compactCount(metrics.modelComputeTrackedFaces));
-		lines.add("model repl: " + compactCount(metrics.modelComputeReplacedFaces)
-			+ " s=" + compactCount(metrics.modelComputeReplacedSortedFaces)
-			+ " p=" + compactCount(metrics.modelComputeReplacedPriorityFaces));
-		lines.add("model block: s=" + compactCount(metrics.modelComputeSortedFaces)
-			+ " p=" + compactCount(metrics.modelComputePriorityFaces)
-			+ " tr=" + compactCount(metrics.modelComputeTransparentFaces)
-			+ " t=" + compactCount(metrics.modelComputeTexturedFaces)
-			+ " b=" + compactCount(metrics.modelComputeBiasedFaces)
-			+ " o=" + compactCount(metrics.modelComputeOverrideFaces)
-			+ " a=" + compactCount(metrics.modelComputeActorFaces));
+		lines.add("vk draws: " + compactCount(metrics.sceneDrawCalls)
+			+ " v=" + compactCount(metrics.sceneDrawVertices)
+			+ " pc=" + compactCount(metrics.scenePushConstants));
+		lines.add("roof/overlay: " + compactCount(metrics.roofSkipPairs)
+			+ " / " + compactCount(metrics.overlayDirtyZones));
+		lines.add("upload/read: " + mib(metrics.uiUploadBytes) + " / "
+			+ mib(metrics.screenshotReadbackBytes) + " MiB");
 		lines.add("overflow: " + (metrics.overflowed ? "yes" : "no"));
 		lines.add("scene/pre/post: " + stats.drawSceneCount() + " / "
 			+ stats.preSceneDrawCount() + " / " + stats.postDrawSceneCount());

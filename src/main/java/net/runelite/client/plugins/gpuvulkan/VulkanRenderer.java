@@ -1,3 +1,27 @@
+/*
+ * Copyright (c) 2026, Dennis de Vulder
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
 package net.runelite.client.plugins.gpuvulkan;
 
 import java.awt.Image;
@@ -45,6 +69,8 @@ final class VulkanRenderer implements AutoCloseable
 	private final RenderExtensions renderExtensions;
 	private final FrameSync sync;
 	private final DrawCallbackStats stats;
+	private final boolean skipScreenshotReadback =
+		Boolean.parseBoolean(System.getProperty("vkgpu.skipScreenshotReadback", "false"));
 
 	private final Swapchain swapchain;
 	private final DepthBuffer depthBuffer;
@@ -215,6 +241,7 @@ final class VulkanRenderer implements AutoCloseable
 			// CPU-side memcpy into the persistently-mapped staging buffer. Done
 			// before recording the command buffer so the GPU read sees it.
 			start = stats.startNanos();
+			stats.uiUploadBytes.addAndGet((long) uiWidth * uiHeight * Integer.BYTES);
 			renderExtensions.uploadUiPixels(uiPixels, uiWidth, uiHeight);
 			stats.addNanos(stats.uiUploadNanos, start);
 
@@ -371,6 +398,10 @@ final class VulkanRenderer implements AutoCloseable
 
 	private Image screenshot()
 	{
+		if (skipScreenshotReadback)
+		{
+			return null;
+		}
 		if (vkGetFenceStatus(device.handle(), sync.inFlightFence()) == VK_NOT_READY)
 		{
 			vkWaitForFences(device.handle(), sync.inFlightFence(), true, Long.MAX_VALUE);
@@ -542,7 +573,11 @@ final class VulkanRenderer implements AutoCloseable
 		// from DrawCallbacks.draw(int) to the ui.frag push constant.
 		vkCmdEndRenderPass(cmd);
 
-		screenshotReadback.recordCopy(cmd, targetImage, targetWidth, targetHeight);
+		if (!skipScreenshotReadback)
+		{
+			stats.screenshotReadbackBytes.addAndGet((long) targetWidth * targetHeight * Integer.BYTES);
+			screenshotReadback.recordCopy(cmd, targetImage, targetWidth, targetHeight);
+		}
 
 		Vk.check("vkEndCommandBuffer", vkEndCommandBuffer(cmd));
 	}
