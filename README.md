@@ -16,8 +16,8 @@ source tree.
 ## Status
 
 - **Linux/X11** — working (daily driver). Several open issues — see
-  the issue tracker. Notable release blocker: sidebar-collapse crash
-  (needs Vulkan-to-offscreen + GL blit refactor).
+  the issue tracker. The prior sidebar-collapse crash is mitigated by
+  keeping an rlawt GLX context alive for AWT while Vulkan owns rendering.
 - **macOS** — working on Apple Silicon via MoltenVK; one outstanding
   layer-flicker bug (see issues).
 - **Windows** — surface code implemented, never tested. See
@@ -155,7 +155,8 @@ src/main/shaders/...   GLSL — compiled to SPIR-V at build time
 src/test/java/...      IDE-run main
 build.gradle           Gradle build (shader compile task, deps)
 runelite-plugin.properties   plugin-hub-style descriptor
-KNOWN_ISSUES.md        engineering notes; read before opening a PR
+docs/KNOWN_ISSUES.md  engineering notes; read before opening a PR
+docs/RELEASE_CHECKLIST.md  production-readiness gates
 ```
 
 ## Contributing

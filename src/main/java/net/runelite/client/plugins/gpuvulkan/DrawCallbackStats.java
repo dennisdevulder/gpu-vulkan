@@ -1,3 +1,27 @@
+/*
+ * Copyright (c) 2026, Dennis de Vulder
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
 package net.runelite.client.plugins.gpuvulkan;
 
 import java.util.concurrent.atomic.AtomicInteger;
@@ -7,11 +31,11 @@ import net.runelite.api.Model;
 
 /**
  * Flight recorder for the Vulkan draw path. The counters are deliberately
- * cheap and opt-in so performance work can explain which renderer contract
- * surface changed: callbacks, CPU timings, draw submission shape, uploads,
- * readbacks, and model emission.
+ * cheap and opt-in so renderer changes can explain which contract surface
+ * changed: callbacks, CPU timings, draw submission shape, uploads, readbacks,
+ * and model emission.
  *
- * <p>All counters are atomic because the OSRS scene compute can spin up
+ * <p>All counters are atomic because the OSRS scene renderer can spin up
  * {@code DrawCallbacks.RENDER_THREADS_MASK} threads.
  */
 @Slf4j
@@ -78,6 +102,8 @@ final class DrawCallbackStats
 	final Counter sceneDrawCalls = new Counter();
 	final Counter sceneDrawVertices = new Counter();
 	final Counter scenePushConstants = new Counter();
+	final Counter roofSkipPairs = new Counter();
+	final Counter overlayDirtyZones = new Counter();
 	final Counter uiUploadBytes = new Counter();
 	final Counter screenshotReadbackBytes = new Counter();
 
@@ -186,12 +212,14 @@ final class DrawCallbackStats
 		long sceneDrawCallCount = sceneDrawCalls.getAndSet(0);
 		long sceneDrawVertexCount = sceneDrawVertices.getAndSet(0);
 		long scenePushConstantCount = scenePushConstants.getAndSet(0);
+		long roofSkipPairCount = roofSkipPairs.getAndSet(0);
+		long overlayDirtyZoneCount = overlayDirtyZones.getAndSet(0);
 		long uiBytes = uiUploadBytes.getAndSet(0);
 		long screenshotBytes = screenshotReadbackBytes.getAndSet(0);
 		if (!detailedModelStats)
 		{
 			log.info(String.format(
-				"recon | scene=%d preSD=%d postSD=%d swap=%d load=%d | paint=%d tileModel=%d | zoneOpq=%d zoneAlpha=%d | dyn=%d temp=%d pass=%d single=%d | cam=(%.1f, %.1f, %.1f) plane=%d | anim=%d | submit: draws=%d drawVerts=%d pushes=%d uiBytes=%d readbackBytes=%d | cpu/frame avg ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f | scene avg ms: begin=%.2f pending=%.2f staticCaptureTotal=%.2f",
+				"recon | scene=%d preSD=%d postSD=%d swap=%d load=%d | paint=%d tileModel=%d | zoneOpq=%d zoneAlpha=%d | dyn=%d temp=%d pass=%d single=%d | cam=(%.1f, %.1f, %.1f) plane=%d | anim=%d | submit: draws=%d drawVerts=%d pushes=%d roofSkips=%d overlayZones=%d uiBytes=%d readbackBytes=%d | cpu/frame avg ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f | scene avg ms: begin=%.2f pending=%.2f staticCaptureTotal=%.2f",
 				drawSceneCount,
 				preSceneDraw.getAndSet(0),
 				postDrawScene.getAndSet(0),
@@ -210,6 +238,8 @@ final class DrawCallbackStats
 				sceneDrawCallCount,
 				sceneDrawVertexCount,
 				scenePushConstantCount,
+				roofSkipPairCount,
+				overlayDirtyZoneCount,
 				uiBytes,
 				screenshotBytes,
 				avgMs(drawFrame, frameCount),
@@ -248,7 +278,7 @@ final class DrawCallbackStats
 		long overrideFaceCount = overrideEmitFaces.getAndSet(0);
 
 			log.info(String.format(
-				"recon | scene=%d preSD=%d postSD=%d swap=%d load=%d | paint=%d tileModel=%d | zoneOpq=%d zoneAlpha=%d | dyn=%d temp=%d pass=%d single=%d | dynVerts=%d dynFaces=%d maxF=%d | cam=(%.1f, %.1f, %.1f) plane=%d | anim=%d | submit: draws=%d drawVerts=%d pushes=%d uiBytes=%d readbackBytes=%d | cpu/frame avg ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f | scene avg ms: begin=%.2f pending=%.2f staticCaptureTotal=%.2f | model ms: sort=%.2f full=%.2f cull=%.2f emit=%.2f sortedEmit=%.2f unsortedEmit=%.2f uv=%.2f | models sorted=%d full=%d cull=%d unsorted=%d fallback=%d | faces sorted=%d unsorted=%d tex=%d override=%d fullTrans=%d",
+				"recon | scene=%d preSD=%d postSD=%d swap=%d load=%d | paint=%d tileModel=%d | zoneOpq=%d zoneAlpha=%d | dyn=%d temp=%d pass=%d single=%d | dynVerts=%d dynFaces=%d maxF=%d | cam=(%.1f, %.1f, %.1f) plane=%d | anim=%d | submit: draws=%d drawVerts=%d pushes=%d roofSkips=%d overlayZones=%d uiBytes=%d readbackBytes=%d | cpu/frame avg ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f | scene avg ms: begin=%.2f pending=%.2f staticCaptureTotal=%.2f | model ms: sort=%.2f full=%.2f cull=%.2f emit=%.2f sortedEmit=%.2f unsortedEmit=%.2f uv=%.2f | models sorted=%d full=%d cull=%d unsorted=%d fallback=%d | faces sorted=%d unsorted=%d tex=%d override=%d fullTrans=%d",
 			drawSceneCount,
 			preSceneDraw.getAndSet(0),
 			postDrawScene.getAndSet(0),
@@ -270,6 +300,8 @@ final class DrawCallbackStats
 			sceneDrawCallCount,
 			sceneDrawVertexCount,
 			scenePushConstantCount,
+			roofSkipPairCount,
+			overlayDirtyZoneCount,
 			uiBytes,
 			screenshotBytes,
 			avgMs(drawFrame, frameCount),

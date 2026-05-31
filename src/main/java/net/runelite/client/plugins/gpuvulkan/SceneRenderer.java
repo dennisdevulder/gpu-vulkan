@@ -52,7 +52,6 @@ import net.runelite.api.WallObject;
 import net.runelite.api.hooks.DrawCallbacks;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
-import org.lwjgl.vulkan.VkBufferMemoryBarrier;
 import org.lwjgl.vulkan.VkCommandBuffer;
 
 import static org.lwjgl.system.MemoryStack.stackPush;
@@ -94,16 +93,6 @@ final class SceneRenderer implements AutoCloseable
 	private static final int MAX_MODEL_CACHE_ENTRIES = 8192;
 	private static final int MODEL_CACHE_BUCKETS = 16384;
 	private static final int MODEL_CACHE_BUCKET_MASK = MODEL_CACHE_BUCKETS - 1;
-	private static final long MODEL_MESH_ARENA_BYTES = 64L * 1024L * 1024L;
-	private static final int MAX_MODEL_INSTANCES = 65_536;
-	private static final int MODEL_INSTANCE_STRIDE = 56;
-	private static final int MODEL_MESH_HEADER_INTS = 16;
-	private static final int MODEL_MESH_HEADER_BYTES = MODEL_MESH_HEADER_INTS * Integer.BYTES;
-	private static final long MODEL_COMPUTE_OUTPUT_FRAME_BYTES = 32L * 1024L * 1024L;
-	private static final int MODEL_COMPUTE_OUTPUT_FACE_SLOTS =
-		(int) (MODEL_COMPUTE_OUTPUT_FRAME_BYTES / (3L * ScenePipeline.VERTEX_STRIDE));
-	private static final int MODEL_COMPUTE_FACE_INDEX_SLOTS = MODEL_COMPUTE_OUTPUT_FACE_SLOTS;
-	private static final boolean ENABLE_MODEL_COMPUTE_PROTOTYPE = true;
 	private static final int SCENE_OFFSET = (Constants.EXTENDED_SCENE_SIZE - Constants.SCENE_SIZE) / 2;
 	private static final float[] HSL_RGB = buildHslRgbTable();
 
@@ -114,35 +103,12 @@ final class SceneRenderer implements AutoCloseable
 	private final ScenePipeline alphaPipeline;
 	private final ScenePipeline priorityColorPipeline;
 	private final ScenePipeline priorityDepthPipeline;
-	private final ScenePipeline modelComputeDebugPipeline;
 	private final SceneVertexBuffer vbuf;
 	private final ByteBuffer mapped;
 	private final long descriptorSet;
 	private final int slotBytes;
 	private final DrawCallbackStats stats;
-	private volatile boolean modelComputeDebugDraw;
-	private volatile boolean modelComputeReplacement;
-	private int modelComputeDebugFaceSlots;
-	private int modelComputeClippedFaces;
-	private int modelComputeTrackedFaces;
-	private int modelComputeCandidateFaces;
-	private int modelComputeReplacedFaces;
-	private int modelComputeReplacedSortedFaces;
-	private int modelComputeReplacedPriorityFaces;
-	private int modelComputeSortedFaces;
-	private int modelComputePriorityFaces;
-	private int modelComputeTransparentFaces;
-	private int modelComputeTexturedFaces;
-	private int modelComputeBiasedFaces;
-	private int modelComputeOverrideFaces;
-	private int modelComputeActorFaces;
-	private int modelComputeOutputFaceCursor;
-	private int modelComputeMaxFacesPerInstance;
-	private int modelComputeFaceIndexCursor;
-	private boolean modelComputeDebugHasOrigin;
-	private int modelComputeDebugX;
-	private int modelComputeDebugY;
-	private int modelComputeDebugZ;
+	private final boolean repushConstantsEveryDraw;
 	private long writePtr;
 	private long writeBasePtr;
 	private int writeBaseVertex;
@@ -154,15 +120,7 @@ final class SceneRenderer implements AutoCloseable
 	private final float[] cullProjY = new float[ModelSorter.MAX_VERTEX_COUNT];
 	private final float[] cullProjectScratch = new float[3];
 	private final ModelCacheEntry[] modelCacheBuckets = new ModelCacheEntry[MODEL_CACHE_BUCKETS];
-	private final ModelMeshArena modelMeshArena;
-	private final ModelInstanceBuffer modelInstanceBuffer;
-	private final ModelFaceIndexBuffer modelFaceIndexBuffer;
-	private final ModelComputeOutputBuffer modelComputeOutputBuffer;
-	private final ModelComputePipeline modelComputePipeline;
 	private int modelCacheSize;
-	private int modelInstanceCount;
-	private int modelInstanceOverflowCount;
-	private boolean modelInstanceFrameActive;
 	private long modelCacheHits;
 	private long modelCacheMisses;
 
@@ -198,9 +156,6 @@ final class SceneRenderer implements AutoCloseable
 	private int[] priorityRangeEnds = new int[1024];
 	private int[] prioritySkipPairs = new int[2048];
 	private int priorityRangeCount;
-	private int[] computePriorityFaceStarts = new int[256];
-	private int[] computePriorityFaceEnds = new int[256];
-	private int computePriorityRangeCount;
 	private int dynamicOpaqueEnd = -1;
 	/** Plane range to render this frame, forwarded from preSceneDraw's
 	 *  (minLevel, level, maxLevel). Roof hiding only applies above the
@@ -305,12 +260,12 @@ final class SceneRenderer implements AutoCloseable
 
 	SceneRenderer(VulkanDevice device, FrameSync sync,
 		RenderPass renderPass, TextureArray textureArray,
-		DrawCallbackStats stats, boolean alphaToCoverage, boolean modelComputeDebugDraw)
+		DrawCallbackStats stats, boolean alphaToCoverage)
 	{
 		this.device = device;
 		this.sync = sync;
 		this.stats = stats;
-		this.modelComputeDebugDraw = modelComputeDebugDraw;
+		this.repushConstantsEveryDraw = device.supportsMetalObjects();
 		this.fillPipeline = new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL, true,
 			renderPass.samples(), alphaToCoverage);
 		this.alphaPipeline = new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL,
@@ -319,10 +274,6 @@ final class SceneRenderer implements AutoCloseable
 			true, false, true, renderPass.samples(), alphaToCoverage);
 		this.priorityDepthPipeline = new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL,
 			true, true, false, renderPass.samples(), alphaToCoverage);
-		this.modelComputeDebugPipeline = ENABLE_MODEL_COMPUTE_PROTOTYPE
-			? new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL,
-				true, false, true, renderPass.samples(), false, true)
-			: null;
 		// fillModeNonSolid is required for VK_POLYGON_MODE_LINE; without it
 		// (llvmpipe, some embedded SoCs) wireframe collapses to FILL.
 		this.linePipeline = device.supportsFillModeNonSolid()
@@ -334,36 +285,11 @@ final class SceneRenderer implements AutoCloseable
 		this.mapped = vbuf.mapped();
 		this.descriptorSet = vbuf.descriptorSet();
 		this.slotBytes = (int) vbuf.slotBytes();
-		this.modelMeshArena = new ModelMeshArena(device, MODEL_MESH_ARENA_BYTES);
-		this.modelInstanceBuffer = new ModelInstanceBuffer(device,
-			(long) MAX_MODEL_INSTANCES * MODEL_INSTANCE_STRIDE * FrameSync.FRAMES_IN_FLIGHT);
-		this.modelFaceIndexBuffer = new ModelFaceIndexBuffer(device,
-			(long) MODEL_COMPUTE_FACE_INDEX_SLOTS * Integer.BYTES * FrameSync.FRAMES_IN_FLIGHT);
-		this.modelComputeOutputBuffer = ENABLE_MODEL_COMPUTE_PROTOTYPE
-			? new ModelComputeOutputBuffer(device, MODEL_COMPUTE_OUTPUT_FRAME_BYTES * FrameSync.FRAMES_IN_FLIGHT)
-			: null;
-		this.modelComputePipeline = ENABLE_MODEL_COMPUTE_PROTOTYPE
-			? new ModelComputePipeline(device,
-				modelMeshArena.handle(), modelMeshArena.capacityBytes(),
-				modelInstanceBuffer.handle(), modelInstanceBuffer.frameBytes(),
-				modelFaceIndexBuffer.handle(), modelFaceIndexBuffer.frameBytes(),
-				modelComputeOutputBuffer.handle(), modelComputeOutputBuffer.frameBytes())
-			: null;
 	}
 
 	void setWireframe(Layer layer, boolean on)
 	{
 		wireframe[layer.ordinal()] = on;
-	}
-
-	void setModelComputeDebugDraw(boolean enabled)
-	{
-		modelComputeDebugDraw = false;
-	}
-
-	void setModelComputeReplacement(boolean enabled)
-	{
-		modelComputeReplacement = false;
 	}
 
 	void setLevelRange(int minLevel, int maxLevel)
@@ -397,30 +323,11 @@ final class SceneRenderer implements AutoCloseable
 		metrics.modelCacheEntries += modelCacheSize;
 		metrics.modelCacheHits += modelCacheHits;
 		metrics.modelCacheMisses += modelCacheMisses;
-		metrics.modelMeshBytes += modelMeshArena.usedBytes();
-		metrics.modelMeshCapacityBytes += modelMeshArena.capacityBytes();
-		metrics.modelInstances += modelInstanceCount;
-		metrics.modelInstanceMax += MAX_MODEL_INSTANCES;
-		metrics.modelInstanceOverflows += modelInstanceOverflowCount;
-		metrics.modelComputeOutputBytes += modelComputeOutputBuffer == null ? 0L : modelComputeOutputBuffer.totalBytes();
-		metrics.modelComputeDebugDraw |= modelComputeDebugDraw;
-		metrics.modelComputeDebugFaces += modelComputeDebugFaceSlots;
-		metrics.modelComputeClippedFaces += modelComputeClippedFaces;
-		metrics.modelComputeTrackedFaces += modelComputeTrackedFaces;
-		metrics.modelComputeCandidateFaces += modelComputeCandidateFaces;
-		metrics.modelComputeReplacedFaces += modelComputeReplacedFaces;
-		metrics.modelComputeReplacedSortedFaces += modelComputeReplacedSortedFaces;
-		metrics.modelComputeReplacedPriorityFaces += modelComputeReplacedPriorityFaces;
-		metrics.modelComputeSortedFaces += modelComputeSortedFaces;
-		metrics.modelComputePriorityFaces += modelComputePriorityFaces;
-		metrics.modelComputeTransparentFaces += modelComputeTransparentFaces;
-		metrics.modelComputeTexturedFaces += modelComputeTexturedFaces;
-		metrics.modelComputeBiasedFaces += modelComputeBiasedFaces;
-		metrics.modelComputeOverrideFaces += modelComputeOverrideFaces;
-		metrics.modelComputeActorFaces += modelComputeActorFaces;
 		metrics.sceneDrawCalls += stats.sceneDrawCalls.get();
 		metrics.sceneDrawVertices += stats.sceneDrawVertices.get();
 		metrics.scenePushConstants += stats.scenePushConstants.get();
+		metrics.roofSkipPairs += stats.roofSkipPairs.get();
+		metrics.overlayDirtyZones += stats.overlayDirtyZones.get();
 		metrics.overflowed |= overflowed;
 		metrics.sceneBufferBytes += TOTAL_BUFFER_BYTES;
 	}
@@ -461,60 +368,16 @@ final class SceneRenderer implements AutoCloseable
 		return true;
 	}
 
-	private ModelCacheEntry modelInfo(Model model, boolean uploadMesh)
+	private ModelCacheEntry modelInfo(int faceCount, byte[] faceTransparencies)
 	{
-		int faceCount = model.getFaceCount();
-		int vertexCount = model.getVerticesCount();
-		Object verticesX = model.getVerticesX();
-		Object verticesY = model.getVerticesY();
-		Object verticesZ = model.getVerticesZ();
-		Object faceIndices1 = model.getFaceIndices1();
-		Object faceIndices2 = model.getFaceIndices2();
-		Object faceIndices3 = model.getFaceIndices3();
-		Object faceColors1 = model.getFaceColors1();
-		Object faceColors2 = model.getFaceColors2();
-		Object faceColors3 = model.getFaceColors3();
-		Object faceTextures = model.getFaceTextures();
-		Object faceTransparencies = model.getFaceTransparencies();
-		Object faceBias = model.getFaceBias();
-		Object textureFaces = model.getTextureFaces();
-		Object texIndices1 = model.getTexIndices1();
-		Object texIndices2 = model.getTexIndices2();
-		Object texIndices3 = model.getTexIndices3();
-
-		int hash = 31 * faceCount + vertexCount;
-		hash = mix(hash, verticesX);
-		hash = mix(hash, verticesY);
-		hash = mix(hash, verticesZ);
-		hash = mix(hash, faceIndices1);
-		hash = mix(hash, faceIndices2);
-		hash = mix(hash, faceIndices3);
-		hash = mix(hash, faceColors1);
-		hash = mix(hash, faceColors2);
-		hash = mix(hash, faceColors3);
-		hash = mix(hash, faceTextures);
-		hash = mix(hash, faceTransparencies);
-		hash = mix(hash, faceBias);
-		hash = mix(hash, textureFaces);
-		hash = mix(hash, texIndices1);
-		hash = mix(hash, texIndices2);
-		hash = mix(hash, texIndices3);
+		int hash = 31 * faceCount + System.identityHashCode(faceTransparencies);
 
 		int bucket = hash & MODEL_CACHE_BUCKET_MASK;
 		for (ModelCacheEntry entry = modelCacheBuckets[bucket]; entry != null; entry = entry.next)
 		{
-			if (entry.matches(hash, faceCount, vertexCount,
-				verticesX, verticesY, verticesZ,
-				faceIndices1, faceIndices2, faceIndices3,
-				faceColors1, faceColors2, faceColors3,
-				faceTextures, faceTransparencies, faceBias,
-				textureFaces, texIndices1, texIndices2, texIndices3))
+			if (entry.matches(hash, faceCount, faceTransparencies))
 			{
 				modelCacheHits++;
-				if (uploadMesh && entry.meshOffset < 0L)
-				{
-					entry.uploadMesh(modelMeshArena);
-				}
 				return entry;
 			}
 		}
@@ -525,17 +388,7 @@ final class SceneRenderer implements AutoCloseable
 			clearModelCache();
 			bucket = hash & MODEL_CACHE_BUCKET_MASK;
 		}
-		ModelCacheEntry cached = new ModelCacheEntry(hash, faceCount, vertexCount,
-			verticesX, verticesY, verticesZ,
-			faceIndices1, faceIndices2, faceIndices3,
-			faceColors1, faceColors2, faceColors3,
-			faceTextures, faceTransparencies, faceBias,
-			textureFaces, texIndices1, texIndices2, texIndices3,
-			modelCacheBuckets[bucket]);
-		if (uploadMesh)
-		{
-			cached.uploadMesh(modelMeshArena);
-		}
+		ModelCacheEntry cached = new ModelCacheEntry(hash, faceCount, faceTransparencies, modelCacheBuckets[bucket]);
 		modelCacheBuckets[bucket] = cached;
 		modelCacheSize++;
 		return cached;
@@ -545,180 +398,6 @@ final class SceneRenderer implements AutoCloseable
 	{
 		java.util.Arrays.fill(modelCacheBuckets, null);
 		modelCacheSize = 0;
-		modelMeshArena.reset();
-	}
-
-	private void recordModelInstance(ModelCacheEntry modelInfo, int orient, int worldX, int worldY, int worldZ, int renderMode)
-	{
-		recordModelInstance(modelInfo, orient, worldX, worldY, worldZ, renderMode,
-			Math.max(0, modelInfo.faceCount), -1);
-	}
-
-	private void recordModelInstance(ModelCacheEntry modelInfo, int orient, int worldX, int worldY, int worldZ, int renderMode,
-		int requestedFaces, int faceIndexOffset)
-	{
-		if (modelInfo.meshOffset < 0L)
-		{
-			return;
-		}
-		if (!modelInstanceFrameActive)
-		{
-			modelInstanceOverflowCount++;
-			return;
-		}
-		if (modelInstanceCount >= MAX_MODEL_INSTANCES)
-		{
-			modelInstanceOverflowCount++;
-			return;
-		}
-		int outputFaceOffset = modelComputeOutputFaceCursor;
-		int outputFaceCount = Math.max(0, requestedFaces);
-		int remainingOutputFaces = MODEL_COMPUTE_OUTPUT_FACE_SLOTS - modelComputeOutputFaceCursor;
-		if (remainingOutputFaces <= 0)
-		{
-			modelComputeClippedFaces += outputFaceCount;
-			outputFaceCount = 0;
-		}
-		else if (outputFaceCount > remainingOutputFaces)
-		{
-			modelComputeClippedFaces += outputFaceCount - remainingOutputFaces;
-			outputFaceCount = remainingOutputFaces;
-		}
-		modelComputeOutputFaceCursor += outputFaceCount;
-		modelComputeMaxFacesPerInstance = Math.max(modelComputeMaxFacesPerInstance, outputFaceCount);
-		if (renderMode == Renderable.RENDERMODE_SORTED_NO_DEPTH && outputFaceCount > 0)
-		{
-			recordComputePriorityRange(outputFaceOffset, outputFaceOffset + outputFaceCount);
-		}
-		modelInstanceBuffer.write(modelInstanceCount, modelInfo, orient, worldX, worldY, worldZ, renderMode,
-			outputFaceOffset, outputFaceCount, faceIndexOffset);
-		if (!modelComputeDebugHasOrigin)
-		{
-			modelComputeDebugHasOrigin = true;
-			modelComputeDebugX = worldX;
-			modelComputeDebugY = worldY;
-			modelComputeDebugZ = worldZ;
-		}
-		modelInstanceCount++;
-	}
-
-	private static int mix(int hash, Object ref)
-	{
-		return hash * 31 + System.identityHashCode(ref);
-	}
-
-	private static int arrayLength(Object array)
-	{
-		if (array instanceof int[])
-		{
-			return ((int[]) array).length;
-		}
-		if (array instanceof byte[])
-		{
-			return ((byte[]) array).length;
-		}
-		return 0;
-	}
-
-	private static int align4(int value)
-	{
-		return (value + 3) & ~3;
-	}
-
-	private static long align4(long value)
-	{
-		return (value + 3L) & ~3L;
-	}
-
-	private static int addAligned(int offset, int bytes)
-	{
-		return align4(offset + bytes);
-	}
-
-	private static int floatBytes(Object array, int count)
-	{
-		return array == null ? 0 : count * Float.BYTES;
-	}
-
-	private static int intBytes(Object array, int count)
-	{
-		return array == null ? 0 : count * Integer.BYTES;
-	}
-
-	private static int shortBytes(Object array, int count)
-	{
-		return array == null ? 0 : count * Short.BYTES;
-	}
-
-	private static int byteBytes(Object array, int count)
-	{
-		return array == null ? 0 : count;
-	}
-
-	private static long writeFloatArray(long p, float[] values, int count)
-	{
-		if (values == null)
-		{
-			return p;
-		}
-		int n = Math.min(count, values.length);
-		for (int i = 0; i < n; i++)
-		{
-			MemoryUtil.memPutFloat(p, values[i]);
-			p += Float.BYTES;
-		}
-		return p;
-	}
-
-	private static long writeIntArray(long p, int[] values, int count)
-	{
-		if (values == null)
-		{
-			return p;
-		}
-		int n = Math.min(count, values.length);
-		for (int i = 0; i < n; i++)
-		{
-			MemoryUtil.memPutInt(p, values[i]);
-			p += Integer.BYTES;
-		}
-		return p;
-	}
-
-	private static long writeShortArray(long p, short[] values, int count)
-	{
-		if (values == null)
-		{
-			return p;
-		}
-		int n = Math.min(count, values.length);
-		for (int i = 0; i < n; i++)
-		{
-			MemoryUtil.memPutShort(p, values[i]);
-			p += Short.BYTES;
-		}
-		return p;
-	}
-
-	private static long writeByteArray(long p, byte[] values, int count)
-	{
-		if (values == null)
-		{
-			return p;
-		}
-		int n = Math.min(count, values.length);
-		for (int i = 0; i < n; i++)
-		{
-			MemoryUtil.memPutByte(p++, values[i]);
-		}
-		return p;
-	}
-
-	private static int writeModelMeshSectionOffset(long header, int headerIndex, int currentOffset)
-	{
-		currentOffset = align4(currentOffset);
-		MemoryUtil.memPutInt(header + (long) headerIndex * Integer.BYTES, currentOffset);
-		return currentOffset;
 	}
 
 	private static final class ModelCacheEntry
@@ -726,392 +405,25 @@ final class SceneRenderer implements AutoCloseable
 		ModelCacheEntry next;
 		final int hash;
 		final int faceCount;
-		final int vertexCount;
-		final Object verticesX, verticesY, verticesZ;
-		final Object faceIndices1, faceIndices2, faceIndices3;
-		final Object faceColors1, faceColors2, faceColors3;
-		final Object faceTextures, faceTransparencies, faceBias;
-		final Object textureFaces, texIndices1, texIndices2, texIndices3;
-		long meshOffset = -1L;
-		int meshBytes;
+		final byte[] faceTransparencies;
 		final int transparentFaces;
 		final boolean hasTransparentFaces;
-		final int texturedFaces;
-		final int biasedFaces;
-		final int flags;
 
-		ModelCacheEntry(int hash, int faceCount, int vertexCount,
-			Object verticesX, Object verticesY, Object verticesZ,
-			Object faceIndices1, Object faceIndices2, Object faceIndices3,
-			Object faceColors1, Object faceColors2, Object faceColors3,
-			Object faceTextures, Object faceTransparencies, Object faceBias,
-			Object textureFaces, Object texIndices1, Object texIndices2, Object texIndices3,
-			ModelCacheEntry next)
+		ModelCacheEntry(int hash, int faceCount, byte[] faceTransparencies, ModelCacheEntry next)
 		{
 			this.next = next;
 			this.hash = hash;
 			this.faceCount = faceCount;
-			this.vertexCount = vertexCount;
-			this.verticesX = verticesX;
-			this.verticesY = verticesY;
-			this.verticesZ = verticesZ;
-			this.faceIndices1 = faceIndices1;
-			this.faceIndices2 = faceIndices2;
-			this.faceIndices3 = faceIndices3;
-			this.faceColors1 = faceColors1;
-			this.faceColors2 = faceColors2;
-			this.faceColors3 = faceColors3;
-			this.faceTextures = faceTextures;
 			this.faceTransparencies = faceTransparencies;
-			this.faceBias = faceBias;
-			this.textureFaces = textureFaces;
-			this.texIndices1 = texIndices1;
-			this.texIndices2 = texIndices2;
-			this.texIndices3 = texIndices3;
-			this.transparentFaces = countTransparentFaces(faceCount, (byte[]) faceTransparencies);
+			this.transparentFaces = countTransparentFaces(faceCount, faceTransparencies);
 			this.hasTransparentFaces = transparentFaces > 0;
-			this.texturedFaces = countTexturedFaces(faceCount, (short[]) faceTextures);
-			this.biasedFaces = countNonZeroBytes(faceCount, (byte[]) faceBias);
-			this.flags = (((short[]) faceTextures) != null ? 1 : 0)
-				| (((byte[]) textureFaces) != null
-					&& ((int[]) texIndices1) != null
-					&& ((int[]) texIndices2) != null
-					&& ((int[]) texIndices3) != null ? 2 : 0);
 		}
 
-		void uploadMesh(ModelMeshArena arena)
-		{
-			int bytes = meshBytes();
-			long offset = arena.allocate(bytes);
-			if (offset < 0L)
-			{
-				arena.reset();
-				offset = arena.allocate(bytes);
-				if (offset < 0L)
-				{
-					return;
-				}
-			}
-			long p = arena.address() + offset;
-			long header = p;
-			int sectionOffset = MODEL_MESH_HEADER_BYTES;
-			sectionOffset = writeModelMeshSectionOffset(header, 0, sectionOffset);
-			sectionOffset += floatBytes(verticesX, vertexCount);
-			sectionOffset = writeModelMeshSectionOffset(header, 1, sectionOffset);
-			sectionOffset += floatBytes(verticesY, vertexCount);
-			sectionOffset = writeModelMeshSectionOffset(header, 2, sectionOffset);
-			sectionOffset += floatBytes(verticesZ, vertexCount);
-			sectionOffset = writeModelMeshSectionOffset(header, 3, sectionOffset);
-			sectionOffset += intBytes(faceIndices1, faceCount);
-			sectionOffset = writeModelMeshSectionOffset(header, 4, sectionOffset);
-			sectionOffset += intBytes(faceIndices2, faceCount);
-			sectionOffset = writeModelMeshSectionOffset(header, 5, sectionOffset);
-			sectionOffset += intBytes(faceIndices3, faceCount);
-			sectionOffset = writeModelMeshSectionOffset(header, 6, sectionOffset);
-			sectionOffset += intBytes(faceColors1, faceCount);
-			sectionOffset = writeModelMeshSectionOffset(header, 7, sectionOffset);
-			sectionOffset += intBytes(faceColors2, faceCount);
-			sectionOffset = writeModelMeshSectionOffset(header, 8, sectionOffset);
-			sectionOffset += intBytes(faceColors3, faceCount);
-			sectionOffset = writeModelMeshSectionOffset(header, 9, sectionOffset);
-			sectionOffset += shortBytes(faceTextures, faceCount);
-			sectionOffset = writeModelMeshSectionOffset(header, 10, sectionOffset);
-			sectionOffset += byteBytes(faceTransparencies, faceCount);
-			sectionOffset = writeModelMeshSectionOffset(header, 11, sectionOffset);
-			sectionOffset += byteBytes(faceBias, faceCount);
-			sectionOffset = writeModelMeshSectionOffset(header, 12, sectionOffset);
-			sectionOffset += byteBytes(textureFaces, arrayLength(textureFaces));
-			sectionOffset = writeModelMeshSectionOffset(header, 13, sectionOffset);
-			sectionOffset += intBytes(texIndices1, arrayLength(texIndices1));
-			sectionOffset = writeModelMeshSectionOffset(header, 14, sectionOffset);
-			sectionOffset += intBytes(texIndices2, arrayLength(texIndices2));
-			sectionOffset = writeModelMeshSectionOffset(header, 15, sectionOffset);
-			p += MODEL_MESH_HEADER_BYTES;
-			p = writeFloatArray(p, (float[]) verticesX, vertexCount);
-			p = align4(p);
-			p = writeFloatArray(p, (float[]) verticesY, vertexCount);
-			p = align4(p);
-			p = writeFloatArray(p, (float[]) verticesZ, vertexCount);
-			p = align4(p);
-			p = writeIntArray(p, (int[]) faceIndices1, faceCount);
-			p = align4(p);
-			p = writeIntArray(p, (int[]) faceIndices2, faceCount);
-			p = align4(p);
-			p = writeIntArray(p, (int[]) faceIndices3, faceCount);
-			p = align4(p);
-			p = writeIntArray(p, (int[]) faceColors1, faceCount);
-			p = align4(p);
-			p = writeIntArray(p, (int[]) faceColors2, faceCount);
-			p = align4(p);
-			p = writeIntArray(p, (int[]) faceColors3, faceCount);
-			p = align4(p);
-			p = writeShortArray(p, (short[]) faceTextures, faceCount);
-			p = align4(p);
-			p = writeByteArray(p, (byte[]) faceTransparencies, faceCount);
-			p = align4(p);
-			p = writeByteArray(p, (byte[]) faceBias, faceCount);
-			p = align4(p);
-			p = writeByteArray(p, (byte[]) textureFaces, arrayLength(textureFaces));
-			p = align4(p);
-			p = writeIntArray(p, (int[]) texIndices1, arrayLength(texIndices1));
-			p = align4(p);
-			p = writeIntArray(p, (int[]) texIndices2, arrayLength(texIndices2));
-			p = align4(p);
-			writeIntArray(p, (int[]) texIndices3, arrayLength(texIndices3));
-			arena.flush(offset, bytes);
-			meshOffset = offset;
-			meshBytes = bytes;
-		}
-
-		private int meshBytes()
-		{
-			int bytes = MODEL_MESH_HEADER_BYTES;
-			bytes = addAligned(bytes, floatBytes(verticesX, vertexCount));
-			bytes = addAligned(bytes, floatBytes(verticesY, vertexCount));
-			bytes = addAligned(bytes, floatBytes(verticesZ, vertexCount));
-			bytes = addAligned(bytes, intBytes(faceIndices1, faceCount));
-			bytes = addAligned(bytes, intBytes(faceIndices2, faceCount));
-			bytes = addAligned(bytes, intBytes(faceIndices3, faceCount));
-			bytes = addAligned(bytes, intBytes(faceColors1, faceCount));
-			bytes = addAligned(bytes, intBytes(faceColors2, faceCount));
-			bytes = addAligned(bytes, intBytes(faceColors3, faceCount));
-			bytes = addAligned(bytes, shortBytes(faceTextures, faceCount));
-			bytes = addAligned(bytes, byteBytes(faceTransparencies, faceCount));
-			bytes = addAligned(bytes, byteBytes(faceBias, faceCount));
-			bytes = addAligned(bytes, byteBytes(textureFaces, arrayLength(textureFaces)));
-			bytes = addAligned(bytes, intBytes(texIndices1, arrayLength(texIndices1)));
-			bytes = addAligned(bytes, intBytes(texIndices2, arrayLength(texIndices2)));
-			bytes = addAligned(bytes, intBytes(texIndices3, arrayLength(texIndices3)));
-			return bytes;
-		}
-
-		boolean matches(int hash, int faceCount, int vertexCount,
-			Object verticesX, Object verticesY, Object verticesZ,
-			Object faceIndices1, Object faceIndices2, Object faceIndices3,
-			Object faceColors1, Object faceColors2, Object faceColors3,
-			Object faceTextures, Object faceTransparencies, Object faceBias,
-			Object textureFaces, Object texIndices1, Object texIndices2, Object texIndices3)
+		boolean matches(int hash, int faceCount, byte[] faceTransparencies)
 		{
 			return this.hash == hash
 				&& this.faceCount == faceCount
-				&& this.vertexCount == vertexCount
-				&& this.verticesX == verticesX
-				&& this.verticesY == verticesY
-				&& this.verticesZ == verticesZ
-				&& this.faceIndices1 == faceIndices1
-				&& this.faceIndices2 == faceIndices2
-				&& this.faceIndices3 == faceIndices3
-				&& this.faceColors1 == faceColors1
-				&& this.faceColors2 == faceColors2
-				&& this.faceColors3 == faceColors3
-				&& this.faceTextures == faceTextures
-				&& this.faceTransparencies == faceTransparencies
-				&& this.faceBias == faceBias
-				&& this.textureFaces == textureFaces
-				&& this.texIndices1 == texIndices1
-				&& this.texIndices2 == texIndices2
-				&& this.texIndices3 == texIndices3;
-		}
-	}
-
-	private static final class ModelMeshArena implements AutoCloseable
-	{
-		private final Buffer buffer;
-		private final long address;
-		private final long capacity;
-		private long used;
-
-		ModelMeshArena(VulkanDevice device, long capacity)
-		{
-			this.capacity = capacity;
-			this.buffer = new Buffer(device, capacity, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-			buffer.mapPersistent();
-			this.address = MemoryUtil.memAddress(buffer.mappedByteBuffer());
-		}
-
-		long allocate(int bytes)
-		{
-			int aligned = align4(bytes);
-			if (aligned <= 0 || used > capacity - aligned)
-			{
-				return -1L;
-			}
-			long offset = used;
-			used += aligned;
-			return offset;
-		}
-
-		void reset()
-		{
-			used = 0L;
-		}
-
-		void flush(long offset, int bytes)
-		{
-			buffer.flushRangeIfNeeded(offset, align4(bytes));
-		}
-
-		long address()
-		{
-			return address;
-		}
-
-		long usedBytes()
-		{
-			return used;
-		}
-
-		long capacityBytes()
-		{
-			return capacity;
-		}
-
-		long handle()
-		{
-			return buffer.handle();
-		}
-
-		@Override
-		public void close()
-		{
-			buffer.close();
-		}
-	}
-
-	private static final class ModelInstanceBuffer implements AutoCloseable
-	{
-		private final Buffer buffer;
-		private final long address;
-		private long frameAddress;
-
-		ModelInstanceBuffer(VulkanDevice device, long bytes)
-		{
-			this.buffer = new Buffer(device, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-			buffer.mapPersistent();
-			this.address = MemoryUtil.memAddress(buffer.mappedByteBuffer());
-		}
-
-		void beginFrame(int slot)
-		{
-			frameAddress = address + (long) slot * MAX_MODEL_INSTANCES * MODEL_INSTANCE_STRIDE;
-		}
-
-		long frameBytes()
-		{
-			return (long) MAX_MODEL_INSTANCES * MODEL_INSTANCE_STRIDE;
-		}
-
-		long handle()
-		{
-			return buffer.handle();
-		}
-
-		void write(int index, ModelCacheEntry model, int orient, int worldX, int worldY, int worldZ, int renderMode,
-			int outputFaceOffset, int outputFaceCount, int faceIndexOffset)
-		{
-			long p = frameAddress + (long) index * MODEL_INSTANCE_STRIDE;
-			MemoryUtil.memPutLong(p, model.meshOffset);
-			MemoryUtil.memPutInt(p + 8, model.meshBytes);
-			MemoryUtil.memPutInt(p + 12, model.faceCount);
-			MemoryUtil.memPutInt(p + 16, model.vertexCount);
-			MemoryUtil.memPutInt(p + 20, orient);
-			MemoryUtil.memPutInt(p + 24, worldX);
-			MemoryUtil.memPutInt(p + 28, worldY);
-			MemoryUtil.memPutInt(p + 32, worldZ);
-			MemoryUtil.memPutInt(p + 36, renderMode);
-			MemoryUtil.memPutInt(p + 40, outputFaceOffset);
-			MemoryUtil.memPutInt(p + 44, outputFaceCount);
-			MemoryUtil.memPutInt(p + 48, model.flags);
-			MemoryUtil.memPutInt(p + 52, faceIndexOffset);
-		}
-
-		@Override
-		public void close()
-		{
-			buffer.close();
-		}
-	}
-
-	private static final class ModelFaceIndexBuffer implements AutoCloseable
-	{
-		private final Buffer buffer;
-		private final long address;
-		private long frameAddress;
-
-		ModelFaceIndexBuffer(VulkanDevice device, long bytes)
-		{
-			this.buffer = new Buffer(device, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-			buffer.mapPersistent();
-			this.address = MemoryUtil.memAddress(buffer.mappedByteBuffer());
-		}
-
-		void beginFrame(int slot)
-		{
-			frameAddress = address + (long) slot * MODEL_COMPUTE_FACE_INDEX_SLOTS * Integer.BYTES;
-		}
-
-		long frameBytes()
-		{
-			return (long) MODEL_COMPUTE_FACE_INDEX_SLOTS * Integer.BYTES;
-		}
-
-		long handle()
-		{
-			return buffer.handle();
-		}
-
-		void write(int index, int value)
-		{
-			MemoryUtil.memPutInt(frameAddress + (long) index * Integer.BYTES, value);
-		}
-
-		@Override
-		public void close()
-		{
-			buffer.close();
-		}
-	}
-
-	private static final class ModelComputeOutputBuffer implements AutoCloseable
-	{
-		private final Buffer buffer;
-		private final long bytes;
-
-		ModelComputeOutputBuffer(VulkanDevice device, long bytes)
-		{
-			this.bytes = bytes;
-			this.buffer = new Buffer(device, bytes,
-				VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-		}
-
-		long frameBytes()
-		{
-			return MODEL_COMPUTE_OUTPUT_FRAME_BYTES;
-		}
-
-		long frameOffset(int slot)
-		{
-			return MODEL_COMPUTE_OUTPUT_FRAME_BYTES * slot;
-		}
-
-		long totalBytes()
-		{
-			return bytes;
-		}
-
-		long handle()
-		{
-			return buffer.handle();
-		}
-
-		@Override
-		public void close()
-		{
-			buffer.close();
+				&& this.faceTransparencies == faceTransparencies;
 		}
 	}
 
@@ -1131,32 +443,8 @@ final class SceneRenderer implements AutoCloseable
 		int slot = sync.currentFrame();
 		vertexCount = overlayNextVertex[slot];
 		useFrameWriteArena(slot, vertexCount);
-		modelInstanceBuffer.beginFrame(slot);
-		modelFaceIndexBuffer.beginFrame(slot);
-		modelInstanceCount = 0;
-		modelInstanceOverflowCount = 0;
-		modelInstanceFrameActive = true;
-		modelComputeDebugFaceSlots = 0;
-		modelComputeClippedFaces = 0;
-		modelComputeTrackedFaces = 0;
-		modelComputeCandidateFaces = 0;
-		modelComputeReplacedFaces = 0;
-		modelComputeReplacedSortedFaces = 0;
-		modelComputeReplacedPriorityFaces = 0;
-		modelComputeSortedFaces = 0;
-		modelComputePriorityFaces = 0;
-		modelComputeTransparentFaces = 0;
-		modelComputeTexturedFaces = 0;
-		modelComputeBiasedFaces = 0;
-		modelComputeOverrideFaces = 0;
-		modelComputeActorFaces = 0;
-		modelComputeOutputFaceCursor = 0;
-		modelComputeMaxFacesPerInstance = 0;
-		modelComputeFaceIndexCursor = 0;
-		modelComputeDebugHasOrigin = false;
 		overflowed = false;
 		priorityRangeCount = 0;
-		computePriorityRangeCount = 0;
 		dynamicOpaqueEnd = -1;
 	}
 
@@ -1964,58 +1252,16 @@ final class SceneRenderer implements AutoCloseable
 		boolean detailedStats = stats.isDetailedModelStats();
 		boolean prioritySort = renderMode == Renderable.RENDERMODE_SORTED_NO_DEPTH;
 		int priorityStart = prioritySort ? vertexCount : -1;
-		ModelCacheEntry modelInfo = modelInfo(m, false);
-		boolean needsFaceSort = prioritySort || modelInfo.hasTransparentFaces;
-		modelComputeTrackedFaces += modelInfo.faceCount;
-		if (needsFaceSort)
+		int faceCount = m.getFaceCount();
+		byte[] faceTransparencies = m.getFaceTransparencies();
+		if (!prioritySort && faceCount <= OPAQUE_UNSORTED_FACE_THRESHOLD
+			&& countTransparentFaces(faceCount, faceTransparencies) == 0)
 		{
-			modelComputeSortedFaces += modelInfo.faceCount;
-		}
-		if (prioritySort)
-		{
-			modelComputePriorityFaces += modelInfo.faceCount;
-		}
-		if (modelInfo.hasTransparentFaces)
-		{
-			modelComputeTransparentFaces += modelInfo.faceCount;
-		}
-		if (modelInfo.texturedFaces > 0)
-		{
-			modelComputeTexturedFaces += modelInfo.faceCount;
-		}
-		if (modelInfo.biasedFaces > 0)
-		{
-			modelComputeBiasedFaces += modelInfo.faceCount;
-		}
-		if ((m.getOverrideAmount() & 0xFF) != 0)
-		{
-			modelComputeOverrideFaces += modelInfo.faceCount;
-		}
-		if (actorModel)
-		{
-			modelComputeActorFaces += modelInfo.faceCount;
-		}
-		if (!actorModel && isModelComputeCandidate(m, modelInfo, needsFaceSort))
-		{
-			modelComputeCandidateFaces += modelInfo.faceCount;
-		}
-		boolean replaceWithCompute = modelComputeReplacement && !actorModel
-			&& isModelComputeCandidate(m, modelInfo, needsFaceSort);
-		boolean recordForCompute = modelComputeDebugDraw || replaceWithCompute;
-		if (recordForCompute)
-		{
-			if (modelInfo.meshOffset < 0L)
-			{
-				modelInfo.uploadMesh(modelMeshArena);
-			}
-			recordModelInstance(modelInfo, orient, worldX, worldY, worldZ, renderMode);
-		}
-		if (replaceWithCompute)
-		{
-			modelComputeReplacedFaces += modelInfo.faceCount;
-			recordPriorityRange(priorityStart);
+			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
 			return;
 		}
+		ModelCacheEntry modelInfo = modelInfo(faceCount, faceTransparencies);
+		boolean needsFaceSort = prioritySort || modelInfo.hasTransparentFaces;
 		if (!needsFaceSort && modelInfo.faceCount <= OPAQUE_UNSORTED_FACE_THRESHOLD)
 		{
 			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
@@ -2070,35 +1316,6 @@ final class SceneRenderer implements AutoCloseable
 			recordPriorityRange(priorityStart);
 			return;
 		}
-		boolean replaceSortedWithCompute = modelComputeReplacement && !actorModel
-			&& (m.getOverrideAmount() & 0xFF) == 0;
-		if (replaceSortedWithCompute)
-		{
-			if (modelComputeFaceIndexCursor <= MODEL_COMPUTE_FACE_INDEX_SLOTS - faces)
-			{
-				if (modelInfo.meshOffset < 0L)
-				{
-					modelInfo.uploadMesh(modelMeshArena);
-				}
-				int faceIndexOffset = modelComputeFaceIndexCursor;
-				for (int i = 0; i < faces; i++)
-				{
-					modelFaceIndexBuffer.write(faceIndexOffset + i, sorter.sortedFaces[i]);
-				}
-				modelComputeFaceIndexCursor += faces;
-				recordModelInstance(modelInfo, orient, worldX, worldY, worldZ, renderMode,
-					faces, faceIndexOffset);
-				modelComputeReplacedFaces += faces;
-				modelComputeReplacedSortedFaces += faces;
-				if (prioritySort)
-				{
-					modelComputeReplacedPriorityFaces += faces;
-				}
-				recordPriorityRange(priorityStart);
-				return;
-			}
-			modelInstanceOverflowCount++;
-		}
 		if (!reserveVertices(faces * 3)) return;
 
 		// Vertex positions are read by computeFaceUvs only; emit uses the
@@ -2119,7 +1336,6 @@ final class SceneRenderer implements AutoCloseable
 		int[]   texIndicesA    = m.getTexIndices1();
 		int[]   texIndicesB    = m.getTexIndices2();
 		int[]   texIndicesC    = m.getTexIndices3();
-		byte[]  faceTransparencies = m.getFaceTransparencies();
 		byte[]  faceBiasArr = m.getFaceBias();
 
 		final byte overrideAmount = m.getOverrideAmount();
@@ -2282,23 +1498,6 @@ final class SceneRenderer implements AutoCloseable
 		prioritySkipPairs[priorityRangeCount * 2] = start;
 		prioritySkipPairs[priorityRangeCount * 2 + 1] = vertexCount;
 		priorityRangeCount++;
-	}
-
-	private void recordComputePriorityRange(int startFace, int endFace)
-	{
-		if (endFace <= startFace)
-		{
-			return;
-		}
-		if (computePriorityRangeCount == computePriorityFaceStarts.length)
-		{
-			int newSize = computePriorityFaceStarts.length * 2;
-			computePriorityFaceStarts = java.util.Arrays.copyOf(computePriorityFaceStarts, newSize);
-			computePriorityFaceEnds = java.util.Arrays.copyOf(computePriorityFaceEnds, newSize);
-		}
-		computePriorityFaceStarts[computePriorityRangeCount] = startFace;
-		computePriorityFaceEnds[computePriorityRangeCount] = endFace;
-		computePriorityRangeCount++;
 	}
 
 	private boolean captureModelCullOnlyFused(Projection proj, Model m, int orientation, int wx, int wy, int wz)
@@ -2553,48 +1752,6 @@ final class SceneRenderer implements AutoCloseable
 		return transparent;
 	}
 
-	private static int countTexturedFaces(int faceCount, short[] textures)
-	{
-		if (textures == null)
-		{
-			return 0;
-		}
-		int textured = 0;
-		int faces = Math.min(faceCount, textures.length);
-		for (int i = 0; i < faces; i++)
-		{
-			if (textures[i] != -1)
-			{
-				textured++;
-			}
-		}
-		return textured;
-	}
-
-	private static int countNonZeroBytes(int faceCount, byte[] values)
-	{
-		if (values == null)
-		{
-			return 0;
-		}
-		int count = 0;
-		int faces = Math.min(faceCount, values.length);
-		for (int i = 0; i < faces; i++)
-		{
-			if (values[i] != 0)
-			{
-				count++;
-			}
-		}
-		return count;
-	}
-
-	private static boolean isModelComputeCandidate(Model model, ModelCacheEntry info, boolean needsFaceSort)
-	{
-		return !needsFaceSort
-			&& (model.getOverrideAmount() & 0xFF) == 0;
-	}
-
 	private final float[] uvScratch = new float[6];
 
 	/**
@@ -2726,6 +1883,8 @@ final class SceneRenderer implements AutoCloseable
 					}
 				}
 			}
+			stats.roofSkipPairs.addAndGet(skipPairs);
+			stats.overlayDirtyZones.addAndGet(overlaySlotHasZones[slot] ? countOverlayDirtyZones(slot) : 0);
 
 			ScenePipeline boundPipeline = null;
 			final int loMin = minPlane;
@@ -2758,6 +1917,10 @@ final class SceneRenderer implements AutoCloseable
 					vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, want.handle());
 					vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
 						want.layout(), 0, stack.longs(descriptorSet), null);
+					if (!repushConstantsEveryDraw)
+					{
+						pushDrawConstants(cmd, want.layout(), vertPush, fragPush);
+					}
 					boundPipeline = want;
 				}
 
@@ -2788,215 +1951,42 @@ final class SceneRenderer implements AutoCloseable
 				layerStart = regionEnd;
 			}
 
-			drawModelComputeReplacement(cmd, slot, vertPush, fragPush);
-
-			if (priorityRangeCount > 0 || computePriorityRangeCount > 0)
+			if (priorityRangeCount > 0)
 			{
 				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, priorityColorPipeline.handle());
 				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
 					priorityColorPipeline.layout(), 0, stack.longs(descriptorSet), null);
+				if (!repushConstantsEveryDraw)
+				{
+					pushDrawConstants(cmd, priorityColorPipeline.layout(), vertPush, fragPush);
+				}
 				drawPriorityRanges(cmd, slotFirstVertex, priorityColorPipeline.layout(), vertPush, fragPush);
-				drawModelComputePriorityRanges(cmd, slot, priorityColorPipeline.layout(), vertPush, fragPush);
 
 				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, priorityDepthPipeline.handle());
 				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
 					priorityDepthPipeline.layout(), 0, stack.longs(descriptorSet), null);
+				if (!repushConstantsEveryDraw)
+				{
+					pushDrawConstants(cmd, priorityDepthPipeline.layout(), vertPush, fragPush);
+				}
 				drawPriorityRanges(cmd, slotFirstVertex, priorityDepthPipeline.layout(), vertPush, fragPush);
-				drawModelComputePriorityRanges(cmd, slot, priorityDepthPipeline.layout(), vertPush, fragPush);
 			}
 
 			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, alphaPipeline.handle());
 			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
 				alphaPipeline.layout(), 0, stack.longs(descriptorSet), null);
+			if (!repushConstantsEveryDraw)
+			{
+				pushDrawConstants(cmd, alphaPipeline.layout(), vertPush, alphaFragPush);
+			}
 			drawAlphaPass(cmd, loMin, loMax, fullZoneRange, minZoneX, maxZoneX, minZoneZ, maxZoneZ,
 				skipScratch, skipPairs, loCur,
 				slot, staticFirstVertex, slotFirstVertex, alphaPipeline.layout(), vertPush, alphaFragPush);
-			drawModelComputeReplacementAlpha(cmd, slot, vertPush, alphaFragPush);
-			drawModelComputeDebug(cmd, slot, vertPush, fragPush);
 		}
 	}
 
 	void recordBeforeRenderPass(VkCommandBuffer cmd)
 	{
-		if (modelComputePipeline == null)
-		{
-			return;
-		}
-		modelComputePipeline.recordDispatch(cmd, sync.currentFrame(), modelInstanceCount,
-			modelComputeMaxFacesPerInstance, modelComputeDebugDraw && !modelComputeReplacement);
-		if (modelComputeDebugDraw || modelComputeReplacement)
-		{
-			try (MemoryStack stack = stackPush())
-			{
-				VkBufferMemoryBarrier.Buffer barrier = VkBufferMemoryBarrier.calloc(1, stack);
-				barrier.get(0)
-					.sType$Default()
-					.srcAccessMask(VK_ACCESS_SHADER_WRITE_BIT)
-					.dstAccessMask(VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT)
-					.srcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
-					.dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
-					.buffer(modelComputeOutputBuffer.handle())
-					.offset(modelComputeOutputBuffer.frameOffset(sync.currentFrame()))
-					.size(modelComputeOutputBuffer.frameBytes());
-				vkCmdPipelineBarrier(cmd,
-					VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-					VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
-					0, null, barrier, null);
-			}
-		}
-	}
-
-	private void drawModelComputeDebug(VkCommandBuffer cmd, int slot, ByteBuffer vertPush, ByteBuffer fragPush)
-	{
-		if (!modelComputeDebugDraw || modelComputeReplacement
-			|| modelComputeOutputBuffer == null || modelComputeDebugPipeline == null)
-		{
-			return;
-		}
-		int faceSlots = modelComputeOutputFaceCursor;
-		modelComputeDebugFaceSlots = faceSlots;
-		if (faceSlots <= 0)
-		{
-			return;
-		}
-		try (MemoryStack stack = stackPush())
-		{
-			vkCmdBindVertexBuffers(cmd, 0,
-				stack.longs(modelComputeOutputBuffer.handle()),
-				stack.longs(modelComputeOutputBuffer.frameOffset(slot)));
-			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, modelComputeDebugPipeline.handle());
-			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-				modelComputeDebugPipeline.layout(), 0, stack.longs(descriptorSet), null);
-			vkCmdPushConstants(cmd, modelComputeDebugPipeline.layout(), VK_SHADER_STAGE_VERTEX_BIT, 0, vertPush);
-			vkCmdPushConstants(cmd, modelComputeDebugPipeline.layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
-			vkCmdDraw(cmd, faceSlots * 3, 1, 0, 0);
-			vkCmdBindVertexBuffers(cmd, 0,
-				stack.longs(vbuf.handle()),
-				stack.longs(0L));
-		}
-	}
-
-	private void drawModelComputeReplacement(VkCommandBuffer cmd, int slot, ByteBuffer vertPush, ByteBuffer fragPush)
-	{
-		if (!modelComputeReplacement || modelComputeOutputBuffer == null || fillPipeline == null)
-		{
-			return;
-		}
-		int faceSlots = modelComputeOutputFaceCursor;
-		modelComputeDebugFaceSlots = faceSlots;
-		if (faceSlots <= 0)
-		{
-			return;
-		}
-		try (MemoryStack stack = stackPush())
-		{
-			vkCmdBindVertexBuffers(cmd, 0,
-				stack.longs(modelComputeOutputBuffer.handle()),
-				stack.longs(modelComputeOutputBuffer.frameOffset(slot)));
-			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, fillPipeline.handle());
-			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-				fillPipeline.layout(), 0, stack.longs(descriptorSet), null);
-			vkCmdPushConstants(cmd, fillPipeline.layout(), VK_SHADER_STAGE_VERTEX_BIT, 0, vertPush);
-			vkCmdPushConstants(cmd, fillPipeline.layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
-			drawComputeFaceRangeWithSkips(cmd, 0, faceSlots, fillPipeline.layout(), vertPush, fragPush);
-			vkCmdBindVertexBuffers(cmd, 0,
-				stack.longs(vbuf.handle()),
-				stack.longs(0L));
-		}
-	}
-
-	private void drawModelComputeReplacementAlpha(VkCommandBuffer cmd, int slot, ByteBuffer vertPush, ByteBuffer alphaFragPush)
-	{
-		if (!modelComputeReplacement || modelComputeOutputBuffer == null || alphaPipeline == null)
-		{
-			return;
-		}
-		int faceSlots = modelComputeOutputFaceCursor;
-		if (faceSlots <= 0)
-		{
-			return;
-		}
-		try (MemoryStack stack = stackPush())
-		{
-			vkCmdBindVertexBuffers(cmd, 0,
-				stack.longs(modelComputeOutputBuffer.handle()),
-				stack.longs(modelComputeOutputBuffer.frameOffset(slot)));
-			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, alphaPipeline.handle());
-			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-				alphaPipeline.layout(), 0, stack.longs(descriptorSet), null);
-			vkCmdPushConstants(cmd, alphaPipeline.layout(), VK_SHADER_STAGE_VERTEX_BIT, 0, vertPush);
-			vkCmdPushConstants(cmd, alphaPipeline.layout(), VK_SHADER_STAGE_FRAGMENT_BIT, 96, alphaFragPush);
-			drawComputeFaceRangeWithSkips(cmd, 0, faceSlots, alphaPipeline.layout(), vertPush, alphaFragPush);
-			vkCmdBindVertexBuffers(cmd, 0,
-				stack.longs(vbuf.handle()),
-				stack.longs(0L));
-		}
-	}
-
-	private void drawModelComputePriorityRanges(VkCommandBuffer cmd, int slot, long pipelineLayout,
-		ByteBuffer vertPush, ByteBuffer fragPush)
-	{
-		if (!modelComputeReplacement || modelComputeOutputBuffer == null || computePriorityRangeCount == 0)
-		{
-			return;
-		}
-		try (MemoryStack stack = stackPush())
-		{
-			vkCmdBindVertexBuffers(cmd, 0,
-				stack.longs(modelComputeOutputBuffer.handle()),
-				stack.longs(modelComputeOutputBuffer.frameOffset(slot)));
-			for (int i = 0; i < computePriorityRangeCount; i++)
-			{
-				int start = computePriorityFaceStarts[i];
-				int end = computePriorityFaceEnds[i];
-				if (end <= start)
-				{
-					continue;
-				}
-				vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, vertPush);
-				vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
-				vkCmdDraw(cmd, (end - start) * 3, 1, start * 3, 0);
-			}
-			vkCmdBindVertexBuffers(cmd, 0,
-				stack.longs(vbuf.handle()),
-				stack.longs(0L));
-		}
-	}
-
-	private void drawComputeFaceRangeWithSkips(VkCommandBuffer cmd, int startFace, int endFace,
-		long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
-	{
-		int cursor = startFace;
-		for (int i = 0; i < computePriorityRangeCount; i++)
-		{
-			int skipStart = Math.max(startFace, computePriorityFaceStarts[i]);
-			int skipEnd = Math.min(endFace, computePriorityFaceEnds[i]);
-			if (skipEnd <= skipStart)
-			{
-				continue;
-			}
-			if (cursor < skipStart)
-			{
-				drawComputeFaceRange(cmd, cursor, skipStart, pipelineLayout, vertPush, fragPush);
-			}
-			cursor = Math.max(cursor, skipEnd);
-		}
-		if (cursor < endFace)
-		{
-			drawComputeFaceRange(cmd, cursor, endFace, pipelineLayout, vertPush, fragPush);
-		}
-	}
-
-	private static void drawComputeFaceRange(VkCommandBuffer cmd, int startFace, int endFace,
-		long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
-	{
-		if (endFace <= startFace)
-		{
-			return;
-		}
-		vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, vertPush);
-		vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
-		vkCmdDraw(cmd, (endFace - startFace) * 3, 1, startFace * 3, 0);
 	}
 
 	private int layerStartFor(int layer)
@@ -3112,6 +2102,9 @@ final class SceneRenderer implements AutoCloseable
 			}
 		}
 
+		boolean mergeRanges = !applySkips || skipPairs == 0;
+		int mergedStart = -1;
+		int mergedEnd = -1;
 		for (int zx = minZoneX; zx <= maxZoneX; zx++)
 		{
 			for (int zz = minZoneZ; zz <= maxZoneZ; zz++)
@@ -3127,9 +2120,37 @@ final class SceneRenderer implements AutoCloseable
 					continue;
 				}
 				int start = zoneVertexStart[layer][plane][zoneIdx];
-				drawRange(cmd, start, start + count, skips, skipPairs, applySkips,
-					slotFirstVertex, pipelineLayout, vertPush, fragPush);
+				int end = start + count;
+				if (mergeRanges)
+				{
+					if (mergedStart < 0)
+					{
+						mergedStart = start;
+						mergedEnd = end;
+					}
+					else if (start == mergedEnd)
+					{
+						mergedEnd = end;
+					}
+					else
+					{
+						drawRange(cmd, mergedStart, mergedEnd, skips, 0, false,
+							slotFirstVertex, pipelineLayout, vertPush, fragPush);
+						mergedStart = start;
+						mergedEnd = end;
+					}
+				}
+				else
+				{
+					drawRange(cmd, start, end, skips, skipPairs, true,
+						slotFirstVertex, pipelineLayout, vertPush, fragPush);
+				}
 			}
+		}
+		if (mergedStart >= 0)
+		{
+			drawRange(cmd, mergedStart, mergedEnd, skips, 0, false,
+				slotFirstVertex, pipelineLayout, vertPush, fragPush);
 		}
 	}
 
@@ -3144,6 +2165,9 @@ final class SceneRenderer implements AutoCloseable
 			return;
 		}
 
+		boolean mergeRanges = !applySkips || skipPairs == 0;
+		int mergedStart = -1;
+		int mergedEnd = -1;
 		for (int zx = minZoneX; zx <= maxZoneX; zx++)
 		{
 			for (int zz = minZoneZ; zz <= maxZoneZ; zz++)
@@ -3159,9 +2183,37 @@ final class SceneRenderer implements AutoCloseable
 					continue;
 				}
 				int start = overlayZoneStart[slot][layer][plane][zoneIdx];
-				drawRange(cmd, start, start + count, skips, skipPairs, applySkips,
-					slotFirstVertex, pipelineLayout, vertPush, fragPush);
+				int end = start + count;
+				if (mergeRanges)
+				{
+					if (mergedStart < 0)
+					{
+						mergedStart = start;
+						mergedEnd = end;
+					}
+					else if (start == mergedEnd)
+					{
+						mergedEnd = end;
+					}
+					else
+					{
+						drawRange(cmd, mergedStart, mergedEnd, skips, 0, false,
+							slotFirstVertex, pipelineLayout, vertPush, fragPush);
+						mergedStart = start;
+						mergedEnd = end;
+					}
+				}
+				else
+				{
+					drawRange(cmd, start, end, skips, skipPairs, true,
+						slotFirstVertex, pipelineLayout, vertPush, fragPush);
+				}
 			}
+		}
+		if (mergedStart >= 0)
+		{
+			drawRange(cmd, mergedStart, mergedEnd, skips, 0, false,
+				slotFirstVertex, pipelineLayout, vertPush, fragPush);
 		}
 	}
 
@@ -3260,8 +2312,10 @@ final class SceneRenderer implements AutoCloseable
 
 		// LANDMINE (MoltenVK #2483): re-push every draw. Push constants can
 		// go undefined across consecutive draws without it.
-		vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,   0,  vertPush);
-		vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
+		if (repushConstantsEveryDraw)
+		{
+			pushDrawConstants(cmd, pipelineLayout, vertPush, fragPush);
+		}
 		vkCmdDraw(cmd, end - start, 1, slotFirstVertex + start, 0);
 		recordDrawCall(end - start);
 	}
@@ -3283,8 +2337,10 @@ final class SceneRenderer implements AutoCloseable
 				int n = Math.min(s, end) - cursor;
 				if (n > 0)
 				{
-					vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,   0,  vertPush);
-					vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
+					if (repushConstantsEveryDraw)
+					{
+						pushDrawConstants(cmd, pipelineLayout, vertPush, fragPush);
+					}
 					vkCmdDraw(cmd, n, 1, slotFirstVertex + cursor, 0);
 					recordDrawCall(n);
 				}
@@ -3294,18 +2350,39 @@ final class SceneRenderer implements AutoCloseable
 		}
 		if (cursor < end)
 		{
-			vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,   0,  vertPush);
-			vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
+			if (repushConstantsEveryDraw)
+			{
+				pushDrawConstants(cmd, pipelineLayout, vertPush, fragPush);
+			}
 			vkCmdDraw(cmd, end - cursor, 1, slotFirstVertex + cursor, 0);
 			recordDrawCall(end - cursor);
 		}
+	}
+
+	private void pushDrawConstants(VkCommandBuffer cmd, long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
+	{
+		vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, vertPush);
+		vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
+		stats.scenePushConstants.addAndGet(2);
 	}
 
 	private void recordDrawCall(int vertices)
 	{
 		stats.sceneDrawCalls.incrementAndGet();
 		stats.sceneDrawVertices.addAndGet(vertices);
-		stats.scenePushConstants.addAndGet(2);
+	}
+
+	private int countOverlayDirtyZones(int slot)
+	{
+		int count = 0;
+		for (int zoneIdx = 0; zoneIdx < ZONE_COUNT; zoneIdx++)
+		{
+			if (overlayZoneValid[slot][zoneIdx])
+			{
+				count++;
+			}
+		}
+		return count;
 	}
 
 	int vertexCount() { return vertexCount; }
@@ -3314,17 +2391,11 @@ final class SceneRenderer implements AutoCloseable
 	public void close()
 	{
 		vkDeviceWaitIdle(device.handle());
-		if (modelComputePipeline != null) modelComputePipeline.close();
-		if (modelComputeOutputBuffer != null) modelComputeOutputBuffer.close();
-		modelFaceIndexBuffer.close();
-		modelInstanceBuffer.close();
-		modelMeshArena.close();
 		vbuf.close();
 		fillPipeline.close();
 		alphaPipeline.close();
 		priorityColorPipeline.close();
 		priorityDepthPipeline.close();
-		if (modelComputeDebugPipeline != null) modelComputeDebugPipeline.close();
 		if (linePipeline != null) linePipeline.close();
 	}
 

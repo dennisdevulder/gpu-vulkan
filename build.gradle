@@ -22,14 +22,14 @@ repositories {
 }
 
 group = 'net.runelite.client.plugins.gpuvulkan'
-version = '1.0.0-SNAPSHOT'
+version = '0.1.0'
 
 java {
 	sourceCompatibility = JavaVersion.VERSION_11
 	targetCompatibility = JavaVersion.VERSION_11
 }
 
-def runeLiteVersion = 'latest.release'
+def runeLiteVersion = '1.12.27'
 def pluginMainClass = 'net.runelite.client.plugins.gpuvulkan.GpuVulkanPluginTest'
 def lwjglVersion = '3.3.2'
 def lwjglVulkanVersion = '3.3.2'
