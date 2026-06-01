@@ -143,7 +143,7 @@ final class ScenePipeline implements AutoCloseable
 			VkPipelineRasterizationStateCreateInfo raster =
 				VkPipelineRasterizationStateCreateInfo.calloc(stack).sType$Default()
 					.polygonMode(polygonMode)
-					.cullMode(VK_CULL_MODE_NONE)
+					.cullMode(polygonMode == VK_POLYGON_MODE_FILL ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE)
 					.frontFace(VK_FRONT_FACE_COUNTER_CLOCKWISE)
 					.lineWidth(1.0f);
 
