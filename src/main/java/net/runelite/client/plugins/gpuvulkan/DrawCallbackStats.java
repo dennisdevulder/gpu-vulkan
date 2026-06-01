@@ -25,6 +25,7 @@
 package net.runelite.client.plugins.gpuvulkan;
 
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Model;
@@ -184,6 +185,11 @@ final class DrawCallbackStats
 		return nanos / 1_000_000.0;
 	}
 
+	private static double maxMs(long nanos)
+	{
+		return nanos / 1_000_000.0;
+	}
+
 	void maybeLog()
 	{
 		if (!isEnabled())
@@ -196,19 +202,32 @@ final class DrawCallbackStats
 
 		long frameCount = frames.getAndSet(0);
 		long drawFrame = drawFrameNanos.getAndSet(0);
+		long maxDrawFrame = drawFrameNanos.getMaxAndReset();
 		long fenceWait = fenceWaitNanos.getAndSet(0);
+		long maxFenceWait = fenceWaitNanos.getMaxAndReset();
 		long uiUpload = uiUploadNanos.getAndSet(0);
+		long maxUiUpload = uiUploadNanos.getMaxAndReset();
 		long acquire = acquireNanos.getAndSet(0);
+		long maxAcquire = acquireNanos.getMaxAndReset();
 		long commandRecord = commandRecordNanos.getAndSet(0);
+		long maxCommandRecord = commandRecordNanos.getMaxAndReset();
 		long beforePass = beforeRenderPassNanos.getAndSet(0);
+		long maxBeforePass = beforeRenderPassNanos.getMaxAndReset();
 		long renderPass = renderPassNanos.getAndSet(0);
+		long maxRenderPass = renderPassNanos.getMaxAndReset();
 		long submit = submitNanos.getAndSet(0);
+		long maxSubmit = submitNanos.getMaxAndReset();
 		long present = presentNanos.getAndSet(0);
+		long maxPresent = presentNanos.getMaxAndReset();
 		long customDrawable = customDrawableNanos.getAndSet(0);
+		long maxCustomDrawable = customDrawableNanos.getMaxAndReset();
 		long drawSceneCount = drawScene.getAndSet(0);
 		long beginFrame = beginFrameNanos.getAndSet(0);
+		long maxBeginFrame = beginFrameNanos.getMaxAndReset();
 		long pendingCapture = pendingCaptureNanos.getAndSet(0);
+		long maxPendingCapture = pendingCaptureNanos.getMaxAndReset();
 		long sceneCapture = sceneCaptureNanos.getAndSet(0);
+		long maxSceneCapture = sceneCaptureNanos.getMaxAndReset();
 		long sceneDrawCallCount = sceneDrawCalls.getAndSet(0);
 		long sceneDrawVertexCount = sceneDrawVertices.getAndSet(0);
 		long scenePushConstantCount = scenePushConstants.getAndSet(0);
@@ -219,7 +238,7 @@ final class DrawCallbackStats
 		if (!detailedModelStats)
 		{
 			log.info(String.format(
-				"recon | scene=%d preSD=%d postSD=%d swap=%d load=%d | paint=%d tileModel=%d | zoneOpq=%d zoneAlpha=%d | dyn=%d temp=%d pass=%d single=%d | cam=(%.1f, %.1f, %.1f) plane=%d | anim=%d | submit: draws=%d drawVerts=%d pushes=%d roofSkips=%d overlayZones=%d uiBytes=%d readbackBytes=%d | cpu/frame avg ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f | scene avg ms: begin=%.2f pending=%.2f staticCaptureTotal=%.2f",
+				"recon | scene=%d preSD=%d postSD=%d swap=%d load=%d | paint=%d tileModel=%d | zoneOpq=%d zoneAlpha=%d | dyn=%d temp=%d pass=%d single=%d | cam=(%.1f, %.1f, %.1f) plane=%d | anim=%d | submit: draws=%d drawVerts=%d pushes=%d roofSkips=%d overlayZones=%d uiBytes=%d readbackBytes=%d | cpu/frame avg ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f | cpu max ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f | scene avg/max ms: begin=%.2f/%.2f pending=%.2f/%.2f staticCaptureTotal=%.2f max=%.2f",
 				drawSceneCount,
 				preSceneDraw.getAndSet(0),
 				postDrawScene.getAndSet(0),
@@ -252,9 +271,22 @@ final class DrawCallbackStats
 				avgMs(submit, frameCount),
 				avgMs(present, frameCount),
 				avgMs(customDrawable, frameCount),
+				maxMs(maxDrawFrame),
+				maxMs(maxFenceWait),
+				maxMs(maxUiUpload),
+				maxMs(maxAcquire),
+				maxMs(maxCommandRecord),
+				maxMs(maxBeforePass),
+				maxMs(maxRenderPass),
+				maxMs(maxSubmit),
+				maxMs(maxPresent),
+				maxMs(maxCustomDrawable),
 				avgMs(beginFrame, drawSceneCount),
+				maxMs(maxBeginFrame),
 				avgMs(pendingCapture, drawSceneCount),
-				totalMs(sceneCapture)
+				maxMs(maxPendingCapture),
+				totalMs(sceneCapture),
+				maxMs(maxSceneCapture)
 			));
 			return;
 		}
@@ -278,7 +310,7 @@ final class DrawCallbackStats
 		long overrideFaceCount = overrideEmitFaces.getAndSet(0);
 
 			log.info(String.format(
-				"recon | scene=%d preSD=%d postSD=%d swap=%d load=%d | paint=%d tileModel=%d | zoneOpq=%d zoneAlpha=%d | dyn=%d temp=%d pass=%d single=%d | dynVerts=%d dynFaces=%d maxF=%d | cam=(%.1f, %.1f, %.1f) plane=%d | anim=%d | submit: draws=%d drawVerts=%d pushes=%d roofSkips=%d overlayZones=%d uiBytes=%d readbackBytes=%d | cpu/frame avg ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f | scene avg ms: begin=%.2f pending=%.2f staticCaptureTotal=%.2f | model ms: sort=%.2f full=%.2f cull=%.2f emit=%.2f sortedEmit=%.2f unsortedEmit=%.2f uv=%.2f | models sorted=%d full=%d cull=%d unsorted=%d fallback=%d | faces sorted=%d unsorted=%d tex=%d override=%d fullTrans=%d",
+				"recon | scene=%d preSD=%d postSD=%d swap=%d load=%d | paint=%d tileModel=%d | zoneOpq=%d zoneAlpha=%d | dyn=%d temp=%d pass=%d single=%d | dynVerts=%d dynFaces=%d maxF=%d | cam=(%.1f, %.1f, %.1f) plane=%d | anim=%d | submit: draws=%d drawVerts=%d pushes=%d roofSkips=%d overlayZones=%d uiBytes=%d readbackBytes=%d | cpu/frame avg ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f | cpu max ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f | scene avg/max ms: begin=%.2f/%.2f pending=%.2f/%.2f staticCaptureTotal=%.2f max=%.2f | model ms: sort=%.2f full=%.2f cull=%.2f emit=%.2f sortedEmit=%.2f unsortedEmit=%.2f uv=%.2f | models sorted=%d full=%d cull=%d unsorted=%d fallback=%d | faces sorted=%d unsorted=%d tex=%d override=%d fullTrans=%d",
 			drawSceneCount,
 			preSceneDraw.getAndSet(0),
 			postDrawScene.getAndSet(0),
@@ -314,9 +346,22 @@ final class DrawCallbackStats
 			avgMs(submit, frameCount),
 				avgMs(present, frameCount),
 				avgMs(customDrawable, frameCount),
+				maxMs(maxDrawFrame),
+				maxMs(maxFenceWait),
+				maxMs(maxUiUpload),
+				maxMs(maxAcquire),
+				maxMs(maxCommandRecord),
+				maxMs(maxBeforePass),
+				maxMs(maxRenderPass),
+				maxMs(maxSubmit),
+				maxMs(maxPresent),
+				maxMs(maxCustomDrawable),
 				avgMs(beginFrame, drawSceneCount),
+				maxMs(maxBeginFrame),
 				avgMs(pendingCapture, drawSceneCount),
+				maxMs(maxPendingCapture),
 				totalMs(sceneCapture),
+				maxMs(maxSceneCapture),
 			totalMs(sort),
 			totalMs(fullSort),
 			totalMs(cullOnly),
@@ -375,6 +420,7 @@ final class DrawCallbackStats
 	final class Counter
 	{
 		private final LongAdder value = new LongAdder();
+		private final AtomicLong max = new AtomicLong();
 
 		void incrementAndGet()
 		{
@@ -389,6 +435,7 @@ final class DrawCallbackStats
 			if (isEnabled())
 			{
 				value.add(delta);
+				updateMax(delta);
 			}
 		}
 
@@ -414,6 +461,25 @@ final class DrawCallbackStats
 		long get()
 		{
 			return value.sum();
+		}
+
+		long getMaxAndReset()
+		{
+			return max.getAndSet(0L);
+		}
+
+		private void updateMax(long value)
+		{
+			long prev;
+			do
+			{
+				prev = max.get();
+				if (value <= prev)
+				{
+					return;
+				}
+			}
+			while (!max.compareAndSet(prev, value));
 		}
 	}
 }

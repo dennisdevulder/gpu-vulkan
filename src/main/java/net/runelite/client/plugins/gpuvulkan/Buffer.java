@@ -111,6 +111,11 @@ final class Buffer implements AutoCloseable
 		return size;
 	}
 
+	int memoryPropertyFlags()
+	{
+		return memoryPropertyFlags;
+	}
+
 	void mapPersistent()
 	{
 		try (MemoryStack stack = stackPush())

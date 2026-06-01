@@ -179,31 +179,37 @@ final class SceneRenderer implements AutoCloseable
 	private boolean rebuildingOverlayZone;
 	/** Sorted [start, end) pairs of vertex sub-ranges to skip this frame. */
 	private int[] skipScratch = new int[256];
+	private int[] overlaySkipScratch = new int[256];
+	private int[] combinedSkipScratch = new int[256];
 	private final boolean[] dirtyZones = new boolean[ZONE_COUNT];
 	private final int[] dirtyZoneSlotMask = new int[ZONE_COUNT];
 	private int dirtyZoneCount;
 
 	private int vertexCount;
 	private boolean overflowed;
+	private boolean recordSceneStats;
 
 	/** Renderables whose Model came back null during {@link #captureScene}
 	 *  — usually because the engine hasn't finished streaming the model
 	 *  yet on a freshly-loaded region. {@link #captureDynamicPending}
-	 *  retries each entry every frame and emits the loaded ones into the
-	 *  dynamic suffix; no GPU drain or static-buffer rewrite needed. */
+	 *  retries each entry every frame until the owning zone has been rebuilt
+	 *  into every frame slot. */
 	private static final class PendingRenderable
 	{
 		final Renderable r;
 		final int orient, x, y, z;
+		final int zone;
 		Model model;
+		boolean dirtyMarked;
 
-		PendingRenderable(Renderable r, int orient, int x, int y, int z)
+		PendingRenderable(Renderable r, int orient, int x, int y, int z, int zone)
 		{
 			this.r = r;
 			this.orient = orient;
 			this.x = x;
 			this.y = y;
 			this.z = z;
+			this.zone = zone;
 		}
 	}
 	private final java.util.ArrayList<PendingRenderable> pendingRenderables = new java.util.ArrayList<>();
@@ -245,7 +251,15 @@ final class SceneRenderer implements AutoCloseable
 		{
 			return;
 		}
-		int zone = zx * ZONES_PER_SIDE + zz;
+		markZoneDirty(zx * ZONES_PER_SIDE + zz);
+	}
+
+	private void markZoneDirty(int zone)
+	{
+		if (zone < 0 || zone >= ZONE_COUNT)
+		{
+			return;
+		}
 		if (!dirtyZones[zone])
 		{
 			dirtyZones[zone] = true;
@@ -930,11 +944,11 @@ final class SceneRenderer implements AutoCloseable
 		Model m = resolveModel(r);
 		if (m == null)
 		{
-			// Model not streamed yet — queue for per-frame retry in
-			// captureDynamicPending, no static-buffer rewrite needed.
+			// Model not streamed yet — retry until it can promote its zone
+			// through the per-slot overlay rebuild path.
 			if (pendingRenderables.size() < MAX_PENDING)
 			{
-				pendingRenderables.add(new PendingRenderable(r, orient, x, y, z));
+				pendingRenderables.add(new PendingRenderable(r, orient, x, y, z, zoneForWorldPoint(x, z)));
 			}
 			return;
 		}
@@ -961,19 +975,49 @@ final class SceneRenderer implements AutoCloseable
 	void captureDynamicPending()
 	{
 		if (pendingRenderables.isEmpty()) return;
-		for (int i = 0, n = pendingRenderables.size(); i < n; i++)
+		for (int i = 0; i < pendingRenderables.size(); )
 		{
 			PendingRenderable pr = pendingRenderables.get(i);
 			Model m = pr.model;
 			if (m == null)
 			{
-				if (pr.r instanceof net.runelite.api.Actor) continue;
+				if (pr.r instanceof net.runelite.api.Actor)
+				{
+					i++;
+					continue;
+				}
 				m = resolveModel(pr.r);
-				if (m == null) continue;
+				if (m == null)
+				{
+					i++;
+					continue;
+				}
 				pr.model = m;
 			}
+			if (!pr.dirtyMarked)
+			{
+				markZoneDirty(pr.zone);
+				pr.dirtyMarked = true;
+			}
 			captureModel(m, pr.orient, pr.x, pr.y, pr.z);
+			if (pr.zone >= 0 && pr.zone < ZONE_COUNT && !dirtyZones[pr.zone])
+			{
+				pendingRenderables.remove(i);
+				continue;
+			}
+			i++;
 		}
+	}
+
+	private static int zoneForWorldPoint(int x, int z)
+	{
+		int sx = x >> 7;
+		int sz = z >> 7;
+		if (sx < 0 || sz < 0 || sx >= Constants.SCENE_SIZE || sz >= Constants.SCENE_SIZE)
+		{
+			return -1;
+		}
+		return (sx / ZONE_SIZE) * ZONES_PER_SIDE + (sz / ZONE_SIZE);
 	}
 
 	private void captureTilePaint(Scene scene, SceneTilePaint paint, int plane, int sx, int sy)
@@ -1819,6 +1863,7 @@ final class SceneRenderer implements AutoCloseable
 					int colorBlindMode, float colorBlindIntensity,
 					float smoothBanding)
 	{
+		recordSceneStats = stats.isEnabled();
 		if (vertexCount == 0) return;
 		// LANDMINE: bind at offset 0 and shift via firstVertex rather than
 		// byte-offset binding — MoltenVK's offset translation produces no
@@ -1883,8 +1928,11 @@ final class SceneRenderer implements AutoCloseable
 					}
 				}
 			}
-			stats.roofSkipPairs.addAndGet(skipPairs);
-			stats.overlayDirtyZones.addAndGet(overlaySlotHasZones[slot] ? countOverlayDirtyZones(slot) : 0);
+			if (recordSceneStats)
+			{
+				stats.roofSkipPairs.addAndGet(skipPairs);
+				stats.overlayDirtyZones.addAndGet(overlaySlotHasZones[slot] ? countOverlayDirtyZones(slot) : 0);
+			}
 
 			ScenePipeline boundPipeline = null;
 			final int loMin = minPlane;
@@ -2061,38 +2109,21 @@ final class SceneRenderer implements AutoCloseable
 
 		if (fullZoneRange)
 		{
-			if (overlaySlotHasZones[slot] && (!applySkips || skipPairs == 0))
-			{
-				int overlayPairs = 0;
-				for (int zoneIdx = 0; zoneIdx < ZONE_COUNT; zoneIdx++)
-				{
-					if (!overlayZoneValid[slot][zoneIdx])
-					{
-						continue;
-					}
-					int count = zoneVertexCount[layer][plane][zoneIdx];
-					if (count <= 0)
-					{
-						continue;
-					}
-					if (overlayPairs * 2 + 2 > skips.length)
-					{
-						skipScratch = java.util.Arrays.copyOf(skips, skips.length * 2);
-						skips = skipScratch;
-					}
-					int start = zoneVertexStart[layer][plane][zoneIdx];
-					skips[overlayPairs * 2] = start;
-					skips[overlayPairs * 2 + 1] = start + count;
-					overlayPairs++;
-				}
-				drawRange(cmd, planeStart, planeEnd, skips, overlayPairs, overlayPairs > 0,
-					slotFirstVertex, pipelineLayout, vertPush, fragPush);
-				return;
-			}
 			if (overlaySlotHasZones[slot])
 			{
-				// When roof skips are active, keep the simple per-zone path so
-				// roof and overlay skip lists cannot fight each other.
+				int overlayPairs = buildOverlayStaticSkipPairs(layer, plane, slot);
+				if (!applySkips || skipPairs == 0)
+				{
+					drawRange(cmd, planeStart, planeEnd, overlaySkipScratch, overlayPairs, overlayPairs > 0,
+						slotFirstVertex, pipelineLayout, vertPush, fragPush);
+				}
+				else
+				{
+					int combinedPairs = mergeSkipPairs(skips, skipPairs, overlaySkipScratch, overlayPairs);
+					drawRange(cmd, planeStart, planeEnd, combinedSkipScratch, combinedPairs, combinedPairs > 0,
+						slotFirstVertex, pipelineLayout, vertPush, fragPush);
+				}
+				return;
 			}
 			else
 			{
@@ -2152,6 +2183,93 @@ final class SceneRenderer implements AutoCloseable
 			drawRange(cmd, mergedStart, mergedEnd, skips, 0, false,
 				slotFirstVertex, pipelineLayout, vertPush, fragPush);
 		}
+	}
+
+	private int buildOverlayStaticSkipPairs(int layer, int plane, int slot)
+	{
+		int pairs = 0;
+		for (int zoneIdx = 0; zoneIdx < ZONE_COUNT; zoneIdx++)
+		{
+			if (!overlayZoneValid[slot][zoneIdx])
+			{
+				continue;
+			}
+			int count = zoneVertexCount[layer][plane][zoneIdx];
+			if (count <= 0)
+			{
+				continue;
+			}
+			if (pairs * 2 + 2 > overlaySkipScratch.length)
+			{
+				overlaySkipScratch = java.util.Arrays.copyOf(overlaySkipScratch, overlaySkipScratch.length * 2);
+			}
+			int start = zoneVertexStart[layer][plane][zoneIdx];
+			overlaySkipScratch[pairs * 2] = start;
+			overlaySkipScratch[pairs * 2 + 1] = start + count;
+			pairs++;
+		}
+		return pairs;
+	}
+
+	private int mergeSkipPairs(int[] a, int aPairs, int[] b, int bPairs)
+	{
+		int ai = 0;
+		int bi = 0;
+		int out = 0;
+		int pendingStart = -1;
+		int pendingEnd = -1;
+		while (ai < aPairs || bi < bPairs)
+		{
+			int start;
+			int end;
+			if (bi >= bPairs || (ai < aPairs && a[ai * 2] <= b[bi * 2]))
+			{
+				start = a[ai * 2];
+				end = a[ai * 2 + 1];
+				ai++;
+			}
+			else
+			{
+				start = b[bi * 2];
+				end = b[bi * 2 + 1];
+				bi++;
+			}
+			if (end <= start)
+			{
+				continue;
+			}
+			if (pendingStart < 0)
+			{
+				pendingStart = start;
+				pendingEnd = end;
+			}
+			else if (start <= pendingEnd)
+			{
+				pendingEnd = Math.max(pendingEnd, end);
+			}
+			else
+			{
+				out = writeCombinedSkipPair(out, pendingStart, pendingEnd);
+				pendingStart = start;
+				pendingEnd = end;
+			}
+		}
+		if (pendingStart >= 0)
+		{
+			out = writeCombinedSkipPair(out, pendingStart, pendingEnd);
+		}
+		return out;
+	}
+
+	private int writeCombinedSkipPair(int out, int start, int end)
+	{
+		if (out * 2 + 2 > combinedSkipScratch.length)
+		{
+			combinedSkipScratch = java.util.Arrays.copyOf(combinedSkipScratch, combinedSkipScratch.length * 2);
+		}
+		combinedSkipScratch[out * 2] = start;
+		combinedSkipScratch[out * 2 + 1] = end;
+		return out + 1;
 	}
 
 	private void drawOverlayPlane(VkCommandBuffer cmd, int layer, int plane,
@@ -2363,11 +2481,18 @@ final class SceneRenderer implements AutoCloseable
 	{
 		vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, vertPush);
 		vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
-		stats.scenePushConstants.addAndGet(2);
+		if (recordSceneStats)
+		{
+			stats.scenePushConstants.addAndGet(2);
+		}
 	}
 
 	private void recordDrawCall(int vertices)
 	{
+		if (!recordSceneStats)
+		{
+			return;
+		}
 		stats.sceneDrawCalls.incrementAndGet();
 		stats.sceneDrawVertices.addAndGet(vertices);
 	}

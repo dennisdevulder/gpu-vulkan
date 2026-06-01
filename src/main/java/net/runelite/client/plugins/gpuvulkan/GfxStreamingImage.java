@@ -34,6 +34,7 @@ import static org.lwjgl.vulkan.VK13.VK_FORMAT_B8G8R8A8_UNORM;
 import static org.lwjgl.vulkan.VK13.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 import static org.lwjgl.vulkan.VK13.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 import static org.lwjgl.vulkan.VK13.VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+import static org.lwjgl.vulkan.VK13.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 import static org.lwjgl.vulkan.VK13.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
 import static org.lwjgl.vulkan.VK13.vkDeviceWaitIdle;
 
@@ -62,6 +63,8 @@ final class GfxStreamingImage implements StreamingImage
 	private final int[][] dirtyRowStarts;
 	private final int[][] dirtyRowHeights;
 	private final int[] dirtyRangeCounts;
+	private final boolean dirtyRowsEnabled = Boolean.parseBoolean(System.getProperty("vkgpu.uiDirtyRows", "false"));
+	private final boolean cachedStaging = Boolean.parseBoolean(System.getProperty("vkgpu.uiCachedStaging", "false"));
 	private final boolean logDirtyRows = Boolean.parseBoolean(System.getProperty("vkgpu.uiDirtyStats", "false"));
 	private long nextDirtyLogNanos = System.nanoTime() + 1_000_000_000L;
 	private long dirtyLogFrames;
@@ -91,13 +94,15 @@ final class GfxStreamingImage implements StreamingImage
 			stagings[i] = new Buffer(device, sizeBytes,
 				VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
 				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
-				VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+				cachedStaging ? VK_MEMORY_PROPERTY_HOST_CACHED_BIT : VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 			stagings[i].mapPersistent();
-			previousPixels[i] = new int[width * height];
+			previousPixels[i] = dirtyRowsEnabled ? new int[width * height] : null;
 			needsFullUpload[i] = true;
 			dirtyRowStarts[i] = new int[height];
 			dirtyRowHeights[i] = new int[height];
 		}
+		log.debug("UI staging memory flags: 0x{} (cachedStaging={})",
+			Integer.toHexString(stagings[0].memoryPropertyFlags()), cachedStaging);
 	}
 
 	@Override
@@ -113,11 +118,18 @@ final class GfxStreamingImage implements StreamingImage
 		}
 
 		Buffer staging = stagings[slot];
+		int rowInts = rows * width;
+		if (!dirtyRowsEnabled)
+		{
+			fullUpload(slot, staging, pixels, null, rows, rowInts, false);
+			recordDirtyUploadStats(rows, rows, 1, true);
+			return;
+		}
+
 		int[] previous = previousPixels[slot];
 		if (needsFullUpload[slot])
 		{
-			int rowInts = rows * width;
-			fullUpload(slot, staging, pixels, previous, rows, rowInts);
+			fullUpload(slot, staging, pixels, previous, rows, rowInts, true);
 			needsFullUpload[slot] = false;
 			recordDirtyUploadStats(rows, rows, 1, true);
 			return;
@@ -125,7 +137,6 @@ final class GfxStreamingImage implements StreamingImage
 
 		int rangeCount = 0;
 		int dirtyRows = 0;
-		int rowInts = rows * width;
 		int flushStart = rowInts;
 		int flushEnd = 0;
 		for (int searchOffset = 0; searchOffset < rowInts; )
@@ -160,7 +171,7 @@ final class GfxStreamingImage implements StreamingImage
 
 		if (shouldFullUpload(rows, dirtyRows, rangeCount))
 		{
-			fullUpload(slot, staging, pixels, previous, rows, rowInts);
+			fullUpload(slot, staging, pixels, previous, rows, rowInts, true);
 			recordDirtyUploadStats(rows, rows, 1, true);
 			return;
 		}
@@ -174,10 +185,14 @@ final class GfxStreamingImage implements StreamingImage
 		recordDirtyUploadStats(rows, dirtyRows, rangeCount, false);
 	}
 
-	private void fullUpload(int slot, Buffer staging, int[] pixels, int[] previous, int rows, int rowInts)
+	private void fullUpload(int slot, Buffer staging, int[] pixels, int[] previous, int rows, int rowInts,
+							boolean updatePrevious)
 	{
 		staging.writeIntsUnflushed(pixels, 0, 0, rowInts);
-		System.arraycopy(pixels, 0, previous, 0, rowInts);
+		if (updatePrevious)
+		{
+			System.arraycopy(pixels, 0, previous, 0, rowInts);
+		}
 		dirtyRowStarts[slot][0] = 0;
 		dirtyRowHeights[slot][0] = rows;
 		dirtyRangeCounts[slot] = 1;
