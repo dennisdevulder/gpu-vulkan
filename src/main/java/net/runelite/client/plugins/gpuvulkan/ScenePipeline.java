@@ -66,18 +66,12 @@ import static org.lwjgl.vulkan.VK13.*;
  */
 final class ScenePipeline implements AutoCloseable
 {
-	// 12 × 4 bytes — vec3 position and vec3 color are bound as 4-component
-	// formats with a trailing dummy float, because MoltenVK's vec3 attribute
-	// alignment handling produces garbage values in the vertex shader on
-	// Metal (KhronosGroup/MoltenVK#2182). Padding to vec4-aligned bindings
-	// sidesteps the bug — the shader still declares vec3 inputs and Vulkan
-	// drops the unused W component, so Linux drivers are unaffected.
-	static final int VERTEX_STRIDE = 48;
-	static final int OFFSET_POS      = 0;   // vec3, padded to vec4 (16 bytes)
-	static final int OFFSET_COLOR    = 16;  // vec3, padded to vec4 (16 bytes)
-	static final int OFFSET_LIGHT    = 32;
-	static final int OFFSET_UV       = 36;
-	static final int OFFSET_TEXLAYER = 44;
+	// Stock GPU-style packed scene vertex:
+	//   short4 position, uint [alpha:8 | bias:8 | hsl:16], short4 texture/u/v.
+	static final int VERTEX_STRIDE = 20;
+	static final int OFFSET_POS      = 0;
+	static final int OFFSET_ABHSL    = 8;
+	static final int OFFSET_TEX_UV   = 12;
 
 	private final VulkanDevice device;
 	private final long descriptorSetLayout;
@@ -118,12 +112,10 @@ final class ScenePipeline implements AutoCloseable
 			VkVertexInputBindingDescription.Buffer binding = VkVertexInputBindingDescription.calloc(1, stack);
 			binding.get(0).binding(0).stride(VERTEX_STRIDE).inputRate(VK_VERTEX_INPUT_RATE_VERTEX);
 
-			VkVertexInputAttributeDescription.Buffer attrs = VkVertexInputAttributeDescription.calloc(5, stack);
-			attrs.get(0).binding(0).location(0).format(VK_FORMAT_R32G32B32A32_SFLOAT).offset(OFFSET_POS);
-			attrs.get(1).binding(0).location(1).format(VK_FORMAT_R32G32B32A32_SFLOAT).offset(OFFSET_COLOR);
-			attrs.get(2).binding(0).location(2).format(VK_FORMAT_R32_SFLOAT)         .offset(OFFSET_LIGHT);
-			attrs.get(3).binding(0).location(3).format(VK_FORMAT_R32G32_SFLOAT)      .offset(OFFSET_UV);
-			attrs.get(4).binding(0).location(4).format(VK_FORMAT_R32_UINT)           .offset(OFFSET_TEXLAYER);
+			VkVertexInputAttributeDescription.Buffer attrs = VkVertexInputAttributeDescription.calloc(3, stack);
+			attrs.get(0).binding(0).location(0).format(VK_FORMAT_R16G16B16A16_SINT).offset(OFFSET_POS);
+			attrs.get(1).binding(0).location(1).format(VK_FORMAT_R32_UINT).offset(OFFSET_ABHSL);
+			attrs.get(2).binding(0).location(2).format(VK_FORMAT_R16G16B16A16_SINT).offset(OFFSET_TEX_UV);
 
 			VkPipelineVertexInputStateCreateInfo vertexInput =
 				VkPipelineVertexInputStateCreateInfo.calloc(stack).sType$Default()
@@ -143,7 +135,7 @@ final class ScenePipeline implements AutoCloseable
 			VkPipelineRasterizationStateCreateInfo raster =
 				VkPipelineRasterizationStateCreateInfo.calloc(stack).sType$Default()
 					.polygonMode(polygonMode)
-					.cullMode(polygonMode == VK_POLYGON_MODE_FILL ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE)
+					.cullMode(polygonMode == VK_POLYGON_MODE_FILL && !forceBlend ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE)
 					.frontFace(VK_FRONT_FACE_COUNTER_CLOCKWISE)
 					.lineWidth(1.0f);
 

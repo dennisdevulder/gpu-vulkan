@@ -2438,53 +2438,21 @@ final class SceneRenderer implements AutoCloseable
 
 	private void writePackedVertex(float x, float y, float z, int hsl16, float u, float v, int texLayer)
 	{
-		int rgbOffset = (hsl16 & 0xFFFF) * 3;
-		// Raw HSL int as float: the frag shader re-decodes per-pixel for
-		// the banded look (smoothBanding=0); vColor is the pre-decoded
-		// RGB for the smooth look (smoothBanding=1). Vertex layout is
-		// padded to vec4 alignment for MoltenVK — see ScenePipeline.VERTEX_STRIDE.
-		float light = (float) (hsl16 & 0xFFFF);
-		writePackedVertexRgb(x, y, z, light, HSL_RGB[rgbOffset], HSL_RGB[rgbOffset + 1], HSL_RGB[rgbOffset + 2], u, v, texLayer);
+		writePackedVertexPacked(x, y, z, hsl16, u, v, texLayer);
 	}
 
 	private void writePackedVertexRgb(float x, float y, float z,
 									  float light, float r, float g, float b,
 									  float u, float v, int texLayer)
 	{
-		long p = writePtr;
-		MemoryUtil.memPutFloat(p, x);
-		MemoryUtil.memPutFloat(p + 4, y);
-		MemoryUtil.memPutFloat(p + 8, z);
-		MemoryUtil.memPutFloat(p + 12, 0f);
-		MemoryUtil.memPutFloat(p + 16, r);
-		MemoryUtil.memPutFloat(p + 20, g);
-		MemoryUtil.memPutFloat(p + 24, b);
-		MemoryUtil.memPutFloat(p + 28, 0f);
-		MemoryUtil.memPutFloat(p + 32, light);
-		MemoryUtil.memPutFloat(p + 36, u);
-		MemoryUtil.memPutFloat(p + 40, v);
-		MemoryUtil.memPutInt(p + 44, texLayer);
-		writePtr = p + ScenePipeline.VERTEX_STRIDE;
+		writePackedVertexPacked(x, y, z, (int) light, u, v, texLayer);
 	}
 
 	private void writePackedVertexRgbNoUv(float x, float y, float z,
 										  float light, float r, float g, float b,
 										  int texLayer)
 	{
-		long p = writePtr;
-		MemoryUtil.memPutFloat(p, x);
-		MemoryUtil.memPutFloat(p + 4, y);
-		MemoryUtil.memPutFloat(p + 8, z);
-		MemoryUtil.memPutFloat(p + 12, 0f);
-		MemoryUtil.memPutFloat(p + 16, r);
-		MemoryUtil.memPutFloat(p + 20, g);
-		MemoryUtil.memPutFloat(p + 24, b);
-		MemoryUtil.memPutFloat(p + 28, 0f);
-		MemoryUtil.memPutFloat(p + 32, light);
-		MemoryUtil.memPutFloat(p + 36, 0f);
-		MemoryUtil.memPutFloat(p + 40, 0f);
-		MemoryUtil.memPutInt(p + 44, texLayer);
-		writePtr = p + ScenePipeline.VERTEX_STRIDE;
+		writePackedVertexPacked(x, y, z, (int) light, 0f, 0f, texLayer);
 	}
 
 	private void writePackedTriangleRgbNoUv(float x0, float y0, float z0,
@@ -2506,19 +2474,35 @@ final class SceneRenderer implements AutoCloseable
 												   float light, float r, float g, float b,
 												   int texLayer)
 	{
-		MemoryUtil.memPutFloat(p, x);
-		MemoryUtil.memPutFloat(p + 4, y);
-		MemoryUtil.memPutFloat(p + 8, z);
-		MemoryUtil.memPutFloat(p + 12, 0f);
-		MemoryUtil.memPutFloat(p + 16, r);
-		MemoryUtil.memPutFloat(p + 20, g);
-		MemoryUtil.memPutFloat(p + 24, b);
-		MemoryUtil.memPutFloat(p + 28, 0f);
-		MemoryUtil.memPutFloat(p + 32, light);
-		MemoryUtil.memPutFloat(p + 36, 0f);
-		MemoryUtil.memPutFloat(p + 40, 0f);
-		MemoryUtil.memPutInt(p + 44, texLayer);
+		writePackedVertexPackedAt(p, x, y, z, (int) light, 0f, 0f, texLayer);
 	}
+
+	private void writePackedVertexPacked(float x, float y, float z, int hsl16, float u, float v, int texLayer)
+	{
+		long p = writePtr;
+		writePackedVertexPackedAt(p, x, y, z, hsl16, u, v, texLayer);
+		writePtr = p + ScenePipeline.VERTEX_STRIDE;
+	}
+
+	private static void writePackedVertexPackedAt(long p, float x, float y, float z,
+												  int hsl16, float u, float v, int texLayer)
+	{
+		MemoryUtil.memPutShort(p, clampShort(Math.round(x)));
+		MemoryUtil.memPutShort(p + 2, clampShort(Math.round(y)));
+		MemoryUtil.memPutShort(p + 4, clampShort(Math.round(z)));
+		MemoryUtil.memPutShort(p + 6, (short) 0);
+		MemoryUtil.memPutInt(p + 8, (texLayer & 0xFFFF0000) | (hsl16 & 0xFFFF));
+		MemoryUtil.memPutShort(p + 12, clampShort(texLayer & 0xFFFF));
+		MemoryUtil.memPutShort(p + 14, clampShort(Math.round(u * 256f)));
+		MemoryUtil.memPutShort(p + 16, clampShort(Math.round(v * 256f)));
+		MemoryUtil.memPutShort(p + 18, (short) 0);
+	}
+
+	private static short clampShort(int value)
+	{
+		return (short) (value < Short.MIN_VALUE ? Short.MIN_VALUE : Math.min(value, Short.MAX_VALUE));
+	}
+
 
 	/**
 	 * Per-component HSL lerp toward an override target. Mirrors stock

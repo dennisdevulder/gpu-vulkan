@@ -70,7 +70,7 @@ final class VulkanRenderer implements AutoCloseable
 	private final FrameSync sync;
 	private final DrawCallbackStats stats;
 	private final boolean skipScreenshotReadback =
-		Boolean.parseBoolean(System.getProperty("vkgpu.skipScreenshotReadback", "false"));
+		Boolean.parseBoolean(System.getProperty("vkgpu.skipScreenshotReadback", "true"));
 
 	private final Swapchain swapchain;
 	private final DepthBuffer depthBuffer;

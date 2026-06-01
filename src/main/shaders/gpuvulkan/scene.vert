@@ -1,7 +1,8 @@
 #version 450
 
-// Captured OSRS geometry. World-space positions packed on the CPU, transformed
-// here by an MVP push constant. UV + texLayer + light + bias passed through.
+// Captured OSRS geometry in the stock GPU-style packed layout. World-space
+// scene coordinates are stored as signed shorts; colour is packed HSL plus
+// alpha/bias; texture id and UV are signed shorts.
 //
 // Push layout:
 //   offset 0..63  : mat4 mvp                  (vertex)
@@ -30,11 +31,9 @@ layout(set = 0, binding = 1, std140) uniform TextureAnimations {
     vec4 anim[256];
 };
 
-layout(location = 0) in vec3 inPosition;
-layout(location = 1) in vec3 inColor;
-layout(location = 2) in float inLight;
-layout(location = 3) in vec2 inUv;
-layout(location = 4) in uint inTexLayer;
+layout(location = 0) in ivec4 inPosition;
+layout(location = 1) in uint inAlphaBiasHsl;
+layout(location = 2) in ivec4 inTextureUv;
 
 layout(location = 0) out vec3 vColor;
 layout(location = 1) out float vLight;
@@ -56,22 +55,63 @@ float fogFactorLinear(float dist, float start, float end) {
     return 1.0 - clamp((dist - start) / (end - start), 0.0, 1.0);
 }
 
+float hueToChannel(float p, float q, float t) {
+    if (t > 1.0) {
+        t -= 1.0;
+    } else if (t < 0.0) {
+        t += 1.0;
+    }
+    if (6.0 * t < 1.0) {
+        return p + (q - p) * 6.0 * t;
+    }
+    if (2.0 * t < 1.0) {
+        return q;
+    }
+    if (3.0 * t < 2.0) {
+        return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+    }
+    return p;
+}
+
+vec3 hslToRgb(int hslInt) {
+    int h = (hslInt >> 10) & 0x3F;
+    int s = (hslInt >> 7) & 0x07;
+    int l = hslInt & 0x7F;
+    float hue = float(h) / 64.0 + 0.0078125;
+    float sat = float(s) / 8.0 + 0.0625;
+    float lum = float(l) / 128.0;
+    float q = lum < 0.5 ? lum * (1.0 + sat) : lum + sat - lum * sat;
+    float p = 2.0 * lum - q;
+    return vec3(
+        hueToChannel(p, q, hue + 1.0 / 3.0),
+        hueToChannel(p, q, hue),
+        hueToChannel(p, q, hue - 1.0 / 3.0));
+}
+
 void main() {
-    vec4 clip = pc.mvp * vec4(inPosition, 1.0);
-    float bias = float((inTexLayer >> 16) & 0xFFu) / 128.0;
+    uint hsl = inAlphaBiasHsl & 0xFFFFu;
+    uint biasByte = (inAlphaBiasHsl >> 16) & 0xFFu;
+    vTrans = (inAlphaBiasHsl >> 24) & 0xFFu;
+
+    vec3 position = vec3(float(inPosition.x), float(inPosition.y), float(inPosition.z));
+    vec4 clip = pc.mvp * vec4(position, 1.0);
+    float bias = float(biasByte) / 128.0;
     clip.z += bias;
     gl_Position = clip;
-    vColor    = inColor;
-    vLight    = inLight;
-    vTexLayer = inTexLayer & 0xFFFFu;
-    vTrans    = (inTexLayer >> 24) & 0xFFu;
+
+    vColor = hslToRgb(int(hsl));
+    vLight = float(hsl);
+
+    int textureId = inTextureUv.x;
+    vTexLayer = textureId <= 0 ? 0u : uint(textureId);
 
     // Per-tick UV scroll for animated textures (water, lava, etc.). Anim
     // is in texels per tick; multiply by tick and the texel→UV unit to get
     // a UV offset. Sampler is REPEAT so we don't need to wrap manually.
     uint layer = vTexLayer;
     vec2 anim2 = (layer < 256u) ? anim[layer].xy : vec2(0.0);
-    vUv = inUv + float(pc.misc.x) * anim2 * TEXTURE_ANIM_UNIT;
+    vec2 uv = vec2(float(inTextureUv.y), float(inTextureUv.z)) / 256.0;
+    vUv = uv + float(pc.misc.x) * anim2 * TEXTURE_ANIM_UNIT;
 
     // Fog from distance-to-scene-edge with corner rounding.
     float cameraX = pc.fogVtx.x;
@@ -82,8 +122,8 @@ void main() {
     float fogEast  = min(FOG_SCENE_EDGE_MAX, cameraX + drawDistance);
     float fogSouth = max(FOG_SCENE_EDGE_MIN, cameraZ - drawDistance);
     float fogNorth = min(FOG_SCENE_EDGE_MAX, cameraZ + drawDistance);
-    float xDist = min(inPosition.x - fogWest, fogEast - inPosition.x);
-    float zDist = min(inPosition.z - fogSouth, fogNorth - inPosition.z);
+    float xDist = min(position.x - fogWest, fogEast - position.x);
+    float zDist = min(position.z - fogSouth, fogNorth - position.z);
     float nearest = min(xDist, zDist);
     float second  = max(xDist, zDist);
     float fogDist = nearest - FOG_CORNER_ROUNDING * TILE_SIZE *
