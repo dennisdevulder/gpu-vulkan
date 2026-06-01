@@ -597,10 +597,18 @@ final class VulkanRenderer implements AutoCloseable
 		private void recordCopy(VkCommandBuffer cmd, long image, int width, int height)
 		{
 			ensureBuffer(width, height);
+			// Layout the renderpass leaves the final color image in. On the
+			// custom Metal-present path the image stays in COLOR_ATTACHMENT_OPTIMAL
+			// (it's never WSI-presented); on the WSI path it's PRESENT_SRC_KHR.
+			// Must match RenderPass's finalColorLayout or the barrier's oldLayout
+			// is wrong (UB on MoltenVK, validation error elsewhere).
+			int presentLayout = device.supportsMetalObjects()
+				? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+				: KHRSwapchain.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 			try (MemoryStack stack = stackPush())
 			{
 				transition(stack, cmd, image,
-					KHRSwapchain.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+					presentLayout,
 					VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 					VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
 					VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -623,7 +631,7 @@ final class VulkanRenderer implements AutoCloseable
 
 				transition(stack, cmd, image,
 					VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-					KHRSwapchain.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+					presentLayout,
 					VK_PIPELINE_STAGE_TRANSFER_BIT,
 					VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
 					VK_ACCESS_TRANSFER_READ_BIT,

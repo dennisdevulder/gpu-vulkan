@@ -42,13 +42,13 @@ import static org.lwjgl.vulkan.VK13.*;
  *   <li>0: multi-sampled color (rendered into; not stored, drivers may keep
  *       it in tile memory).</li>
  *   <li>1: multi-sampled depth (rendered into; not stored).</li>
- *   <li>2: single-sampled resolve target = the swapchain image (driver
+ *   <li>2: single-sampled resolve target = the final color image (driver
  *       writes the resolved color into this at end-of-subpass; stored and
- *       transitioned to PRESENT_SRC).</li>
+ *       transitioned for either WSI present or custom Metal present).</li>
  * </ul>
  *
  * <p>When {@code samples == VK_SAMPLE_COUNT_1_BIT} we drop the resolve and
- * render directly into the swapchain image (attachment 0). Same renderpass
+ * render directly into the final color image (attachment 0). Same renderpass
  * shape used by stock GpuPlugin's FBO path.
  */
 final class RenderPass implements AutoCloseable
@@ -57,20 +57,23 @@ final class RenderPass implements AutoCloseable
 	private final long handle;
 	private final int samples;
 
-	RenderPass(VulkanDevice device, int colorFormat, int samples)
+	RenderPass(VulkanDevice device, int colorFormat, int samples, boolean swapchainPresent)
 	{
 		this.device = device;
 		this.samples = samples;
 		try (MemoryStack stack = stackPush())
 		{
 			boolean msaa = samples != VK_SAMPLE_COUNT_1_BIT;
+			int finalColorLayout = swapchainPresent
+				? KHRSwapchain.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+				: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 			int attachmentCount = msaa ? 3 : 2;
 			VkAttachmentDescription.Buffer attachments = VkAttachmentDescription.calloc(attachmentCount, stack);
 
 			// Attachment 0: color. With MSAA we render into the multi-sampled
 			// image then resolve out, so we don't need to store it. Without
-			// MSAA we render directly into the swapchain image so storeOp is
-			// STORE and finalLayout is PRESENT_SRC.
+			// MSAA we render directly into the final color image so storeOp is
+			// STORE and finalLayout matches the presentation path.
 			attachments.get(0)
 				.format(colorFormat)
 				.samples(samples)
@@ -81,7 +84,7 @@ final class RenderPass implements AutoCloseable
 				.initialLayout(VK_IMAGE_LAYOUT_UNDEFINED)
 				.finalLayout(msaa
 					? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-					: KHRSwapchain.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+					: finalColorLayout);
 
 			// Attachment 1: depth. Same sample count as color. Never stored.
 			attachments.get(1)
@@ -104,7 +107,7 @@ final class RenderPass implements AutoCloseable
 			VkAttachmentReference.Buffer resolveRef = null;
 			if (msaa)
 			{
-				// Attachment 2: resolve = single-sample swapchain image.
+				// Attachment 2: resolve = single-sample final color image.
 				attachments.get(2)
 					.format(colorFormat)
 					.samples(VK_SAMPLE_COUNT_1_BIT)
@@ -113,7 +116,7 @@ final class RenderPass implements AutoCloseable
 					.stencilLoadOp(VK_ATTACHMENT_LOAD_OP_DONT_CARE)
 					.stencilStoreOp(VK_ATTACHMENT_STORE_OP_DONT_CARE)
 					.initialLayout(VK_IMAGE_LAYOUT_UNDEFINED)
-					.finalLayout(KHRSwapchain.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+					.finalLayout(finalColorLayout);
 
 				resolveRef = VkAttachmentReference.calloc(1, stack);
 				resolveRef.get(0).attachment(2).layout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
