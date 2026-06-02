@@ -350,30 +350,10 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 				activeInstance = this;
 
 				client.setDrawCallbacks(this);
-				// ZBUF is what makes the engine traverse zones and fire
-				// drawZoneOpaque / drawDynamic; without it we only get
-				// drawScene / postDrawScene boundary markers.
-				int gpuFlags = DrawCallbacks.GPU | DrawCallbacks.ZBUF;
-				if (config.removeVertexSnapping()) gpuFlags |= DrawCallbacks.NO_VERTEX_SNAPPING;
-				client.setGpuFlags(gpuFlags);
-				client.setExpandedMapLoading(config.expandedMapLoadingChunks());
+				applyClientRuntimeConfig();
 				// Re-trigger BufferProvider so the canvas picks up an alpha
 				// channel; without it AWT paints opaque over our output.
 				client.resizeCanvas();
-
-				// Only call setUnlockedFps when we're actually opting in —
-				// never preemptively false, since that overrides a user-driven
-				// unlock from elsewhere. fpsTouched gates the shutdown undo.
-				int fpsTarget = Math.max(0, config.fpsTarget());
-				boolean unlockEngine =
-					config.fpsMode() == GpuVulkanPluginConfig.FpsMode.UNCAPPED
-					|| fpsTarget > 0;
-				if (unlockEngine)
-				{
-					client.setUnlockedFps(true);
-					client.setUnlockedFpsTarget(fpsTarget);
-					fpsTouched = true;
-				}
 
 				// Plugin enable mid-session: capture the already-loaded
 				// scene right away rather than waiting for the next chunk
@@ -553,10 +533,39 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		{
 			updateDebugOverlayRegistration();
 		}
+		if ("removeVertexSnapping".equals(ev.getKey())
+			|| "expandedMapLoadingChunks".equals(ev.getKey())
+			|| "fpsTarget".equals(ev.getKey()))
+		{
+			clientThread.invokeLater(this::applyClientRuntimeConfig);
+		}
 		if (renderExtensions != null)
 		{
 			renderExtensions.onConfigChanged(ev);
 		}
+	}
+
+	private void applyClientRuntimeConfig()
+	{
+		// ZBUF is what makes the engine traverse zones and fire
+		// drawZoneOpaque / drawDynamic; without it we only get
+		// drawScene / postDrawScene boundary markers.
+		int gpuFlags = DrawCallbacks.GPU | DrawCallbacks.ZBUF;
+		if (config.removeVertexSnapping())
+		{
+			gpuFlags |= DrawCallbacks.NO_VERTEX_SNAPPING;
+		}
+		client.setGpuFlags(gpuFlags);
+		client.setExpandedMapLoading(config.expandedMapLoadingChunks());
+
+		// Vulkan present mode is responsible for pacing. Keep the client
+		// engine unlocked in every FPS mode so VSYNC/FIFO can actually reach
+		// the display refresh instead of being limited by the stock 50 FPS
+		// game-loop cap before presentation.
+		int fpsTarget = Math.max(0, config.fpsTarget());
+		client.setUnlockedFps(true);
+		client.setUnlockedFpsTarget(fpsTarget);
+		fpsTouched = true;
 	}
 
 	@Subscribe

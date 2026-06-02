@@ -54,7 +54,7 @@ public interface GpuVulkanPluginConfig extends Config
 	@ConfigItem(
 		keyName = "validation",
 		name = "Validation layers",
-		description = "Enable VK_LAYER_KHRONOS_validation. Catches API misuse but adds overhead — leave on during development."
+		description = "Enable VK_LAYER_KHRONOS_validation. Catches API misuse but adds overhead. Plugin must be re-enabled to take effect."
 	)
 	default boolean validation()
 	{
@@ -90,13 +90,13 @@ public interface GpuVulkanPluginConfig extends Config
 		name = "FPS mode",
 		description = "Vsync = capped to refresh, no tearing. Adaptive vsync = vsync with single-frame tear when behind. Triple-buffer = decoupled render, no tearing. Uncapped = no vsync, tearing visible, max FPS for benchmarking. Plugin must be re-enabled for this to take effect."
 	)
-	default FpsMode fpsMode() { return FpsMode.TRIPLE_BUFFER; }
+	default FpsMode fpsMode() { return FpsMode.UNCAPPED; }
 
 	@Range(min = 0, max = 999)
 	@ConfigItem(
 		keyName = "fpsTarget",
 		name = "FPS target",
-		description = "Target engine FPS when the render path is unlocked. 0 = no target (engine default cap, or unbounded if FPS mode is UNCAPPED). Non-zero unlocks the engine and parks at the target rate, regardless of FPS mode."
+		description = "Optional engine FPS target. 0 = no target; presentation mode controls pacing. Applies immediately."
 	)
 	default int fpsTarget() { return 0; }
 
@@ -111,14 +111,14 @@ public interface GpuVulkanPluginConfig extends Config
 	@ConfigItem(
 		keyName = "expandedMapLoadingChunks",
 		name = "Expanded map loading (chunks)",
-		description = "Extra 8-tile chunks of map streamed in beyond the default loaded region. Lets a large draw distance show actual geometry past the default LoD edge. Matches stock GPU's option."
+		description = "Extra 8-tile chunks of map streamed in beyond the default loaded region. Applies immediately; visible geometry may change after the scene reloads."
 	)
 	default int expandedMapLoadingChunks() { return 3; }
 
 	@ConfigItem(
 		keyName = "removeVertexSnapping",
 		name = "Remove vertex snapping",
-		description = "Disable the legacy 1/128-tile vertex snap on animated entities. Smooths player/NPC animations. Matches stock GPU's option."
+		description = "Disable the legacy 1/128-tile vertex snap on animated entities. Applies immediately, but only animated models visibly change."
 	)
 	default boolean removeVertexSnapping() { return true; }
 
@@ -212,7 +212,9 @@ public interface GpuVulkanPluginConfig extends Config
 	@ConfigItem(
 		keyName = "detailedModelStats",
 		name = "Detailed model stats",
-		description = "Log and time per-model Vulkan capture work. Useful while profiling, but it adds CPU overhead."
+		description = "Log and time per-model Vulkan capture work. Useful while profiling, but it adds CPU overhead.",
+		section = DEBUG_SECTION,
+		position = 1
 	)
 	default boolean detailedModelStats()
 	{
@@ -238,7 +240,8 @@ public interface GpuVulkanPluginConfig extends Config
 		keyName = "debugOverlay",
 		name = "Debug overlay",
 		description = "Show Vulkan memory, scene capture, and callback diagnostics on screen.",
-		section = DEBUG_SECTION
+		section = DEBUG_SECTION,
+		position = 0
 	)
 	default boolean debugOverlay() { return false; }
 
