@@ -96,9 +96,6 @@ public interface VulkanRenderExtension extends AutoCloseable
 	 */
 	default void recordBeforeRenderPass(VkCommandBuffer commandBuffer) {}
 
-	/**
-	 * Record draw commands inside the backend render pass.
-	 */
 	default void recordRenderPass(VulkanFrameContext frame) {}
 
 	@Override

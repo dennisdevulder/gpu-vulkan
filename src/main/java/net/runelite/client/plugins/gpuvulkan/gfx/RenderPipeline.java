@@ -25,9 +25,7 @@
 package net.runelite.client.plugins.gpuvulkan.gfx;
 
 /**
- * A baked graphics pipeline: vertex layout, shader stages, blend / depth /
- * rasterizer state, push-constant ranges, descriptor set layouts, target
- * attachments. Created once at init time; bound at draw time via
+ * A baked graphics pipeline. Bound at draw time via
  * {@link RenderEncoder#bindPipeline(RenderPipeline)}.
  *
  * <p>Pipelines are tied to a specific render-pass shape. Recreating the

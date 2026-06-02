@@ -27,13 +27,9 @@ package net.runelite.client.plugins.gpuvulkan.gfx;
 import java.nio.ByteBuffer;
 
 /**
- * Records draw commands into the current frame's command stream. Acquired
- * implicitly by being inside a render pass — for now the layer doesn't
- * expose render-pass boundaries (the existing
- * {@code VulkanRenderer.recordClearPass} owns them) so consumers receive a
+ * Records draw commands into the current frame's command stream. The layer
+ * does not expose render-pass boundaries: consumers receive a
  * {@code RenderEncoder} that's already mid-pass and can issue draws.
- *
- * <p>Verbs are intentionally close to WebGPU's {@code GPURenderPassEncoder}.
  */
 public interface RenderEncoder
 {

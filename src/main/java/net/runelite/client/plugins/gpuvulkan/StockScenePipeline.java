@@ -54,11 +54,8 @@ import static org.lwjgl.system.MemoryUtil.memFree;
 import static org.lwjgl.vulkan.VK13.*;
 
 /**
- * Stock-style scene pipeline using RuneLite GPU's compact zone vertex layout.
- *
- * <p>This is the target pipeline for the performance-parity renderer. It is
- * intentionally not used by {@link SceneRenderer} yet; wiring comes after the
- * uploader can split static opaque/alpha zone geometry correctly.</p>
+ * Intentionally not used by {@link SceneRenderer} yet; wiring comes after the
+ * uploader can split static opaque/alpha zone geometry correctly.
  */
 final class StockScenePipeline implements AutoCloseable
 {

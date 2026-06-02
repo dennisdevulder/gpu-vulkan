@@ -27,11 +27,8 @@ package net.runelite.client.plugins.gpuvulkan;
 import java.nio.ByteBuffer;
 
 /**
- * CPU-side metadata for the stock-style zone renderer.
- *
- * <p>The OpenGL GPU plugin gets much of its speed from uploading static scene
- * geometry as zone-local opaque/alpha ranges. This class captures that shape
- * without affecting the current renderer.</p>
+ * Zone-local opaque/alpha vertex ranges for static scene geometry, mirroring
+ * the OpenGL plugin's layout. Not yet wired into the active renderer.
  */
 final class StockSceneGeometry
 {
@@ -144,6 +141,8 @@ final class StockSceneGeometry
 									int alpha, int bias)
 	{
 		int offset = vertexIndex * StockSceneVertexLayout.VERTEX_STRIDE;
+		Vk.require(offset >= 0 && offset + StockSceneVertexLayout.VERTEX_STRIDE <= dst.capacity(),
+			"stock-scene vertex " + vertexIndex + " overruns dst capacity " + dst.capacity());
 		dst.putShort(offset + StockSceneVertexLayout.OFFSET_POS, (short) (x - zoneBaseX));
 		dst.putShort(offset + StockSceneVertexLayout.OFFSET_POS + 2, (short) y);
 		dst.putShort(offset + StockSceneVertexLayout.OFFSET_POS + 4, (short) (z - zoneBaseZ));

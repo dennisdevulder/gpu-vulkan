@@ -37,13 +37,7 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK13.*;
 
 /**
- * Thin wrapper over a command buffer that is already mid-render-pass. Each
- * method records exactly one Vulkan call; the verbosity reduction is in
- * what the consumer DOESN'T have to think about — pipeline layouts pulled
- * from the bound pipeline, descriptor sets routed to the current frame's
- * slot inside {@link GfxBindGroup}, viewport/scissor laid out for them.
- *
- * <p>Stack lifetime: {@link #pushConstants} and {@link #setViewport} /
+ * Stack lifetime: {@link #pushConstants} and {@link #setViewport} /
  * {@link #setScissor} stack-allocate their structs per call. Push-constants
  * are copied into the command buffer immediately; viewport/scissor structs
  * are read by {@code vkCmdSetViewport} / {@code vkCmdSetScissor} during the

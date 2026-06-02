@@ -8,3 +8,9 @@ out/
 hs_err_pid*.log
 replay_pid*.log
 *.class
+
+# Local agent/skill tooling — not part of the plugin
+.agents/
+skills-lock.json
+CLAUDE.md
+docs/

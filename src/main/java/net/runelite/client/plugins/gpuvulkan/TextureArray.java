@@ -162,18 +162,22 @@ final class TextureArray implements AutoCloseable
 		}
 		try
 		{
-			// Load at brightness=1.0 so dark pixels don't clamp to 0x000000,
-			// which the alpha-from-zero encoding below would mark transparent.
-			// scene.frag re-applies brightness via push constant.
-			double savedBrightness = tp.getBrightness();
-			tp.setBrightness(1.0);
-			try
+			// null tp = empty texture set (layer 0 reserve only), nothing to upload.
+			if (tp != null)
 			{
-				uploadAllLayers(localPool, osrsTextures, tp);
-			}
-			finally
-			{
-				tp.setBrightness(savedBrightness);
+				// Load at brightness=1.0 so dark pixels don't clamp to 0x000000,
+				// which the alpha-from-zero encoding below would mark transparent.
+				// scene.frag re-applies brightness via push constant.
+				double savedBrightness = tp.getBrightness();
+				tp.setBrightness(1.0);
+				try
+				{
+					uploadAllLayers(localPool, osrsTextures, tp);
+				}
+				finally
+				{
+					tp.setBrightness(savedBrightness);
+				}
 			}
 		}
 		finally
@@ -393,8 +397,10 @@ final class TextureArray implements AutoCloseable
 				VkSubmitInfo submit = VkSubmitInfo.calloc(stack)
 					.sType$Default()
 					.pCommandBuffers(stack.pointers(cmd));
-				vkQueueSubmit(device.graphicsQueue(), submit, VK_NULL_HANDLE);
-				vkQueueWaitIdle(device.graphicsQueue());
+				Vk.check("vkQueueSubmit (textureArray upload)",
+					vkQueueSubmit(device.graphicsQueue(), submit, VK_NULL_HANDLE));
+				Vk.check("vkQueueWaitIdle (textureArray upload)",
+					vkQueueWaitIdle(device.graphicsQueue()));
 
 				vkFreeCommandBuffers(device.handle(), commandPool, cmd);
 			}

@@ -77,6 +77,8 @@ final class DepthBuffer implements AutoCloseable
 
 	private void create(int width, int height)
 	{
+		Vk.require(width > 0 && height > 0,
+			"depth buffer extent must be positive, got " + width + "x" + height);
 		try (MemoryStack stack = stackPush())
 		{
 			VkImageCreateInfo info = VkImageCreateInfo.calloc(stack)

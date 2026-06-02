@@ -46,13 +46,6 @@ import org.lwjgl.vulkan.VkShaderModuleCreateInfo;
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK13.*;
 
-/**
- * Wrapper implementation of the {@code gfx} {@link Renderer} interface.
- * Adopts an already-constructed {@link VulkanDevice} / {@link FrameSync} /
- * {@link RenderPass}; produces resources backed by the existing
- * {@link Texture} / {@link Buffer} wrappers plus the gfx-local
- * {@link GfxRenderPipeline} / {@link GfxBindGroup} / {@link GfxStreamingImage}.
- */
 final class GfxRenderer implements Renderer
 {
 	private final VulkanDevice device;
@@ -155,9 +148,7 @@ final class GfxRenderer implements Renderer
 	public void close()
 	{
 		// Adopted handles are not closed here; their owners (Disposables
-		// stack in GpuVulkanPlugin) handle that. Future Phase 2 work moves
-		// instance/device/swapchain ownership into this layer; at that
-		// point close() destroys them.
+		// stack in GpuVulkanPlugin) handle that.
 	}
 
 	private static int vulkanDescriptorType(BindGroupLayoutDesc.BindingKind kind)

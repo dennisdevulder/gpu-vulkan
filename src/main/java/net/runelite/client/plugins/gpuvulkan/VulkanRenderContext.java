@@ -41,16 +41,8 @@ public interface VulkanRenderContext
 
 	GpuVulkanPluginConfig config();
 
-	/**
-	 * Shared rendering-device facade for creating bind groups, pipelines,
-	 * shader modules and streaming images.
-	 */
 	RenderDevice renderer();
 
-	/**
-	 * Creates an extension-owned scene renderer using the backend's current
-	 * Vulkan device, frame sync, render pass and texture array.
-	 */
 	VulkanSceneRenderer createSceneRenderer();
 
 	/**

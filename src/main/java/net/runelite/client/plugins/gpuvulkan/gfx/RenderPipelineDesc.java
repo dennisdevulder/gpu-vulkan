@@ -29,11 +29,7 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * Description used to build a {@link RenderPipeline}. Only the subset of
- * Vulkan pipeline state actually used by the migrated consumers is exposed
- * here — vertex layout, shader stages, depth/blend state, target attachment
- * info. Add more knobs as future consumers need them; don't expose every
- * Vulkan toggle preemptively.
+ * Description used to build a {@link RenderPipeline}.
  */
 public final class RenderPipelineDesc
 {
@@ -130,9 +126,7 @@ public final class RenderPipelineDesc
 			return this;
 		}
 
-		/** True (default) = pipeline targets the swapchain's main render pass.
-		 *  Today that's the only render pass the layer manages, so changing
-		 *  this is a no-op; included to keep the API honest about coupling. */
+		/** True (default) = pipeline targets the swapchain's main render pass. */
 		public Builder useSwapchainRenderPass(boolean on)
 		{
 			this.useSwapchainRenderPass = on;

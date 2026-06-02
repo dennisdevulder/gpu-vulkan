@@ -31,9 +31,7 @@ import java.util.List;
 /**
  * Description used to build a concrete {@link BindGroup} against a
  * {@link BindGroupLayout}. The resources bound here must match the layout's
- * declared bindings — currently only {@link StreamingImage}; other resource
- * kinds (uniform/storage buffers, sampled images) will be added as
- * consumers need them.
+ * declared bindings.
  */
 public final class BindGroupDesc
 {
