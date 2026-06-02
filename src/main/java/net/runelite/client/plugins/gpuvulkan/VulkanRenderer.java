@@ -89,7 +89,11 @@ final class VulkanRenderer implements AutoCloseable
 	private final long commandPool;
 	private final VkCommandBuffer[] commandBuffers;
 
+	private static final int SWAPCHAIN_REBUILD_STABLE_FRAMES = 2;
 	private boolean swapchainNeedsRebuild;
+	private int pendingSwapchainWidth = -1;
+	private int pendingSwapchainHeight = -1;
+	private int pendingSwapchainStableFrames;
 	private double cameraX, cameraY, cameraZ;
 	private double cameraPitch, cameraYaw;
 	private int viewportXOffset, viewportYOffset, viewportWidth = 1, viewportHeight = 1;
@@ -181,6 +185,10 @@ final class VulkanRenderer implements AutoCloseable
 	{
 		long frameStart = stats.startNanos();
 		stats.frames.incrementAndGet();
+		if (desiredWidth <= 0 || desiredHeight <= 0 || uiPixels == null || uiWidth <= 0 || uiHeight <= 0)
+		{
+			return;
+		}
 		// Lazy rebuild: only rebuild when the swap-chain itself reports it's
 		// out-of-date (via SUBOPTIMAL/OUT_OF_DATE from acquire or present).
 		// Eager size-check rebuilds caused worse problems: sidebar collapse
@@ -192,6 +200,10 @@ final class VulkanRenderer implements AutoCloseable
 		// stale swapchain and rebuild once after the resize cascade settles.
 		if (swapchainNeedsRebuild)
 		{
+			if (!swapchainTargetStable(desiredWidth, desiredHeight))
+			{
+				return;
+			}
 			rebuildSwapchain(desiredWidth, desiredHeight);
 		}
 		if (swapchain.width() == 0 || swapchain.height() == 0)
@@ -276,7 +288,7 @@ final class VulkanRenderer implements AutoCloseable
 
 		if (acq == VK_ERROR_OUT_OF_DATE_KHR)
 		{
-			rebuildSwapchain(desiredWidth, desiredHeight);
+			swapchainNeedsRebuild = true;
 			return;
 		}
 		if (acq != VK_SUCCESS && acq != VK_SUBOPTIMAL_KHR)
@@ -443,7 +455,28 @@ final class VulkanRenderer implements AutoCloseable
 		framebuffers.recreate(renderPass, swapchain, depthBuffer, msaaColor);
 		sync.recreateRenderFinished(swapchain.imageCount());
 		swapchainNeedsRebuild = false;
+		resetPendingSwapchainTarget();
 		log.debug("rebuildSwapchain -> {}x{}", swapchain.width(), swapchain.height());
+	}
+
+	private boolean swapchainTargetStable(int desiredWidth, int desiredHeight)
+	{
+		if (pendingSwapchainWidth != desiredWidth || pendingSwapchainHeight != desiredHeight)
+		{
+			pendingSwapchainWidth = desiredWidth;
+			pendingSwapchainHeight = desiredHeight;
+			pendingSwapchainStableFrames = 1;
+			return false;
+		}
+		pendingSwapchainStableFrames++;
+		return pendingSwapchainStableFrames >= SWAPCHAIN_REBUILD_STABLE_FRAMES;
+	}
+
+	private void resetPendingSwapchainTarget()
+	{
+		pendingSwapchainWidth = -1;
+		pendingSwapchainHeight = -1;
+		pendingSwapchainStableFrames = 0;
 	}
 
 	private void recordClearPass(MemoryStack stack, VkCommandBuffer cmd,
