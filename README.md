@@ -29,6 +29,8 @@ source tree.
 - **JDK 21 (Eclipse Temurin)** — this is what the project is developed
   and tested against. Get it from
   [Adoptium](https://adoptium.net/temurin/releases/?version=21).
+  The Gradle build still targets Java 11 bytecode so the plugin stays
+  compatible with RuneLite's plugin runtime.
 
   Other JDKs may work but watch out for **Fedora's
   `java-25-openjdk-headless` package** in particular — it ships without

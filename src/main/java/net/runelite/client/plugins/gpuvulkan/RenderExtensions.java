@@ -46,7 +46,7 @@ final class RenderExtensions implements AutoCloseable
 		this.context = context;
 	}
 
-	void register(VulkanRenderExtension extension)
+	synchronized void register(VulkanRenderExtension extension)
 	{
 		try
 		{
@@ -60,7 +60,7 @@ final class RenderExtensions implements AutoCloseable
 		}
 	}
 
-	void unregister(VulkanRenderExtension extension)
+	synchronized void unregister(VulkanRenderExtension extension)
 	{
 		if (extensions.remove(extension))
 		{
@@ -75,12 +75,12 @@ final class RenderExtensions implements AutoCloseable
 		}
 	}
 
-	void onConfigChanged(ConfigChanged event)
+	synchronized void onConfigChanged(ConfigChanged event)
 	{
 		forEachExtension("onConfigChanged", extension -> extension.onConfigChanged(event));
 	}
 
-	void beginFrame()
+	synchronized void beginFrame()
 	{
 		for (int i = 0; i < extensions.size(); )
 		{
@@ -98,12 +98,12 @@ final class RenderExtensions implements AutoCloseable
 		}
 	}
 
-	void captureScene(Scene scene)
+	synchronized void captureScene(Scene scene)
 	{
 		forEachExtension("captureScene", extension -> extension.captureScene(scene));
 	}
 
-	void captureDynamicPending()
+	synchronized void captureDynamicPending()
 	{
 		for (int i = 0; i < extensions.size(); )
 		{
@@ -121,27 +121,27 @@ final class RenderExtensions implements AutoCloseable
 		}
 	}
 
-	void invalidateCapturedScene()
+	synchronized void invalidateCapturedScene()
 	{
 		forEachExtension("invalidateCapturedScene", VulkanRenderExtension::invalidateCapturedScene);
 	}
 
-	void invalidateZone(Scene scene, int zx, int zz)
+	synchronized void invalidateZone(Scene scene, int zx, int zz)
 	{
 		forEachExtension("invalidateZone", extension -> extension.invalidateZone(scene, zx, zz));
 	}
 
-	void rebuildDirtyZones(Scene scene)
+	synchronized void rebuildDirtyZones(Scene scene)
 	{
 		forEachExtension("rebuildDirtyZones", extension -> extension.rebuildDirtyZones(scene));
 	}
 
-	void drawPass(int pass)
+	synchronized void drawPass(int pass)
 	{
 		forEachExtension("drawPass", extension -> extension.drawPass(pass));
 	}
 
-	void captureModel(Model model, int orientation, int worldX, int worldY, int worldZ)
+	synchronized void captureModel(Model model, int orientation, int worldX, int worldY, int worldZ)
 	{
 		for (int i = 0; i < extensions.size(); )
 		{
@@ -159,7 +159,7 @@ final class RenderExtensions implements AutoCloseable
 		}
 	}
 
-	void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ)
+	synchronized void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ)
 	{
 		for (int i = 0; i < extensions.size(); )
 		{
@@ -177,12 +177,12 @@ final class RenderExtensions implements AutoCloseable
 		}
 	}
 
-	void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ, int renderMode)
+	synchronized void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ, int renderMode)
 	{
 		captureModel(projection, model, orientation, worldX, worldY, worldZ, renderMode, false);
 	}
 
-	void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ,
+	synchronized void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ,
 		int renderMode, boolean actorModel)
 	{
 		for (int i = 0; i < extensions.size(); )
@@ -201,27 +201,27 @@ final class RenderExtensions implements AutoCloseable
 		}
 	}
 
-	void setLevelRange(int minLevel, int maxLevel)
+	synchronized void setLevelRange(int minLevel, int maxLevel)
 	{
 		forEachExtension("setLevelRange", extension -> extension.setLevelRange(minLevel, maxLevel));
 	}
 
-	void setLevelRange(int minLevel, int currentLevel, int maxLevel)
+	synchronized void setLevelRange(int minLevel, int currentLevel, int maxLevel)
 	{
 		forEachExtension("setLevelRange", extension -> extension.setLevelRange(minLevel, currentLevel, maxLevel));
 	}
 
-	void setHideRoofIds(Set<Integer> hideRoofIds)
+	synchronized void setHideRoofIds(Set<Integer> hideRoofIds)
 	{
 		forEachExtension("setHideRoofIds", extension -> extension.setHideRoofIds(hideRoofIds));
 	}
 
-	void collectDebugMetrics(GpuVulkanDebugMetrics metrics)
+	synchronized void collectDebugMetrics(GpuVulkanDebugMetrics metrics)
 	{
 		forEachExtension("collectDebugMetrics", extension -> extension.collectDebugMetrics(metrics));
 	}
 
-	void uploadUiPixels(int[] pixels, int width, int height)
+	synchronized void uploadUiPixels(int[] pixels, int width, int height)
 	{
 		for (int i = 0; i < extensions.size(); )
 		{
@@ -239,7 +239,7 @@ final class RenderExtensions implements AutoCloseable
 		}
 	}
 
-	void recordBeforeRenderPass(VkCommandBuffer commandBuffer)
+	synchronized void recordBeforeRenderPass(VkCommandBuffer commandBuffer)
 	{
 		for (int i = 0; i < extensions.size(); )
 		{
@@ -257,7 +257,7 @@ final class RenderExtensions implements AutoCloseable
 		}
 	}
 
-	void recordRenderPass(VulkanFrameContext frame)
+	synchronized void recordRenderPass(VulkanFrameContext frame)
 	{
 		for (int i = 0; i < extensions.size(); )
 		{
@@ -276,7 +276,7 @@ final class RenderExtensions implements AutoCloseable
 	}
 
 	@Override
-	public void close()
+	public synchronized void close()
 	{
 		List<VulkanRenderExtension> closing = new ArrayList<>(extensions);
 		Collections.reverse(closing);
