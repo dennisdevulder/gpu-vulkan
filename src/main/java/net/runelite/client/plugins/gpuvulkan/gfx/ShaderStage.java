@@ -31,8 +31,7 @@ import static org.lwjgl.vulkan.VK13.VK_SHADER_STAGE_VERTEX_BIT;
 /**
  * Shader stages a binding or push-constant range can be visible in. Combine
  * with {@code |} (the underlying values are Vulkan {@code VK_SHADER_STAGE_*}
- * bitmasks). Naming chosen to read at call sites:
- * {@code ShaderStage.VERTEX | ShaderStage.FRAGMENT}.
+ * bitmasks).
  */
 public final class ShaderStage
 {

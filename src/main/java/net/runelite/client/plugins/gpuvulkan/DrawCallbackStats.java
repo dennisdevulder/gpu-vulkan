@@ -46,7 +46,6 @@ final class DrawCallbackStats
 	private volatile boolean detailedModelStats;
 	private volatile boolean overlayStatsEnabled;
 
-	// Per-method call counters
 	final Counter drawScene = new Counter();
 	final Counter preSceneDraw = new Counter();
 	final Counter postDrawScene = new Counter();
@@ -63,7 +62,6 @@ final class DrawCallbackStats
 	final Counter drawSingle = new Counter();   // draw(Projection, Scene, Renderable, ...)
 	final Counter animate = new Counter();
 
-	// Aggregate model stats (for the methods carrying a Model)
 	final Counter totalDynamicVerts = new Counter();
 	final Counter totalDynamicFaces = new Counter();
 	final AtomicInteger maxDynamicFaces = new AtomicInteger();

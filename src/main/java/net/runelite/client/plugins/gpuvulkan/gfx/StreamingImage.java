@@ -29,10 +29,6 @@ package net.runelite.client.plugins.gpuvulkan.gfx;
  * holds {@code FRAMES_IN_FLIGHT} ping-pong textures plus the staging buffers
  * + descriptor cycle to avoid a write-while-read race; the consumer just
  * calls {@link #uploadPixels} each frame.
- *
- * <p>UI overlay is the canonical use case: RuneLite's
- * {@code BufferProvider.getPixels()} returns the canvas as a flat int[] of
- * ARGB pixels; we hand them here, the layer takes it from there.
  */
 public interface StreamingImage extends AutoCloseable
 {

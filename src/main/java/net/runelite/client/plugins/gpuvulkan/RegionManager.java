@@ -12,8 +12,7 @@ import net.runelite.api.Tile;
 import net.runelite.client.plugins.gpuvulkan.regions.Regions;
 
 /**
- * Strips out-of-region zones from a freshly-loaded {@link Scene}. Must
- * be called before geometry capture so the removed tiles are absent
+ * Must be called before geometry capture so the removed tiles are absent
  * from the per-frame draw.
  */
 final class RegionManager

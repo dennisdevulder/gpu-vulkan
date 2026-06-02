@@ -534,11 +534,6 @@ final class SceneRenderer implements AutoCloseable
 		void capture(Tile tile, int plane, int sx, int sy);
 	}
 
-	/**
-	 * Walks every tile and emits all static geometry — terrain, walls,
-	 * decorative objects, ground objects, and static game objects — into their
-	 * respective layer regions.
-	 */
 	void captureScene(Scene scene)
 	{
 		// Drain the GPU before rewriting the buffer; captureScene is rare

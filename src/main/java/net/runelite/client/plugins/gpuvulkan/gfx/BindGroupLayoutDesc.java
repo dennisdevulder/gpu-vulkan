@@ -29,13 +29,7 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * Description used to build a {@link BindGroupLayout}. Construct via
- * {@link #builder()}, list the bindings, hand to
- * {@link Renderer#createBindGroupLayout(BindGroupLayoutDesc)}.
- *
- * <p>Today's binding kinds are limited to what the migrated consumers need
- * (combined image samplers). Add new {@link BindingKind}s as future
- * pipelines demand them.
+ * Description used to build a {@link BindGroupLayout}.
  */
 public final class BindGroupLayoutDesc
 {
