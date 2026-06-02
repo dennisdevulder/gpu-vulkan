@@ -47,17 +47,35 @@ public final class BindGroupDesc
 		}
 	}
 
+	public static final class SampledImageEntry
+	{
+		public final int binding;
+		public final long imageView;
+		public final long sampler;
+
+		SampledImageEntry(int binding, long imageView, long sampler)
+		{
+			this.binding = binding;
+			this.imageView = imageView;
+			this.sampler = sampler;
+		}
+	}
+
 	private final BindGroupLayout layout;
 	private final List<StreamingImageEntry> streamingImages;
+	private final List<SampledImageEntry> sampledImages;
 
-	private BindGroupDesc(BindGroupLayout layout, List<StreamingImageEntry> streamingImages)
+	private BindGroupDesc(BindGroupLayout layout, List<StreamingImageEntry> streamingImages,
+		List<SampledImageEntry> sampledImages)
 	{
 		this.layout = layout;
 		this.streamingImages = Collections.unmodifiableList(streamingImages);
+		this.sampledImages = Collections.unmodifiableList(sampledImages);
 	}
 
 	public BindGroupLayout layout() { return layout; }
 	public List<StreamingImageEntry> streamingImages() { return streamingImages; }
+	public List<SampledImageEntry> sampledImages() { return sampledImages; }
 
 	public static Builder builder(BindGroupLayout layout) { return new Builder(layout); }
 
@@ -65,6 +83,7 @@ public final class BindGroupDesc
 	{
 		private final BindGroupLayout layout;
 		private final List<StreamingImageEntry> streamingImages = new ArrayList<>();
+		private final List<SampledImageEntry> sampledImages = new ArrayList<>();
 
 		Builder(BindGroupLayout layout) { this.layout = layout; }
 
@@ -74,9 +93,15 @@ public final class BindGroupDesc
 			return this;
 		}
 
+		public Builder sampledImage(int binding, long imageView, long sampler)
+		{
+			sampledImages.add(new SampledImageEntry(binding, imageView, sampler));
+			return this;
+		}
+
 		public BindGroupDesc build()
 		{
-			return new BindGroupDesc(layout, new ArrayList<>(streamingImages));
+			return new BindGroupDesc(layout, new ArrayList<>(streamingImages), new ArrayList<>(sampledImages));
 		}
 	}
 }

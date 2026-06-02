@@ -33,6 +33,7 @@ import java.nio.LongBuffer;
 import java.nio.ByteOrder;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.client.ui.DrawManager;
+import net.runelite.client.plugins.gpuvulkan.gfx.Renderer;
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.KHRSwapchain;
@@ -69,6 +70,8 @@ final class VulkanRenderer implements AutoCloseable
 	private final RenderExtensions renderExtensions;
 	private final FrameSync sync;
 	private final DrawCallbackStats stats;
+	private final GpuVulkanPluginConfig config;
+	private final Renderer gfx;
 	private final boolean skipScreenshotReadback =
 		Boolean.parseBoolean(System.getProperty("vkgpu.skipScreenshotReadback", "true"));
 
@@ -77,6 +80,9 @@ final class VulkanRenderer implements AutoCloseable
 	private final MsaaColorBuffer msaaColor; // null when MSAA is disabled
 	private final Framebuffers framebuffers;
 	private final ScreenshotReadback screenshotReadback;
+	private final RenderPass offscreenRenderPass;
+	private final FsrUpscaler fsrUpscaler;
+	private OffscreenSceneTarget offscreenScene;
 	private DrawManager drawManager;
 	/** macOS-only — custom-present path. Null on Linux (we use {@link #swapchain}). */
 	private final MetalDrawableSet metalDrawables;
@@ -115,7 +121,8 @@ final class VulkanRenderer implements AutoCloseable
 				   Swapchain swapchain, DepthBuffer depthBuffer,
 				   MsaaColorBuffer msaaColor,
 				   Framebuffers framebuffers, FrameSync sync,
-				   DrawCallbackStats stats)
+				   DrawCallbackStats stats, GpuVulkanPluginConfig config,
+				   Renderer gfx)
 	{
 		this.device = device;
 		this.renderPass = renderPass;
@@ -126,7 +133,20 @@ final class VulkanRenderer implements AutoCloseable
 		this.framebuffers = framebuffers;
 		this.sync = sync;
 		this.stats = stats;
+		this.config = config;
+		this.gfx = gfx;
 		this.screenshotReadback = new ScreenshotReadback(device);
+		if (config.upscalingMode() == GpuVulkanPluginConfig.UpscalingMode.FSR1
+			&& config.renderScale() < 100)
+		{
+			this.offscreenRenderPass = new RenderPass(device, swapchain.imageFormat(), renderPass.samples(), false);
+			this.fsrUpscaler = new FsrUpscaler(gfx);
+		}
+		else
+		{
+			this.offscreenRenderPass = null;
+			this.fsrUpscaler = null;
+		}
 		// On macOS the swapchain is still created (we need its surface
 		// capabilities for format selection and its initial extent), but
 		// vkAcquireNextImageKHR / vkQueuePresentKHR are bypassed — we
@@ -429,6 +449,19 @@ final class VulkanRenderer implements AutoCloseable
 		{
 			metalDrawables.close();
 		}
+		if (offscreenScene != null)
+		{
+			offscreenScene.close();
+			offscreenScene = null;
+		}
+		if (fsrUpscaler != null)
+		{
+			fsrUpscaler.close();
+		}
+		if (offscreenRenderPass != null)
+		{
+			offscreenRenderPass.close();
+		}
 		screenshotReadback.close();
 		// vkDestroyCommandPool implicitly frees all command buffers allocated
 		// from it (per spec). Don't pre-reset them: that was added as a
@@ -493,6 +526,18 @@ final class VulkanRenderer implements AutoCloseable
 		long start = stats.startNanos();
 		renderExtensions.recordBeforeRenderPass(cmd);
 		stats.addNanos(stats.beforeRenderPassNanos, start);
+
+		if (fsrUpscaler != null)
+		{
+			recordFsrUpscaledPass(stack, cmd, framebuffer, targetWidth, targetHeight);
+			if (!skipScreenshotReadback)
+			{
+				stats.screenshotReadbackBytes.addAndGet((long) targetWidth * targetHeight * Integer.BYTES);
+				screenshotReadback.recordCopy(cmd, targetImage, targetWidth, targetHeight);
+			}
+			Vk.check("vkEndCommandBuffer", vkEndCommandBuffer(cmd));
+			return;
+		}
 
 		// Two clears now: colour attachment then depth attachment, in the same
 		// order they were declared in the render pass. Depth clear = 0 because
@@ -613,6 +658,159 @@ final class VulkanRenderer implements AutoCloseable
 		}
 
 		Vk.check("vkEndCommandBuffer", vkEndCommandBuffer(cmd));
+	}
+
+	private void recordFsrUpscaledPass(MemoryStack stack, VkCommandBuffer cmd,
+									   long framebuffer, int targetWidth, int targetHeight)
+	{
+		int scalePct = Math.max(50, Math.min(100, config.renderScale()));
+		int lowWidth = Math.max(1, (targetWidth * scalePct) / 100);
+		int lowHeight = Math.max(1, (targetHeight * scalePct) / 100);
+		if (offscreenScene == null)
+		{
+			offscreenScene = new OffscreenSceneTarget(device, offscreenRenderPass,
+				lowWidth, lowHeight, swapchain.imageFormat(), renderPass.samples());
+		}
+		else
+		{
+			offscreenScene.recreate(lowWidth, lowHeight);
+		}
+
+		float skyR = ((skyboxColor >> 16) & 0xFF) / 255f;
+		float skyG = ((skyboxColor >>  8) & 0xFF) / 255f;
+		float skyB = ( skyboxColor        & 0xFF) / 255f;
+		VkClearValue.Buffer clears = VkClearValue.calloc(2, stack);
+		clears.get(0).color(c -> c.float32(0, skyR).float32(1, skyG).float32(2, skyB).float32(3, 1.0f));
+		clears.get(1).depthStencil(ds -> ds.depth(0.0f).stencil(0));
+
+		VkRenderPassBeginInfo sceneRp = VkRenderPassBeginInfo.calloc(stack)
+			.sType$Default()
+			.renderPass(offscreenRenderPass.handle())
+			.framebuffer(offscreenScene.framebuffer())
+			.renderArea(r -> r.offset(o -> o.set(0, 0)).extent(e -> e.set(lowWidth, lowHeight)))
+			.pClearValues(clears);
+		vkCmdBeginRenderPass(cmd, sceneRp, VK_SUBPASS_CONTENTS_INLINE);
+
+		VulkanFrameContext sceneFrame = setupSceneViewportAndFrame(stack, cmd, lowWidth, lowHeight);
+		renderExtensions.recordScenePass(sceneFrame);
+		vkCmdEndRenderPass(cmd);
+
+		transitionImage(stack, cmd, offscreenScene.colorImage(),
+			VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+			VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+			VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+			VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+			VK_ACCESS_SHADER_READ_BIT);
+
+		VkRenderPassBeginInfo mainRp = VkRenderPassBeginInfo.calloc(stack)
+			.sType$Default()
+			.renderPass(renderPass.handle())
+			.framebuffer(framebuffer)
+			.renderArea(r -> r.offset(o -> o.set(0, 0)).extent(e -> e.set(targetWidth, targetHeight)))
+			.pClearValues(clears);
+		vkCmdBeginRenderPass(cmd, mainRp, VK_SUBPASS_CONTENTS_INLINE);
+
+		fsrUpscaler.bindSource(offscreenScene.colorView(), offscreenScene.sampler());
+		fsrUpscaler.recordDraw(cmd, targetWidth, targetHeight,
+			offscreenScene.width(), offscreenScene.height(),
+			Math.max(0, Math.min(100, config.fsrSharpness())) / 100f);
+
+		VulkanFrameContext uiFrame = setupUiViewportAndFrame(stack, cmd, targetWidth, targetHeight);
+		renderExtensions.recordUiPass(uiFrame);
+		vkCmdEndRenderPass(cmd);
+	}
+
+	private VulkanFrameContext setupSceneViewportAndFrame(MemoryStack stack, VkCommandBuffer cmd,
+														  int targetWidth, int targetHeight)
+	{
+		float dpiX = (float) targetWidth  / Math.max(canvasWidth, 1);
+		float dpiY = (float) targetHeight / Math.max(canvasHeight, 1);
+		int sx = Math.max(Math.round(viewportXOffset * dpiX), 0);
+		int sy = Math.max(Math.round(viewportYOffset * dpiY), 0);
+		int sw = Math.max(Math.min(Math.round(viewportWidth  * dpiX), targetWidth  - sx), 1);
+		int sh = Math.max(Math.min(Math.round(viewportHeight * dpiY), targetHeight - sy), 1);
+
+		VkViewport.Buffer sceneVp = VkViewport.calloc(1, stack);
+		sceneVp.get(0)
+			.x(sx).y(sy)
+			.width(sw).height(sh)
+			.minDepth(0).maxDepth(1);
+		vkCmdSetViewport(cmd, 0, sceneVp);
+
+		VkRect2D.Buffer sceneScissor = VkRect2D.calloc(1, stack);
+		sceneScissor.get(0)
+			.offset(o -> o.set(sx, sy))
+			.extent(e -> e.set(sw, sh));
+		vkCmdSetScissor(cmd, 0, sceneScissor);
+
+		return createFrameContext(cmd, targetWidth, targetHeight);
+	}
+
+	private VulkanFrameContext setupUiViewportAndFrame(MemoryStack stack, VkCommandBuffer cmd,
+													   int targetWidth, int targetHeight)
+	{
+		VkViewport.Buffer uiVp = VkViewport.calloc(1, stack);
+		uiVp.get(0)
+			.x(0).y(0)
+			.width(targetWidth).height(targetHeight)
+			.minDepth(0).maxDepth(1);
+		vkCmdSetViewport(cmd, 0, uiVp);
+
+		VkRect2D.Buffer uiScissor = VkRect2D.calloc(1, stack);
+		uiScissor.get(0)
+			.offset(o -> o.set(0, 0))
+			.extent(e -> e.set(targetWidth, targetHeight));
+		vkCmdSetScissor(cmd, 0, uiScissor);
+
+		return createFrameContext(cmd, targetWidth, targetHeight);
+	}
+
+	private VulkanFrameContext createFrameContext(VkCommandBuffer cmd, int targetWidth, int targetHeight)
+	{
+		int vw = Math.max(viewportWidth, 1);
+		int vh = Math.max(viewportHeight, 1);
+		float[] sceneMvp = Mat4Ops.scale(scale, -scale, 1);
+		Mat4Ops.mul(sceneMvp, Mat4Ops.projection(vw, vh, 50));
+		Mat4Ops.mul(sceneMvp, Mat4Ops.rotateX((float) cameraPitch));
+		Mat4Ops.mul(sceneMvp, Mat4Ops.rotateY((float) cameraYaw));
+		Mat4Ops.mul(sceneMvp, Mat4Ops.translate(-(float) cameraX, -(float) cameraY, -(float) cameraZ));
+
+		return new DefaultVulkanFrameContext(cmd,
+			targetWidth, targetHeight,
+			viewportXOffset, viewportYOffset, viewportWidth, viewportHeight,
+			canvasWidth, canvasHeight, scale,
+			sceneMvp,
+			(float) cameraX, (float) cameraZ, brightness,
+			drawDistanceTiles, fogDepthTiles,
+			((skyboxColor >> 16) & 0xFF) / 255f,
+			((skyboxColor >>  8) & 0xFF) / 255f,
+			( skyboxColor        & 0xFF) / 255f,
+			gameTick, textureLightMode,
+			colorBlindMode, colorBlindIntensity,
+			smoothBanding, overlayColor);
+	}
+
+	private void transitionImage(MemoryStack stack, VkCommandBuffer cmd, long image,
+								 int oldLayout, int newLayout,
+								 int srcStage, int dstStage,
+								 int srcAccess, int dstAccess)
+	{
+		VkImageMemoryBarrier.Buffer barrier = VkImageMemoryBarrier.calloc(1, stack);
+		barrier.get(0)
+			.sType$Default()
+			.srcAccessMask(srcAccess)
+			.dstAccessMask(dstAccess)
+			.oldLayout(oldLayout)
+			.newLayout(newLayout)
+			.srcQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+			.dstQueueFamilyIndex(VK_QUEUE_FAMILY_IGNORED)
+			.image(image)
+			.subresourceRange(r -> r
+				.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
+				.baseMipLevel(0).levelCount(1)
+				.baseArrayLayer(0).layerCount(1));
+		vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, null, null, barrier);
 	}
 
 	private static final class ScreenshotReadback implements AutoCloseable

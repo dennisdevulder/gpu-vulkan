@@ -38,7 +38,7 @@ public interface GpuVulkanPluginConfig extends Config
 	@ConfigSection(
 		name = "Debug",
 		description = "Runtime diagnostics for Vulkan memory and scene capture.",
-		position = 2,
+		position = 3,
 		closedByDefault = true
 	)
 	String DEBUG_SECTION = "debug";
@@ -46,7 +46,7 @@ public interface GpuVulkanPluginConfig extends Config
 	@ConfigSection(
 		name = "Benchmark",
 		description = "Temporary switches for isolating Vulkan CPU/GPU costs.",
-		position = 3,
+		position = 4,
 		closedByDefault = true
 	)
 	String BENCHMARK_SECTION = "benchmark";
@@ -135,6 +135,49 @@ public interface GpuVulkanPluginConfig extends Config
 		description = "Render transparent faces in the main scene pass using alpha-to-coverage instead of replaying the scene in a blended alpha pass. Much faster; disable only if a transparent object looks wrong. Plugin must be re-enabled to take effect."
 	)
 	default boolean singlePassAlpha() { return true; }
+
+	@ConfigSection(
+		name = "Upscaling",
+		description = "Render the 3D scene at a lower internal resolution and upscale before drawing UI.",
+		position = 1,
+		closedByDefault = true
+	)
+	String UPSCALING_SECTION = "upscaling";
+
+	enum UpscalingMode
+	{
+		OFF,
+		FSR1
+	}
+
+	@ConfigItem(
+		keyName = "upscalingMode",
+		name = "Upscaling mode",
+		description = "OFF = native scene rendering. FSR1 = render the 3D scene at the selected scale, upscale, then draw UI at native resolution. Plugin must be re-enabled to take effect.",
+		section = UPSCALING_SECTION,
+		position = 0
+	)
+	default UpscalingMode upscalingMode() { return UpscalingMode.OFF; }
+
+	@Range(min = 50, max = 100)
+	@ConfigItem(
+		keyName = "renderScale",
+		name = "Render scale",
+		description = "Internal 3D scene resolution when upscaling is enabled. UI remains native resolution. Plugin must be re-enabled to take effect.",
+		section = UPSCALING_SECTION,
+		position = 1
+	)
+	default int renderScale() { return 75; }
+
+	@Range(min = 0, max = 100)
+	@ConfigItem(
+		keyName = "fsrSharpness",
+		name = "FSR sharpness",
+		description = "Sharpening strength for the FSR1 upscaler.",
+		section = UPSCALING_SECTION,
+		position = 2
+	)
+	default int fsrSharpness() { return 60; }
 
 	@ConfigItem(
 		keyName = "benchmarkSkipUi",
@@ -248,7 +291,7 @@ public interface GpuVulkanPluginConfig extends Config
 	@ConfigSection(
 		name = "Wireframe",
 		description = "Render individual scene layers as wireframe. Each toggle is independent.",
-		position = 1,
+		position = 2,
 		closedByDefault = true
 	)
 	String WIREFRAME_SECTION = "wireframe";

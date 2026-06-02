@@ -338,7 +338,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 				disposables.add(framebuffers);
 
 				renderer = new VulkanRenderer(device, renderPass, renderExtensions,
-					swapchain, depthBuffer, msaaColor, framebuffers, sync, stats);
+					swapchain, depthBuffer, msaaColor, framebuffers, sync, stats, config, gfx);
 				renderer.setDrawManager(drawManager);
 				disposables.add(renderer);
 

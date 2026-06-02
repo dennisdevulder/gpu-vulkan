@@ -64,6 +64,7 @@ final class GfxBindGroup implements BindGroup
 			pool = createPool(stack, layout.desc());
 			allocateSets(stack, pool, layout.handle());
 			writeStreamingImages(stack, desc);
+			writeSampledImages(stack, desc);
 		}
 	}
 
@@ -136,6 +137,37 @@ final class GfxBindGroup implements BindGroup
 				imgInfo.get(0)
 					.sampler(si.samplerForSlot(slot))
 					.imageView(si.viewForSlot(slot))
+					.imageLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+				writes.get(w++)
+					.sType$Default()
+					.dstSet(sets[slot])
+					.dstBinding(entry.binding)
+					.dstArrayElement(0)
+					.descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+					.descriptorCount(1)
+					.pImageInfo(imgInfo);
+			}
+		}
+		vkUpdateDescriptorSets(device.handle(), writes, null);
+	}
+
+	private void writeSampledImages(MemoryStack stack, BindGroupDesc desc)
+	{
+		if (desc.sampledImages().isEmpty()) return;
+
+		int total = desc.sampledImages().size() * FrameSync.FRAMES_IN_FLIGHT;
+		VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(total, stack);
+		int w = 0;
+		for (BindGroupDesc.SampledImageEntry entry : desc.sampledImages())
+		{
+			for (int slot = 0; slot < FrameSync.FRAMES_IN_FLIGHT; slot++)
+			{
+				VkDescriptorImageInfo.Buffer imgInfo =
+					VkDescriptorImageInfo.calloc(1, stack);
+				imgInfo.get(0)
+					.sampler(entry.sampler)
+					.imageView(entry.imageView)
 					.imageLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
 				writes.get(w++)
