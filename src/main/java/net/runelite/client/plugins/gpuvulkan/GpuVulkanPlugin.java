@@ -1059,8 +1059,13 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			stats.recordModel(m);
 		}
 		boolean actorModel = r instanceof net.runelite.api.Actor || tileObject == null;
-		if (renderExtensions != null) renderExtensions.captureModel(worldProjection, m, orient, x, y, z,
-			renderModeOf(r), actorModel);
+		if (renderExtensions != null)
+		{
+			long start = stats.isEnabled() ? System.nanoTime() : 0L;
+			renderExtensions.captureModel(worldProjection, m, orient, x, y, z,
+				renderModeOf(r), actorModel);
+			stats.addNanos(stats.dynamicCaptureNanos, start);
+		}
 	}
 
 	@Override
@@ -1075,8 +1080,13 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		{
 			return;
 		}
-		if (renderExtensions != null) renderExtensions.captureModel(worldProjection, m, orient, x, y, z,
-			renderModeOf(gameObject.getRenderable()), false);
+		if (renderExtensions != null)
+		{
+			long start = stats.isEnabled() ? System.nanoTime() : 0L;
+			renderExtensions.captureModel(worldProjection, m, orient, x, y, z,
+				renderModeOf(gameObject.getRenderable()), false);
+			stats.addNanos(stats.tempCaptureNanos, start);
+		}
 	}
 
 	private static int renderModeOf(Renderable renderable)
@@ -1113,7 +1123,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		if (renderable instanceof net.runelite.api.Actor) return;
 		Model m = (renderable instanceof Model) ? (Model) renderable : renderable.getModel();
 		if (m == null) return;
+		long start = stats.isEnabled() ? System.nanoTime() : 0L;
 		renderExtensions.captureModel(projection, m, orientation, x, y, z, renderModeOf(renderable), false);
+		stats.addNanos(stats.singleCaptureNanos, start);
 	}
 
 	@Override
