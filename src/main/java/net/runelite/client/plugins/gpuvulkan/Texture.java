@@ -58,6 +58,8 @@ final class Texture implements AutoCloseable
 
 	Texture(VulkanDevice device, int width, int height, int format)
 	{
+		Vk.require(width > 0 && height > 0,
+			"texture extent must be positive, got " + width + "x" + height);
 		this.device = device;
 		this.width = width;
 		this.height = height;
@@ -209,7 +211,7 @@ final class Texture implements AutoCloseable
 		}
 	}
 
-	/** Records a buffer→image copy. The image must already be in TRANSFER_DST_OPTIMAL. */
+	/** The image must already be in TRANSFER_DST_OPTIMAL. */
 	void recordCopyFrom(VkCommandBuffer cmd, Buffer staging, int copyWidth, int copyHeight)
 	{
 		try (MemoryStack stack = stackPush())

@@ -66,6 +66,7 @@ final class Buffer implements AutoCloseable
 
 	Buffer(VulkanDevice device, long size, int usage, int requiredMemoryProperties, int preferredMemoryProperties)
 	{
+		Vk.require(size > 0, "buffer size must be positive, got " + size);
 		this.device = device;
 		this.size = size;
 		try (MemoryStack stack = stackPush())

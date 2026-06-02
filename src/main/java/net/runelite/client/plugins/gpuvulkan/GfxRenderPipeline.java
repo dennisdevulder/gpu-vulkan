@@ -47,11 +47,9 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK13.*;
 
 /**
- * Generic pipeline builder for the gfx layer. Scoped to what migrated
- * consumers need today — no vertex attributes, single colour attachment,
- * blend / depth presets matching {@link RenderPipelineDesc.BlendMode} +
- * {@link RenderPipelineDesc.DepthTest}. Vertex-attribute support comes
- * back when {@link SceneRenderer} migrates.
+ * Constraints: no vertex attributes, single colour attachment, blend / depth
+ * presets matching {@link RenderPipelineDesc.BlendMode} +
+ * {@link RenderPipelineDesc.DepthTest}.
  */
 final class GfxRenderPipeline implements RenderPipeline
 {
@@ -147,14 +145,19 @@ final class GfxRenderPipeline implements RenderPipeline
 			.pName(stack.UTF8("main"));
 
 		// No vertex attributes: full-screen triangle pattern with
-		// gl_VertexIndex picking corners. SceneRenderer's migration will
-		// extend the API for real attribute layouts.
+		// gl_VertexIndex picking corners.
 		VkPipelineVertexInputStateCreateInfo vertexInput =
 			VkPipelineVertexInputStateCreateInfo.calloc(stack).sType$Default();
 
-		int topology = desc.topology() == RenderPipelineDesc.Topology.TRIANGLE_LIST
-			? VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
-			: VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+		int topology;
+		switch (desc.topology())
+		{
+			case TRIANGLE_LIST:
+				topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+				break;
+			default:
+				throw new IllegalArgumentException("Unsupported topology: " + desc.topology());
+		}
 
 		VkPipelineInputAssemblyStateCreateInfo inputAssembly =
 			VkPipelineInputAssemblyStateCreateInfo.calloc(stack)
@@ -185,7 +188,6 @@ final class GfxRenderPipeline implements RenderPipeline
 				.rasterizationSamples(renderer.renderPass().samples())
 				.sampleShadingEnable(false);
 
-		// One colour attachment matching the swapchain's render pass.
 		VkPipelineColorBlendAttachmentState.Buffer blendAttachments =
 			VkPipelineColorBlendAttachmentState.calloc(1, stack);
 		boolean premul = desc.blendMode() == RenderPipelineDesc.BlendMode.PREMUL_ALPHA;

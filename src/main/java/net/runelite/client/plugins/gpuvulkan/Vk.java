@@ -57,6 +57,15 @@ final class Vk
 		return result == VK_SUCCESS;
 	}
 
+	/** Always-on precondition guard ({@code assert} is a no-op — RuneLite runs without {@code -ea}). */
+	static void require(boolean condition, String message)
+	{
+		if (!condition)
+		{
+			throw new IllegalStateException(message);
+		}
+	}
+
 	/** Thrown by {@link #check(String, int)}. Plain {@code RuntimeException}
 	 *  subclass so callers can catch this specifically if they want to. */
 	static final class VulkanException extends RuntimeException

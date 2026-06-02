@@ -194,9 +194,11 @@ final class Swapchain implements AutoCloseable
 			handle = pSwap.get(0);
 
 			IntBuffer count = stack.mallocInt(1);
-			KHRSwapchain.vkGetSwapchainImagesKHR(device.handle(), handle, count, null);
+			Vk.check("vkGetSwapchainImagesKHR (count)",
+				KHRSwapchain.vkGetSwapchainImagesKHR(device.handle(), handle, count, null));
 			LongBuffer pImages = stack.mallocLong(count.get(0));
-			KHRSwapchain.vkGetSwapchainImagesKHR(device.handle(), handle, count, pImages);
+			Vk.check("vkGetSwapchainImagesKHR (images)",
+				KHRSwapchain.vkGetSwapchainImagesKHR(device.handle(), handle, count, pImages));
 
 			images = new long[count.get(0)];
 			imageViews = new long[count.get(0)];
@@ -260,9 +262,11 @@ final class Swapchain implements AutoCloseable
 	private int pickPresentMode(MemoryStack stack)
 	{
 		IntBuffer count = stack.mallocInt(1);
-		KHRSurface.vkGetPhysicalDeviceSurfacePresentModesKHR(device.physicalDevice(), surface.handle(), count, null);
+		Vk.check("vkGetPhysicalDeviceSurfacePresentModesKHR (count)",
+			KHRSurface.vkGetPhysicalDeviceSurfacePresentModesKHR(device.physicalDevice(), surface.handle(), count, null));
 		IntBuffer modes = stack.mallocInt(count.get(0));
-		KHRSurface.vkGetPhysicalDeviceSurfacePresentModesKHR(device.physicalDevice(), surface.handle(), count, modes);
+		Vk.check("vkGetPhysicalDeviceSurfacePresentModesKHR (modes)",
+			KHRSurface.vkGetPhysicalDeviceSurfacePresentModesKHR(device.physicalDevice(), surface.handle(), count, modes));
 
 		boolean hasImmediate = false, hasMailbox = false, hasFifoRelaxed = false;
 		for (int i = 0; i < modes.capacity(); i++)

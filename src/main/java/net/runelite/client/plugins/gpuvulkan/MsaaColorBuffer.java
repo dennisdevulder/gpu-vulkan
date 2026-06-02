@@ -81,6 +81,8 @@ final class MsaaColorBuffer implements AutoCloseable
 
 	private void create(int width, int height)
 	{
+		Vk.require(width > 0 && height > 0,
+			"MSAA color buffer extent must be positive, got " + width + "x" + height);
 		try (MemoryStack stack = stackPush())
 		{
 			VkImageCreateInfo info = VkImageCreateInfo.calloc(stack)
