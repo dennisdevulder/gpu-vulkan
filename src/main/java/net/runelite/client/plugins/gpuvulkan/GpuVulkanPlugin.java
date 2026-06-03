@@ -241,7 +241,6 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 						awtContext.configurePixelFormat(0, 0, 0);
 					}
 					awtContext.createGLContext();
-					org.lwjgl.opengl.GL.createCapabilities();
 				}
 				canvas.setIgnoreRepaint(true);
 				canvas.setFocusable(true);

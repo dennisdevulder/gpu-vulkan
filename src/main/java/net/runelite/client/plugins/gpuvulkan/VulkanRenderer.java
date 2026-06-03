@@ -81,8 +81,10 @@ final class VulkanRenderer implements AutoCloseable
 	private final Framebuffers framebuffers;
 	private final ScreenshotReadback screenshotReadback;
 	private final RenderPass offscreenRenderPass;
+	private final RenderPass fsrIntermediateRenderPass;
 	private final FsrUpscaler fsrUpscaler;
 	private OffscreenSceneTarget offscreenScene;
+	private OffscreenSceneTarget fsrIntermediate;
 	private DrawManager drawManager;
 	/** macOS-only — custom-present path. Null on Linux (we use {@link #swapchain}). */
 	private final MetalDrawableSet metalDrawables;
@@ -140,11 +142,15 @@ final class VulkanRenderer implements AutoCloseable
 			&& config.renderScale() < 100)
 		{
 			this.offscreenRenderPass = new RenderPass(device, swapchain.imageFormat(), renderPass.samples(), false);
-			this.fsrUpscaler = new FsrUpscaler(gfx);
+			this.fsrIntermediateRenderPass = new RenderPass(device, swapchain.imageFormat(), VK_SAMPLE_COUNT_1_BIT, false);
+			this.fsrUpscaler = new FsrUpscaler(
+				Gfx.wrap(device, sync, fsrIntermediateRenderPass),
+				gfx);
 		}
 		else
 		{
 			this.offscreenRenderPass = null;
+			this.fsrIntermediateRenderPass = null;
 			this.fsrUpscaler = null;
 		}
 		// On macOS the swapchain is still created (we need its surface
@@ -381,42 +387,58 @@ final class VulkanRenderer implements AutoCloseable
 		long mtlTexture = d[1];
 		int width = (int) d[2];
 		int height = (int) d[3];
+		boolean presented = false;
 
-		// Drawable size changed (canvas resize). Rebuild depth/MSAA
-		// buffers and drop cached drawable entries — they reference the
-		// old depth/MSAA views and would be stale.
-		if (width != customPresentWidth || height != customPresentHeight)
+		try
 		{
-			vkDeviceWaitIdle(device.handle());
-			metalDrawables.flush();
-			depthBuffer.recreate(width, height);
-			if (msaaColor != null)
+			// Drawable size changed (canvas resize). Rebuild depth/MSAA
+			// buffers and drop cached drawable entries — they reference the
+			// old depth/MSAA views and would be stale.
+			if (width != customPresentWidth || height != customPresentHeight)
 			{
-				msaaColor.recreate(width, height);
+				vkDeviceWaitIdle(device.handle());
+				metalDrawables.flush();
+				depthBuffer.recreate(width, height);
+				if (msaaColor != null)
+				{
+					msaaColor.recreate(width, height);
+				}
+				customPresentWidth = width;
+				customPresentHeight = height;
 			}
-			customPresentWidth = width;
-			customPresentHeight = height;
+
+			MetalDrawableSet.Entry entry = metalDrawables.acquire(
+				mtlTexture, width, height, renderPass, depthBuffer, msaaColor);
+
+			vkResetFences(device.handle(), sync.inFlightFence());
+
+			VkCommandBuffer cmd = commandBuffers[sync.currentFrame()];
+			vkResetCommandBuffer(cmd, 0);
+			start = stats.startNanos();
+			recordClearPass(stack, cmd, entry.framebuffer, width, height, entry.image);
+			stats.addNanos(stats.commandRecordNanos, start);
+
+			start = stats.startNanos();
+			submitNoSemaphores(stack, cmd);
+			if (vkGetFenceStatus(device.handle(), sync.inFlightFence()) == VK_NOT_READY)
+			{
+				vkWaitForFences(device.handle(), sync.inFlightFence(), true, Long.MAX_VALUE);
+			}
+			stats.addNanos(stats.submitNanos, start);
+			processDrawComplete();
+
+			start = stats.startNanos();
+			MacOSMetalHelper.presentDrawable(drawable, device.metalCommandQueue());
+			presented = true;
+			stats.addNanos(stats.presentNanos, start);
 		}
-
-		MetalDrawableSet.Entry entry = metalDrawables.acquire(
-			mtlTexture, width, height, renderPass, depthBuffer, msaaColor);
-
-		vkResetFences(device.handle(), sync.inFlightFence());
-
-		VkCommandBuffer cmd = commandBuffers[sync.currentFrame()];
-		vkResetCommandBuffer(cmd, 0);
-		start = stats.startNanos();
-		recordClearPass(stack, cmd, entry.framebuffer, width, height, entry.image);
-		stats.addNanos(stats.commandRecordNanos, start);
-
-		start = stats.startNanos();
-		submitNoSemaphores(stack, cmd);
-		stats.addNanos(stats.submitNanos, start);
-		processDrawComplete();
-
-		start = stats.startNanos();
-		MacOSMetalHelper.presentDrawable(drawable, device.metalCommandQueue());
-		stats.addNanos(stats.presentNanos, start);
+		finally
+		{
+			if (!presented)
+			{
+				MacOSMetalHelper.releaseObject(drawable);
+			}
+		}
 	}
 
 	private void processDrawComplete()
@@ -449,14 +471,23 @@ final class VulkanRenderer implements AutoCloseable
 		{
 			metalDrawables.close();
 		}
+		if (fsrUpscaler != null)
+		{
+			fsrUpscaler.close();
+		}
+		if (fsrIntermediate != null)
+		{
+			fsrIntermediate.close();
+			fsrIntermediate = null;
+		}
 		if (offscreenScene != null)
 		{
 			offscreenScene.close();
 			offscreenScene = null;
 		}
-		if (fsrUpscaler != null)
+		if (fsrIntermediateRenderPass != null)
 		{
-			fsrUpscaler.close();
+			fsrIntermediateRenderPass.close();
 		}
 		if (offscreenRenderPass != null)
 		{
@@ -666,14 +697,26 @@ final class VulkanRenderer implements AutoCloseable
 		int scalePct = Math.max(50, Math.min(100, config.renderScale()));
 		int lowWidth = Math.max(1, (targetWidth * scalePct) / 100);
 		int lowHeight = Math.max(1, (targetHeight * scalePct) / 100);
-		if (offscreenScene == null)
+		if (offscreenScene == null || fsrIntermediate == null)
 		{
-			offscreenScene = new OffscreenSceneTarget(device, offscreenRenderPass,
-				lowWidth, lowHeight, swapchain.imageFormat(), renderPass.samples());
+			if (offscreenScene == null)
+			{
+				offscreenScene = new OffscreenSceneTarget(device, offscreenRenderPass,
+					lowWidth, lowHeight, swapchain.imageFormat(), renderPass.samples());
+			}
+			if (fsrIntermediate == null)
+			{
+				fsrIntermediate = new OffscreenSceneTarget(device, fsrIntermediateRenderPass,
+					targetWidth, targetHeight, swapchain.imageFormat(), VK_SAMPLE_COUNT_1_BIT);
+			}
 		}
-		else
+		if (offscreenScene.width() != lowWidth || offscreenScene.height() != lowHeight
+			|| fsrIntermediate.width() != targetWidth || fsrIntermediate.height() != targetHeight)
 		{
+			vkDeviceWaitIdle(device.handle());
+			fsrUpscaler.clearBindings();
 			offscreenScene.recreate(lowWidth, lowHeight);
+			fsrIntermediate.recreate(targetWidth, targetHeight);
 		}
 
 		float skyR = ((skyboxColor >> 16) & 0xFF) / 255f;
@@ -703,6 +746,27 @@ final class VulkanRenderer implements AutoCloseable
 			VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
 			VK_ACCESS_SHADER_READ_BIT);
 
+		VkRenderPassBeginInfo easuRp = VkRenderPassBeginInfo.calloc(stack)
+			.sType$Default()
+			.renderPass(fsrIntermediateRenderPass.handle())
+			.framebuffer(fsrIntermediate.framebuffer())
+			.renderArea(r -> r.offset(o -> o.set(0, 0)).extent(e -> e.set(targetWidth, targetHeight)))
+			.pClearValues(clears);
+		vkCmdBeginRenderPass(cmd, easuRp, VK_SUBPASS_CONTENTS_INLINE);
+
+		fsrUpscaler.bindEasuSource(offscreenScene.colorView(), offscreenScene.sampler());
+		fsrUpscaler.recordEasu(cmd, targetWidth, targetHeight,
+			offscreenScene.width(), offscreenScene.height());
+		vkCmdEndRenderPass(cmd);
+
+		transitionImage(stack, cmd, fsrIntermediate.colorImage(),
+			VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+			VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+			VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+			VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+			VK_ACCESS_SHADER_READ_BIT);
+
 		VkRenderPassBeginInfo mainRp = VkRenderPassBeginInfo.calloc(stack)
 			.sType$Default()
 			.renderPass(renderPass.handle())
@@ -711,9 +775,8 @@ final class VulkanRenderer implements AutoCloseable
 			.pClearValues(clears);
 		vkCmdBeginRenderPass(cmd, mainRp, VK_SUBPASS_CONTENTS_INLINE);
 
-		fsrUpscaler.bindSource(offscreenScene.colorView(), offscreenScene.sampler());
-		fsrUpscaler.recordDraw(cmd, targetWidth, targetHeight,
-			offscreenScene.width(), offscreenScene.height(),
+		fsrUpscaler.bindRcasSource(fsrIntermediate.colorView(), fsrIntermediate.sampler());
+		fsrUpscaler.recordRcas(cmd, targetWidth, targetHeight,
 			Math.max(0, Math.min(100, config.fsrSharpness())) / 100f);
 
 		VulkanFrameContext uiFrame = setupUiViewportAndFrame(stack, cmd, targetWidth, targetHeight);
