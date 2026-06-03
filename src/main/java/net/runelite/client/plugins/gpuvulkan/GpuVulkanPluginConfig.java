@@ -105,7 +105,7 @@ public interface GpuVulkanPluginConfig extends Config
 		name = "Draw distance (tiles)",
 		description = "Maximum draw distance in OSRS tiles. Higher = more visible scene, lower performance."
 	)
-	default int drawDistance() { return 90; }
+	default int drawDistance() { return 50; }
 
 	@Range(min = 0, max = 5)
 	@ConfigItem(
@@ -218,9 +218,9 @@ public interface GpuVulkanPluginConfig extends Config
 	@ConfigItem(
 		keyName = "fogDepth",
 		name = "Fog depth (tiles)",
-		description = "Distance over which the scene fades to the skybox color. 0 disables fog. Stock default is around 30."
+		description = "Distance over which the scene fades to the skybox color. 0 disables fog. Matches stock GPU's default."
 	)
-	default int fogDepth() { return 30; }
+	default int fogDepth() { return 0; }
 
 	enum AntiAliasingMode { DISABLED, MSAA_2, MSAA_4, MSAA_8, MSAA_16 }
 
