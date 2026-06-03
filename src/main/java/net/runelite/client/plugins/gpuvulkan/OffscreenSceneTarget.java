@@ -92,6 +92,11 @@ final class OffscreenSceneTarget implements AutoCloseable
 		return sampler;
 	}
 
+	DepthBuffer depth()
+	{
+		return depth;
+	}
+
 	private void createColor()
 	{
 		try (MemoryStack stack = stackPush())

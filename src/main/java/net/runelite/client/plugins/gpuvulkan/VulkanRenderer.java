@@ -38,6 +38,7 @@ import org.lwjgl.vulkan.VkCommandBuffer;
 import org.lwjgl.vulkan.VkCommandBufferAllocateInfo;
 import org.lwjgl.vulkan.VkCommandBufferBeginInfo;
 import org.lwjgl.vulkan.VkCommandPoolCreateInfo;
+import org.lwjgl.vulkan.VkImageBlit;
 import org.lwjgl.vulkan.VkImageMemoryBarrier;
 import org.lwjgl.vulkan.VkPresentInfoKHR;
 import org.lwjgl.vulkan.VkRect2D;
@@ -80,6 +81,7 @@ final class VulkanRenderer implements AutoCloseable
 	private final FsrUpscaler fsrUpscaler;
 	private OffscreenSceneTarget offscreenScene;
 	private OffscreenSceneTarget fsrIntermediate;
+	private OffscreenSceneTarget customPresentTarget;
 	private DrawManager drawManager;
 	/** macOS-only — custom-present path. Null on Linux (we use {@link #swapchain}). */
 	private final MetalDrawableSet metalDrawables;
@@ -88,9 +90,16 @@ final class VulkanRenderer implements AutoCloseable
 	/** Width/height tracked for the custom-present path so we can detect a
 	 *  resize and rebuild depth/MSAA buffers + invalidate the drawable cache. */
 	private int customPresentWidth, customPresentHeight;
+	private int pendingCustomPresentWidth, pendingCustomPresentHeight;
+	private long customPresentResizeAfterNanos;
+	private static final long CUSTOM_PRESENT_RESIZE_SETTLE_NANOS = 200_000_000L;
+	private long nextCustomPresentNanos;
+	private final long customPresentIntervalNanos =
+		1_000_000_000L / Math.max(1L, Long.getLong("vkgpu.presentFps", 75L));
 
 	private final long commandPool;
 	private final VkCommandBuffer[] commandBuffers;
+	private final VkCommandBuffer[] presentCommandBuffers;
 	private final SwapchainRebuildGate swapchainRebuild = new SwapchainRebuildGate();
 
 	private double cameraX, cameraY, cameraZ;
@@ -167,13 +176,15 @@ final class VulkanRenderer implements AutoCloseable
 				.sType$Default()
 				.commandPool(commandPool)
 				.level(VK_COMMAND_BUFFER_LEVEL_PRIMARY)
-				.commandBufferCount(FrameSync.FRAMES_IN_FLIGHT);
-			PointerBuffer pBufs = stack.mallocPointer(FrameSync.FRAMES_IN_FLIGHT);
+				.commandBufferCount(FrameSync.FRAMES_IN_FLIGHT * 2);
+			PointerBuffer pBufs = stack.mallocPointer(FrameSync.FRAMES_IN_FLIGHT * 2);
 			Vk.check("vkAllocateCommandBuffers", vkAllocateCommandBuffers(device.handle(), allocInfo, pBufs));
 			commandBuffers = new VkCommandBuffer[FrameSync.FRAMES_IN_FLIGHT];
+			presentCommandBuffers = new VkCommandBuffer[FrameSync.FRAMES_IN_FLIGHT];
 			for (int i = 0; i < FrameSync.FRAMES_IN_FLIGHT; i++)
 			{
 				commandBuffers[i] = new VkCommandBuffer(pBufs.get(i), device.handle());
+				presentCommandBuffers[i] = new VkCommandBuffer(pBufs.get(i + FrameSync.FRAMES_IN_FLIGHT), device.handle());
 			}
 		}
 	}
@@ -185,7 +196,16 @@ final class VulkanRenderer implements AutoCloseable
 
 	void markSwapchainStale()
 	{
+		if (useCustomPresent)
+		{
+			return;
+		}
 		swapchainRebuild.markStale();
+	}
+
+	boolean usesCustomPresent()
+	{
+		return useCustomPresent;
 	}
 
 	void drawFrame(int desiredWidth, int desiredHeight,
@@ -206,16 +226,7 @@ final class VulkanRenderer implements AutoCloseable
 		{
 			return;
 		}
-		// Lazy rebuild: only rebuild when the swap-chain itself reports it's
-		// out-of-date (via SUBOPTIMAL/OUT_OF_DATE from acquire or present).
-		// Eager size-check rebuilds caused worse problems: sidebar collapse
-		// fires 12+ resize events in milliseconds (958x916 ↔ 1437x1374) and
-		// eager rebuild would tear down + recreate the swapchain on each one,
-		// hammering RADV faster than it can handle and de-syncing the engine
-		// (observed paint=0 in stats after a resize storm). Waiting for
-		// SUBOPTIMAL naturally debounces — we render one frame to the slightly-
-		// stale swapchain and rebuild once after the resize cascade settles.
-		if (swapchainRebuild.isStale())
+		if (!useCustomPresent && swapchainRebuild.isStale())
 		{
 			if (!swapchainRebuild.targetStable(desiredWidth, desiredHeight))
 			{
@@ -360,76 +371,172 @@ final class VulkanRenderer implements AutoCloseable
 	 */
 	private void drawFrameCustomPresent(MemoryStack stack, int desiredWidth, int desiredHeight)
 	{
-		long start = stats.startNanos();
-		long[] d = MacOSMetalHelper.nextDrawable();
-		if (d == null)
+		ensureCustomPresentTarget(desiredWidth, desiredHeight);
+
+		long drawable = 0L;
+		MetalDrawableSet.Entry drawableEntry = null;
+		int drawableWidth = 0;
+		int drawableHeight = 0;
+		long now = System.nanoTime();
+		if (now >= nextCustomPresentNanos)
 		{
-			MacOSMetalHelper.resizeMetalLayerSize(desiredWidth, desiredHeight);
-			d = MacOSMetalHelper.nextDrawable();
-			if (d == null)
+			long start = stats.startNanos();
+			long[] d = MacOSMetalHelper.nextDrawable();
+			stats.addNanos(stats.customDrawableNanos, start);
+			nextCustomPresentNanos = System.nanoTime() + customPresentIntervalNanos;
+			if (d != null)
 			{
-				// CAMetalLayer didn't hand us a drawable inside its internal
-				// timeout. Treat as a dropped frame.
-				return;
+				drawable = d[0];
+				long mtlTexture = d[1];
+				drawableWidth = (int) d[2];
+				drawableHeight = (int) d[3];
+				drawableEntry = metalDrawables.acquire(
+					mtlTexture, drawableWidth, drawableHeight, renderPass, customPresentTarget.depth(), null);
 			}
 		}
-		stats.addNanos(stats.customDrawableNanos, start);
-		long drawable = d[0];
-		long mtlTexture = d[1];
-		int width = (int) d[2];
-		int height = (int) d[3];
 		boolean presented = false;
 
 		try
 		{
-			// Drawable size changed (canvas resize). Rebuild depth/MSAA
-			// buffers and drop cached drawable entries — they reference the
-			// old depth/MSAA views and would be stale.
-			if (width != customPresentWidth || height != customPresentHeight)
-			{
-				vkDeviceWaitIdle(device.handle());
-				metalDrawables.flush();
-				depthBuffer.recreate(width, height);
-				if (msaaColor != null)
-				{
-					msaaColor.recreate(width, height);
-				}
-				customPresentWidth = width;
-				customPresentHeight = height;
-			}
-
-			MetalDrawableSet.Entry entry = metalDrawables.acquire(
-				mtlTexture, width, height, renderPass, depthBuffer, msaaColor);
-
 			vkResetFences(device.handle(), sync.inFlightFence());
 
 			VkCommandBuffer cmd = commandBuffers[sync.currentFrame()];
 			vkResetCommandBuffer(cmd, 0);
-			start = stats.startNanos();
-			recordClearPass(stack, cmd, entry.framebuffer, width, height, entry.image);
+			long start = stats.startNanos();
+			int renderWidth = customPresentTarget.width();
+			int renderHeight = customPresentTarget.height();
+			recordClearPass(stack, cmd, customPresentTarget.framebuffer(),
+				renderWidth, renderHeight, customPresentTarget.colorImage());
+			VkCommandBuffer presentCmd = null;
+			if (drawableEntry != null)
+			{
+				presentCmd = presentCommandBuffers[sync.currentFrame()];
+				vkResetCommandBuffer(presentCmd, 0);
+				recordCopyToDrawable(stack, presentCmd, customPresentTarget.colorImage(),
+					renderWidth, renderHeight, drawableEntry, drawableWidth, drawableHeight);
+			}
 			stats.addNanos(stats.commandRecordNanos, start);
 
 			start = stats.startNanos();
-			submitNoSemaphores(stack, cmd);
-			if (vkGetFenceStatus(device.handle(), sync.inFlightFence()) == VK_NOT_READY)
-			{
-				vkWaitForFences(device.handle(), sync.inFlightFence(), true, Long.MAX_VALUE);
-			}
+			submitNoSemaphores(stack, cmd, presentCmd);
 			stats.addNanos(stats.submitNanos, start);
 			processDrawComplete();
 
-			start = stats.startNanos();
-			MacOSMetalHelper.presentDrawable(drawable, device.metalCommandQueue());
-			presented = true;
-			stats.addNanos(stats.presentNanos, start);
+			if (drawableEntry != null)
+			{
+				start = stats.startNanos();
+				MacOSMetalHelper.presentDrawable(drawable, device.metalCommandQueue());
+				presented = true;
+				stats.addNanos(stats.presentNanos, start);
+			}
 		}
 		finally
 		{
-			if (!presented)
+			if (drawable != 0L && !presented)
 			{
 				MacOSMetalHelper.releaseObject(drawable);
 			}
 		}
+	}
+
+	private void ensureCustomPresentTarget(int width, int height)
+	{
+		width = Math.max(width, 1);
+		height = Math.max(height, 1);
+		long now = System.nanoTime();
+		if (customPresentTarget == null)
+		{
+			customPresentTarget = new OffscreenSceneTarget(device, renderPass,
+				width, height, swapchain.imageFormat(), renderPass.samples());
+			customPresentWidth = width;
+			customPresentHeight = height;
+			pendingCustomPresentWidth = width;
+			pendingCustomPresentHeight = height;
+			return;
+		}
+		if (width == customPresentWidth && height == customPresentHeight)
+		{
+			pendingCustomPresentWidth = width;
+			pendingCustomPresentHeight = height;
+			return;
+		}
+		if (width != pendingCustomPresentWidth || height != pendingCustomPresentHeight)
+		{
+			pendingCustomPresentWidth = width;
+			pendingCustomPresentHeight = height;
+			customPresentResizeAfterNanos = now + CUSTOM_PRESENT_RESIZE_SETTLE_NANOS;
+			return;
+		}
+		if (now < customPresentResizeAfterNanos)
+		{
+			return;
+		}
+
+		// Keep the owned render target stable during window resizing. The
+		// present copy blits it to the live drawable size, so recreating here
+		// is a quality optimization, not a correctness requirement. Avoiding
+		// vkDeviceWaitIdle on the client thread keeps release-after-drag from
+		// stalling presentation.
+	}
+
+	private void recordCopyToDrawable(MemoryStack stack, VkCommandBuffer cmd, long sourceImage,
+									  int sourceWidth, int sourceHeight,
+									  MetalDrawableSet.Entry drawableEntry,
+									  int drawableWidth, int drawableHeight)
+	{
+		VkCommandBufferBeginInfo begin = VkCommandBufferBeginInfo.calloc(stack)
+			.sType$Default()
+			.flags(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+		Vk.check("vkBeginCommandBuffer (present copy)", vkBeginCommandBuffer(cmd, begin));
+
+		transitionImage(stack, cmd, sourceImage,
+			VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+			VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+			VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+			VK_PIPELINE_STAGE_TRANSFER_BIT,
+			VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+			VK_ACCESS_TRANSFER_READ_BIT);
+		transitionImage(stack, cmd, drawableEntry.image,
+			drawableEntry.layout,
+			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			drawableEntry.layout == VK_IMAGE_LAYOUT_UNDEFINED
+				? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+				: VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+			VK_PIPELINE_STAGE_TRANSFER_BIT,
+			0,
+			VK_ACCESS_TRANSFER_WRITE_BIT);
+		drawableEntry.layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+
+		VkImageBlit.Buffer blit = VkImageBlit.calloc(1, stack);
+		blit.get(0).srcSubresource(r -> r
+			.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
+			.mipLevel(0)
+			.baseArrayLayer(0)
+			.layerCount(1));
+		blit.get(0).srcOffsets(0).set(0, 0, 0);
+		blit.get(0).srcOffsets(1).set(sourceWidth, sourceHeight, 1);
+		blit.get(0).dstSubresource(r -> r
+			.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
+			.mipLevel(0)
+			.baseArrayLayer(0)
+			.layerCount(1));
+		blit.get(0).dstOffsets(0).set(0, 0, 0);
+		blit.get(0).dstOffsets(1).set(drawableWidth, drawableHeight, 1);
+		vkCmdBlitImage(cmd,
+			sourceImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+			drawableEntry.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			blit, VK_FILTER_LINEAR);
+
+		transitionImage(stack, cmd, drawableEntry.image,
+			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+			VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+			VK_PIPELINE_STAGE_TRANSFER_BIT,
+			VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+			VK_ACCESS_TRANSFER_WRITE_BIT,
+			0);
+		drawableEntry.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+		Vk.check("vkEndCommandBuffer (present copy)", vkEndCommandBuffer(cmd));
 	}
 
 	private void processDrawComplete()
@@ -461,6 +568,11 @@ final class VulkanRenderer implements AutoCloseable
 		if (metalDrawables != null)
 		{
 			metalDrawables.close();
+		}
+		if (customPresentTarget != null)
+		{
+			customPresentTarget.close();
+			customPresentTarget = null;
 		}
 		if (fsrUpscaler != null)
 		{
@@ -873,9 +985,11 @@ final class VulkanRenderer implements AutoCloseable
 	 * by Metal). The inFlightFence still gates the slot for command-buffer
 	 * reuse on the next iteration.
 	 */
-	private void submitNoSemaphores(MemoryStack stack, VkCommandBuffer cmd)
+	private void submitNoSemaphores(MemoryStack stack, VkCommandBuffer cmd, VkCommandBuffer presentCmd)
 	{
-		PointerBuffer cmdBuf = stack.pointers(cmd);
+		PointerBuffer cmdBuf = presentCmd == null
+			? stack.pointers(cmd)
+			: stack.pointers(cmd, presentCmd);
 		VkSubmitInfo submit = VkSubmitInfo.calloc(stack)
 			.sType$Default()
 			.pCommandBuffers(cmdBuf);

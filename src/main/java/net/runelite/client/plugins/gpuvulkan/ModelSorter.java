@@ -29,7 +29,7 @@
  *
  * Adapted to Vulkan: stock writes pre-shuffled vertex bytes into an
  * {@code IntBuffer}; we return ordered face indices via {@link #sortedFaces}
- * and let {@link SceneRenderer#captureModelSorted} emit each face into the
+ * and let {@link SceneModelEmitter#captureModelSorted} emit each face into the
  * shared vertex buffer.
  */
 package net.runelite.client.plugins.gpuvulkan;

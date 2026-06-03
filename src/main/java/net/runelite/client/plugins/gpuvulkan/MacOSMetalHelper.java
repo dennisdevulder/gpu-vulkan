@@ -134,15 +134,29 @@ final class MacOSMetalHelper
 
 	static void resizeMetalLayer(Canvas canvas)
 	{
+		long token = ResizeTrace.start("metal.resizeCanvas",
+			canvas == null ? "canvas=null" : canvas.getWidth() + "x" + canvas.getHeight());
 		layerScale = canvasScale(canvas);
-		resizeMetalLayerSize(canvas.getWidth(), canvas.getHeight());
+		try
+		{
+			resizeMetalLayerSize(canvas.getWidth(), canvas.getHeight());
+		}
+		finally
+		{
+			ResizeTrace.end(token, "metal.resizeCanvas");
+		}
 	}
 
 	static void resizeMetalLayerSize(int widthPoints, int heightPoints)
 	{
 		if (loaded)
 		{
-			nResizeMetalLayer(Math.max(widthPoints, 1), Math.max(heightPoints, 1), layerScale);
+			int width = Math.max(widthPoints, 1);
+			int height = Math.max(heightPoints, 1);
+			long start = System.nanoTime();
+			nResizeMetalLayer(width, height, layerScale);
+			ResizeTrace.slow("metal.resizeLayer", System.nanoTime() - start,
+				width + "x" + height + " scale=" + layerScale);
 		}
 	}
 
@@ -179,7 +193,12 @@ final class MacOSMetalHelper
 	static long[] nextDrawable()
 	{
 		ensureLoaded();
-		return nNextDrawable();
+		long start = System.nanoTime();
+		long[] drawable = nNextDrawable();
+		long elapsed = System.nanoTime() - start;
+		ResizeTrace.slow("metal.nextDrawable", elapsed,
+			drawable == null ? "null" : drawable[2] + "x" + drawable[3]);
+		return drawable;
 	}
 
 	/**
@@ -191,7 +210,10 @@ final class MacOSMetalHelper
 	 */
 	static void presentDrawable(long drawable, long mtlQueue)
 	{
+		long start = System.nanoTime();
 		nPresentDrawable(drawable, mtlQueue);
+		ResizeTrace.slow("metal.presentDrawable", System.nanoTime() - start,
+			"drawable=0x" + Long.toHexString(drawable));
 	}
 
 	/** {@code [obj retain]} on an arbitrary Objective-C handle (typically
