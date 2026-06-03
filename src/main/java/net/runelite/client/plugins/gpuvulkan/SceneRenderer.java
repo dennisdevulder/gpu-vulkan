@@ -1,36 +1,7 @@
 /*
- * The {@code computeFaceUvs} helper near the bottom of this file is ported
- * verbatim from RuneLite's
- * {@code net.runelite.client.plugins.gpu.SceneUploader.computeFaceUvs}
- * (BSD-2-Clause). Original copyright + license:
- *
- *   Copyright (c) 2018, Adam <Adam@sigterm.info>
- *   All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions are met:
- *
- *   1. Redistributions of source code must retain the above copyright notice, this
- *      list of conditions and the following disclaimer.
- *   2. Redistributions in binary form must reproduce the above copyright notice,
- *      this list of conditions and the following disclaimer in the documentation
- *      and/or other materials provided with the distribution.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- *   ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- *   WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- *   DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
- *   ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- *   (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- *   LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- *   ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- *   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * Other methods are original to this project, even where their behaviour
- * mirrors stock GpuPlugin (e.g. tile-paint capture). They were re-derived
- * from the Scene / Tile / SceneTilePaint / SceneTileModel public API and the
- * stock comments only.
+ * Scene capture and draw scheduling are original to this project, even where
+ * behaviour mirrors stock GpuPlugin. Stock-ported UV mapping lives in
+ * ModelUvMapper with its original license note.
  */
 package net.runelite.client.plugins.gpuvulkan;
 
@@ -41,8 +12,6 @@ import net.runelite.api.DecorativeObject;
 import net.runelite.api.GameObject;
 import net.runelite.api.GroundObject;
 import net.runelite.api.Model;
-import net.runelite.api.Perspective;
-import net.runelite.api.Projection;
 import net.runelite.api.Renderable;
 import net.runelite.api.Scene;
 import net.runelite.api.SceneTileModel;
@@ -72,7 +41,8 @@ import static org.lwjgl.vulkan.VK13.*;
  * {@code [posX posY posZ pad colorR colorG colorB pad light u v texLayer]}.
  */
 @Slf4j
-final class SceneRenderer implements AutoCloseable
+final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
+	SceneModelEmitter.VertexSink, SceneTileEmitter.Sink
 {
 	enum Layer
 	{
@@ -88,16 +58,7 @@ final class SceneRenderer implements AutoCloseable
 	private static final long STATIC_BUFFER_BYTES = (long) MAX_STATIC_VERTICES * ScenePipeline.VERTEX_STRIDE;
 	private static final long FRAME_BUFFER_BYTES = (long) MAX_FRAME_VERTICES * ScenePipeline.VERTEX_STRIDE;
 	private static final long TOTAL_BUFFER_BYTES = STATIC_BUFFER_BYTES + FRAME_BUFFER_BYTES * FrameSync.FRAMES_IN_FLIGHT;
-	private static final int HSL_HIDDEN = 12345678;
-	private static final int OPAQUE_UNSORTED_FACE_THRESHOLD = intProperty("vkgpu.opaqueUnsortedFaceThreshold", 64, 0, 256);
 	private static final int SCENE_OFFSET = (Constants.EXTENDED_SCENE_SIZE - Constants.SCENE_SIZE) / 2;
-	private static final float[] HSL_RGB = HslColor.RGB_TABLE;
-
-	private static int intProperty(String name, int defaultValue, int min, int max)
-	{
-		int value = Integer.getInteger(name, defaultValue);
-		return Math.max(min, Math.min(max, value));
-	}
 
 	private final VulkanDevice device;
 	private final FrameSync sync;
@@ -112,18 +73,13 @@ final class SceneRenderer implements AutoCloseable
 	private final int slotBytes;
 	private final DrawCallbackStats stats;
 	private final boolean repushConstantsEveryDraw;
+	private final SceneDrawEmitter drawEmitter;
+	private final SceneZoneDrawScheduler zoneDrawScheduler;
 	private final boolean singlePassAlpha;
 	private long writePtr;
 	private long writeBasePtr;
 	private int writeBaseVertex;
 	private int writeVertexLimit = MAX_STATIC_VERTICES;
-	private final float[] cullLocalX = new float[ModelSorter.MAX_VERTEX_COUNT];
-	private final float[] cullLocalY = new float[ModelSorter.MAX_VERTEX_COUNT];
-	private final float[] cullLocalZ = new float[ModelSorter.MAX_VERTEX_COUNT];
-	private final float[] cullProjX = new float[ModelSorter.MAX_VERTEX_COUNT];
-	private final float[] cullProjY = new float[ModelSorter.MAX_VERTEX_COUNT];
-	private final float[] cullProjectScratch = new float[3];
-	private final ModelFaceCache modelFaceCache = new ModelFaceCache();
 
 	private static final int MAX_PLANES = 4;
 
@@ -153,10 +109,7 @@ final class SceneRenderer implements AutoCloseable
 	private final int[] overlayNextVertex = new int[FrameSync.FRAMES_IN_FLIGHT];
 
 	private final boolean[] wireframe = new boolean[LAYER_COUNT];
-	private int[] priorityRangeStarts = new int[1024];
-	private int[] priorityRangeEnds = new int[1024];
-	private int[] prioritySkipPairs = new int[2048];
-	private int priorityRangeCount;
+	private final PriorityRangeSet priorityRanges = new PriorityRangeSet();
 	private int dynamicOpaqueEnd = -1;
 	/** Plane range to render this frame, forwarded from preSceneDraw's
 	 *  (minLevel, level, maxLevel). Roof hiding only applies above the
@@ -173,48 +126,18 @@ final class SceneRenderer implements AutoCloseable
 	/** Per-tile-range roof tags recorded during {@link #captureScene}.
 	 *  At draw time the layer is split into render/skip sub-ranges based
 	 *  on the current frame's {@link #hideRoofIds}. */
-	private int[] tileRoofIds      = new int[2048];
-	private int[] tileRoofStarts   = new int[2048];
-	private int[] tileRoofCounts   = new int[2048];
-	private int   tileRoofCount;
+	private final RoofRangeSet roofRanges = new RoofRangeSet();
 	private boolean rebuildingOverlayZone;
 	/** Sorted [start, end) pairs of vertex sub-ranges to skip this frame. */
 	private int[] skipScratch = new int[256];
-	private int[] overlaySkipScratch = new int[256];
-	private int[] combinedSkipScratch = new int[256];
-	private final boolean[] dirtyZones = new boolean[ZONE_COUNT];
-	private final int[] dirtyZoneSlotMask = new int[ZONE_COUNT];
-	private int dirtyZoneCount;
+	private final DirtyZoneTracker dirtyZones = new DirtyZoneTracker(ZONE_COUNT);
 
 	private int vertexCount;
 	private boolean overflowed;
-	private boolean recordSceneStats;
 
-	/** Renderables whose Model came back null during {@link #captureScene}
-	 *  — usually because the engine hasn't finished streaming the model
-	 *  yet on a freshly-loaded region. {@link #captureDynamicPending}
-	 *  retries each entry every frame until the owning zone has been rebuilt
-	 *  into every frame slot. */
-	private static final class PendingRenderable
-	{
-		final Renderable r;
-		final int orient, x, y, z;
-		final int zone;
-		Model model;
-		boolean dirtyMarked;
-
-		PendingRenderable(Renderable r, int orient, int x, int y, int z, int zone)
-		{
-			this.r = r;
-			this.orient = orient;
-			this.x = x;
-			this.y = y;
-			this.z = z;
-			this.zone = zone;
-		}
-	}
-	private final java.util.ArrayList<PendingRenderable> pendingRenderables = new java.util.ArrayList<>();
-	private static final int MAX_PENDING = 4096;
+	private final PendingRenderables pendingRenderables = new PendingRenderables();
+	private final SceneModelEmitter modelEmitter;
+	private final SceneTileEmitter tileEmitter;
 
 	/**
 	 * Drops the captured scene so {@link #recordDraw} skips its work on the
@@ -227,12 +150,10 @@ final class SceneRenderer implements AutoCloseable
 	void invalidateCapturedScene()
 	{
 		vertexCount = 0;
-		tileRoofCount = 0;
-		java.util.Arrays.fill(dirtyZones, false);
-		java.util.Arrays.fill(dirtyZoneSlotMask, 0);
-		dirtyZoneCount = 0;
+		roofRanges.clear();
+		dirtyZones.clear();
 		pendingRenderables.clear();
-		modelFaceCache.clear();
+		modelEmitter.clearCache();
 		for (int i = 0; i < LAYER_COUNT; i++)
 		{
 			regionEnds[i] = 0;
@@ -255,23 +176,11 @@ final class SceneRenderer implements AutoCloseable
 		markZoneDirty(zx * ZONES_PER_SIDE + zz);
 	}
 
-	private void markZoneDirty(int zone)
+	@Override
+	public void markZoneDirty(int zone)
 	{
-		if (zone < 0 || zone >= ZONE_COUNT)
-		{
-			return;
-		}
-		if (!dirtyZones[zone])
-		{
-			dirtyZones[zone] = true;
-			dirtyZoneCount++;
-		}
-		dirtyZoneSlotMask[zone] = 0;
+		dirtyZones.mark(zone);
 	}
-
-	/** Single instance reused across captures — all captures run on the
-	 *  Client thread. */
-	private final ModelSorter sorter = new ModelSorter();
 
 	SceneRenderer(VulkanDevice device, FrameSync sync,
 		RenderPass renderPass, TextureArray textureArray,
@@ -281,6 +190,14 @@ final class SceneRenderer implements AutoCloseable
 		this.sync = sync;
 		this.stats = stats;
 		this.repushConstantsEveryDraw = device.supportsMetalObjects();
+		this.drawEmitter = new SceneDrawEmitter(stats, repushConstantsEveryDraw);
+		this.zoneDrawScheduler = new SceneZoneDrawScheduler(drawEmitter,
+			ZONES_PER_SIDE, ZONE_COUNT, planeEnds,
+			zoneVertexStart, zoneVertexCount,
+			overlayZoneStart, overlayZoneCount,
+			overlayZoneValid, overlaySlotHasZones);
+		this.modelEmitter = new SceneModelEmitter(stats, priorityRanges, this);
+		this.tileEmitter = new SceneTileEmitter(this);
 		this.singlePassAlpha = singlePassAlpha || Boolean.getBoolean("vkgpu.skipAlphaPass");
 		this.fillPipeline = new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL, true,
 			renderPass.samples(), alphaToCoverage);
@@ -333,10 +250,10 @@ final class SceneRenderer implements AutoCloseable
 		metrics.sceneVertices += regionEnds[LAST_STATIC.ordinal()];
 		metrics.totalVertices += vertexCount;
 		metrics.maxVertices += MAX_LOGICAL_VERTICES;
-		metrics.roofRanges += tileRoofCount;
+		metrics.roofRanges += roofRanges.count();
 		metrics.pendingRenderables += pendingRenderables.size();
-		metrics.dirtyZones += dirtyZoneCount;
-		modelFaceCache.collectDebugMetrics(metrics);
+		metrics.dirtyZones += dirtyZones.count();
+		modelEmitter.collectDebugMetrics(metrics);
 		metrics.sceneDrawCalls += stats.sceneDrawCalls.get();
 		metrics.sceneDrawVertices += stats.sceneDrawVertices.get();
 		metrics.scenePushConstants += stats.scenePushConstants.get();
@@ -372,7 +289,8 @@ final class SceneRenderer implements AutoCloseable
 		writePtr = writeBasePtr + (long) (logicalVertex - writeBaseVertex) * ScenePipeline.VERTEX_STRIDE;
 	}
 
-	private boolean reserveVertices(int vertices)
+	@Override
+	public boolean reserveVertices(int vertices)
 	{
 		if (vertices < 0 || vertexCount > writeVertexLimit - vertices)
 		{
@@ -399,7 +317,7 @@ final class SceneRenderer implements AutoCloseable
 		vertexCount = overlayNextVertex[slot];
 		useFrameWriteArena(slot, vertexCount);
 		overflowed = false;
-		priorityRangeCount = 0;
+		priorityRanges.clear();
 		dynamicOpaqueEnd = -1;
 	}
 
@@ -413,7 +331,7 @@ final class SceneRenderer implements AutoCloseable
 
 	void rebuildDirtyZones(Scene scene)
 	{
-		if (scene == null || dirtyZoneCount == 0)
+		if (scene == null || dirtyZones.count() == 0)
 		{
 			return;
 		}
@@ -439,7 +357,7 @@ final class SceneRenderer implements AutoCloseable
 
 		for (int zone = 0; zone < ZONE_COUNT; zone++)
 		{
-			if (!dirtyZones[zone] || (dirtyZoneSlotMask[zone] & slotBit) != 0)
+			if (!dirtyZones.needsSlot(zone, slotBit))
 			{
 				continue;
 			}
@@ -456,12 +374,7 @@ final class SceneRenderer implements AutoCloseable
 			}
 			overlayZoneValid[slot][zone] = true;
 			overlaySlotHasZones[slot] = true;
-			dirtyZoneSlotMask[zone] |= slotBit;
-			if (dirtyZoneSlotMask[zone] == allSlots)
-			{
-				dirtyZones[zone] = false;
-				dirtyZoneCount--;
-			}
+			dirtyZones.markSlotRebuilt(zone, slotBit, allSlots);
 		}
 
 		overlayNextVertex[slot] = vertexCount;
@@ -497,10 +410,10 @@ final class SceneRenderer implements AutoCloseable
 		vertexCount = 0;
 		useStaticWriteArena();
 		overflowed = false;
-		tileRoofCount = 0;
+		roofRanges.clear();
 		clearOverlayRanges();
 		pendingRenderables.clear();
-		modelFaceCache.clear();
+		modelEmitter.clearCache();
 
 		Tile[][][] tiles = scene.getTiles();
 		if (tiles == null) return;
@@ -568,7 +481,7 @@ final class SceneRenderer implements AutoCloseable
 			overlayNextVertex[slot] = vertexCount;
 		}
 
-		log.debug("captureScene: {} vertices, {} roof tiles", vertexCount, tileRoofCount);
+		log.debug("captureScene: {} vertices, {} roof tiles", vertexCount, roofRanges.count());
 	}
 
 	private void clearOverlayRanges()
@@ -772,7 +685,7 @@ final class SceneRenderer implements AutoCloseable
 			{
 				int msx = sx + roofOffset;
 				int msy = sy + roofOffset;
-				RoofInfo roofInfo = roofInfoForTile(roofs, tileSettings, sourceLevel, msx, msy);
+				SceneRoofInfo roofInfo = SceneRoofInfo.forTile(roofs, tileSettings, sourceLevel, msx, msy);
 				if (roofInfo.visbelow != visbelow) continue;
 
 				Tile t = tiles[sourceLevel][sx][sy];
@@ -780,7 +693,7 @@ final class SceneRenderer implements AutoCloseable
 				Tile cur = t;
 				while (cur != null)
 				{
-					int renderLevel = renderLevel(cur, sourceLevel);
+					int renderLevel = SceneRoofInfo.renderLevel(cur, sourceLevel);
 					int before = vertexCount;
 					body.capture(cur, renderLevel, sx, sy);
 					if (roofInfo.roofId != 0 && vertexCount > before)
@@ -843,7 +756,7 @@ final class SceneRenderer implements AutoCloseable
 			{
 				int msx = sx + roofOffset;
 				int msy = sy + roofOffset;
-				RoofInfo roofInfo = roofInfoForTile(roofs, tileSettings, sourceLevel, msx, msy);
+				SceneRoofInfo roofInfo = SceneRoofInfo.forTile(roofs, tileSettings, sourceLevel, msx, msy);
 				if (roofInfo.visbelow != visbelow) continue;
 
 				Tile t = tiles[sourceLevel][sx][sy];
@@ -877,28 +790,15 @@ final class SceneRenderer implements AutoCloseable
 	{
 		if (r == null) return;
 		if (r instanceof net.runelite.api.Actor) return;
-		Model m = resolveModel(r);
+		Model m = PendingRenderables.resolveModel(r);
 		if (m == null)
 		{
 			// Model not streamed yet — retry until it can promote its zone
 			// through the per-slot overlay rebuild path.
-			if (pendingRenderables.size() < MAX_PENDING)
-			{
-				pendingRenderables.add(new PendingRenderable(r, orient, x, y, z, zoneForWorldPoint(x, z)));
-			}
+			pendingRenderables.add(r, orient, x, y, z, zoneForWorldPoint(x, z));
 			return;
 		}
 		captureModel(m, orient, x, y, z);
-	}
-
-	/** DynamicObject.getModelZbuf is thread-safe and returns the
-	 *  non-animated baseline; plain getModel() can return a half-animated
-	 *  model or null mid-update. */
-	private static Model resolveModel(Renderable r)
-	{
-		if (r instanceof Model) return (Model) r;
-		if (r instanceof net.runelite.api.DynamicObject) return ((net.runelite.api.DynamicObject) r).getModelZbuf();
-		return r.getModel();
 	}
 
 	/**
@@ -910,39 +810,13 @@ final class SceneRenderer implements AutoCloseable
 	 */
 	void captureDynamicPending()
 	{
-		if (pendingRenderables.isEmpty()) return;
-		for (int i = 0; i < pendingRenderables.size(); )
-		{
-			PendingRenderable pr = pendingRenderables.get(i);
-			Model m = pr.model;
-			if (m == null)
-			{
-				if (pr.r instanceof net.runelite.api.Actor)
-				{
-					i++;
-					continue;
-				}
-				m = resolveModel(pr.r);
-				if (m == null)
-				{
-					i++;
-					continue;
-				}
-				pr.model = m;
-			}
-			if (!pr.dirtyMarked)
-			{
-				markZoneDirty(pr.zone);
-				pr.dirtyMarked = true;
-			}
-			captureModel(m, pr.orient, pr.x, pr.y, pr.z);
-			if (pr.zone >= 0 && pr.zone < ZONE_COUNT && !dirtyZones[pr.zone])
-			{
-				pendingRenderables.remove(i);
-				continue;
-			}
-			i++;
-		}
+		pendingRenderables.captureLoaded(this);
+	}
+
+	@Override
+	public boolean isZoneDirty(int zone)
+	{
+		return zone >= 0 && zone < ZONE_COUNT && dirtyZones.isDirty(zone);
 	}
 
 	private static int zoneForWorldPoint(int x, int z)
@@ -958,820 +832,34 @@ final class SceneRenderer implements AutoCloseable
 
 	private void captureTilePaint(Scene scene, SceneTilePaint paint, int plane, int sx, int sy)
 	{
-		int neColor = paint.getNeColor();
-		if (neColor == HSL_HIDDEN) return;
-
-		int swColor = paint.getSwColor();
-		int seColor = paint.getSeColor();
-		int nwColor = paint.getNwColor();
-
-		int[][][] tileHeights = scene.getTileHeights();
-		int ex = sx + SCENE_OFFSET;
-		int ey = sy + SCENE_OFFSET;
-		int swH = tileHeights[plane][ex    ][ey    ];
-		int seH = tileHeights[plane][ex + 1][ey    ];
-		int neH = tileHeights[plane][ex + 1][ey + 1];
-		int nwH = tileHeights[plane][ex    ][ey + 1];
-
-		int x0 = sx << 7, x1 = x0 + 128;
-		int z0 = sy << 7, z1 = z0 + 128;
-
-		// paint.getTexture() = -1 for no-texture, otherwise OSRS texture
-		// id. Texture array layer 0 is white, so +1 maps cleanly.
-		int texLayer = paint.getTexture() + 1;
-
-		if (!reserveVertices(6)) return;
-
-		writeHslVert(x0, swH, z0, swColor, 0f, 0f, texLayer);
-		writeHslVert(x1, seH, z0, seColor, 1f, 0f, texLayer);
-		writeHslVert(x1, neH, z1, neColor, 1f, 1f, texLayer);
-
-		writeHslVert(x0, swH, z0, swColor, 0f, 0f, texLayer);
-		writeHslVert(x1, neH, z1, neColor, 1f, 1f, texLayer);
-		writeHslVert(x0, nwH, z1, nwColor, 0f, 1f, texLayer);
-
-		vertexCount += 6;
+		tileEmitter.captureTilePaint(scene, paint, plane, sx, sy);
 	}
 
 	private void captureTileModel(SceneTileModel model, int sx, int sy)
 	{
-		int[] faceX = model.getFaceX();
-		int[] faceY = model.getFaceY();
-		int[] faceZ = model.getFaceZ();
-		if (faceX == null) return;
-
-		int[] vertexX = model.getVertexX();
-		int[] vertexY = model.getVertexY();
-		int[] vertexZ = model.getVertexZ();
-		int[] colorA = model.getTriangleColorA();
-		int[] colorB = model.getTriangleColorB();
-		int[] colorC = model.getTriangleColorC();
-		int[] triangleTextures = model.getTriangleTextureId();
-
-		// UV = local_offset / 128 (one tile = 128 OSRS units).
-		float lx = sx << 7;
-		float lz = sy << 7;
-
-		int faces = faceX.length;
-		if (!reserveVertices(faces * 3)) return;
-
-		for (int i = 0; i < faces; i++)
-		{
-			int a = colorA[i];
-			if (a == HSL_HIDDEN) continue;
-			int b = colorB[i], c = colorC[i];
-			int v0 = faceX[i], v1 = faceY[i], v2 = faceZ[i];
-			int texLayer = triangleTextures != null && triangleTextures[i] != -1
-				? triangleTextures[i] + 1 : 0;
-			float u0 = (vertexX[v0] - lx) / 128f, w0 = (vertexZ[v0] - lz) / 128f;
-			float u1 = (vertexX[v1] - lx) / 128f, w1 = (vertexZ[v1] - lz) / 128f;
-			float u2 = (vertexX[v2] - lx) / 128f, w2 = (vertexZ[v2] - lz) / 128f;
-			writeHslVert(vertexX[v0], vertexY[v0], vertexZ[v0], a, u0, w0, texLayer);
-			writeHslVert(vertexX[v1], vertexY[v1], vertexZ[v1], b, u1, w1, texLayer);
-			writeHslVert(vertexX[v2], vertexY[v2], vertexZ[v2], c, u2, w2, texLayer);
-			vertexCount += 3;
-		}
+		tileEmitter.captureTileModel(model, sx, sy);
 	}
 
-	void captureModel(Model m, int orient, int worldX, int worldY, int worldZ)
+	@Override
+	public void captureModel(Model m, int orient, int worldX, int worldY, int worldZ)
 	{
-		if (m == null) return;
-		captureModelUnsorted(m, orient, worldX, worldY, worldZ);
+		modelEmitter.captureModel(m, orient, worldX, worldY, worldZ);
 	}
 
-	private void captureModelUnsorted(Model m, int orient, int worldX, int worldY, int worldZ)
+	void captureModelSorted(net.runelite.api.Projection proj, Model m, int orient, int worldX, int worldY, int worldZ)
 	{
-		boolean detailedStats = stats.isDetailedModelStats();
-		long emitStart = detailedStats ? System.nanoTime() : 0L;
-		float[] vx = m.getVerticesX();
-		float[] vy = m.getVerticesY();
-		float[] vz = m.getVerticesZ();
-		int[] fa = m.getFaceIndices1();
-		int[] fb = m.getFaceIndices2();
-		int[] fc = m.getFaceIndices3();
-		if (fa == null || fb == null || fc == null) return;
-
-		int[] c1 = m.getFaceColors1();
-		int[] c2 = m.getFaceColors2();
-		int[] c3 = m.getFaceColors3();
-
-		short[] faceTextures   = m.getFaceTextures();
-		byte[]  textureFaces   = m.getTextureFaces();
-		int[]   texIndicesA    = m.getTexIndices1();
-		int[]   texIndicesB    = m.getTexIndices2();
-		int[]   texIndicesC    = m.getTexIndices3();
-		byte[]  faceTransparencies = m.getFaceTransparencies();
-		byte[]  faceBias = m.getFaceBias();
-
-		final byte overrideAmount = m.getOverrideAmount();
-		final byte overrideHue    = m.getOverrideHue();
-		final byte overrideSat    = m.getOverrideSaturation();
-		final byte overrideLum    = m.getOverrideLuminance();
-		final boolean hasOverride = (overrideAmount & 0xFF) != 0;
-
-		float cos = Perspective.COSINE[orient & 0x7FF] / 65536f;
-		float sin = Perspective.SINE[orient & 0x7FF] / 65536f;
-
-		// LANDMINE: Mesh.getFaceCount(), NOT fa.length. Engine over-allocates
-		// face index arrays for assembled actor models (player composition,
-		// reused NPC bodies); fa.length reads stale trailing data.
-		int faces = m.getFaceCount();
-		if (!reserveVertices(faces * 3)) return;
-
-		float[] uv = uvScratch;
-		int wrote = 0;
-		int texturedFaces = 0;
-		int overrideFaces = 0;
-		long uvNanos = 0;
-		for (int f = 0; f < faces; f++)
-		{
-			int col1 = c1 != null ? c1[f] : 0;
-			int col2 = col1, col3 = col1;
-			if (c3 != null)
-			{
-				int raw3 = c3[f];
-				if (raw3 == -2) continue;
-				if (raw3 != -1)
-				{
-					col2 = c2[f];
-					col3 = raw3;
-				}
-			}
-
-			// Don't skip on transparency here — cloth drapes / glass /
-			// water need to render even without a real alpha pass. The
-			// engine's invisible sentinel (255) is handled in scene.frag.
-
-			int texLayer = 0;
-			float u0 = 0, v0 = 0, u1 = 0, v1 = 0, u2 = 0, v2 = 0;
-			if (faceTextures != null && faceTextures[f] != -1)
-			{
-				long uvStart = detailedStats ? System.nanoTime() : 0L;
-				texLayer = (faceTextures[f] & 0xFFFF) + 1;
-				computeFaceUvs(uv, vx, vy, vz, fa[f], fb[f], fc[f],
-					textureFaces, texIndicesA, texIndicesB, texIndicesC, f);
-				if (detailedStats)
-				{
-					uvNanos += System.nanoTime() - uvStart;
-				}
-				texturedFaces++;
-				u0 = uv[0]; v0 = uv[1];
-				u1 = uv[2]; v1 = uv[3];
-				u2 = uv[4]; v2 = uv[5];
-			}
-
-			// HSL override: per-vertex so smooth-banding interpolation
-			// picks up the tint across the face. Untextured only —
-			// mirrors stock SceneUploader.uploadTempModel scoping.
-			if (hasOverride && texLayer == 0)
-			{
-				overrideFaces++;
-				col1 = HslColor.applyOverride(col1, overrideHue, overrideSat, overrideLum, overrideAmount);
-				col2 = HslColor.applyOverride(col2, overrideHue, overrideSat, overrideLum, overrideAmount);
-				col3 = HslColor.applyOverride(col3, overrideHue, overrideSat, overrideLum, overrideAmount);
-			}
-
-			// Pack [texLayer:16 | bias:8 | trans:8] = stock's alphaBias.
-			int bias = faceBias != null ? (faceBias[f] & 0xFF) : 0;
-			int trans = faceTransparencies != null ? (faceTransparencies[f] & 0xFF) : 0;
-			int packedTexLayer = texLayer | (bias << 16) | (trans << 24);
-			boolean noUv = texLayer == 0;
-
-			int ia = fa[f];
-			int ib = fb[f];
-			int ic = fc[f];
-			if (col1 == col2 && col1 == col3)
-			{
-				int rgbOffset = (col1 & 0xFFFF) * 3;
-				float light = (float) (col1 & 0xFFFF);
-				float r = HSL_RGB[rgbOffset];
-				float g = HSL_RGB[rgbOffset + 1];
-				float b = HSL_RGB[rgbOffset + 2];
-				if (noUv)
-				{
-					writeRotatedVertexRgbNoUv(vx[ia], vy[ia], vz[ia], cos, sin, worldX, worldY, worldZ, light, r, g, b, packedTexLayer);
-					writeRotatedVertexRgbNoUv(vx[ib], vy[ib], vz[ib], cos, sin, worldX, worldY, worldZ, light, r, g, b, packedTexLayer);
-					writeRotatedVertexRgbNoUv(vx[ic], vy[ic], vz[ic], cos, sin, worldX, worldY, worldZ, light, r, g, b, packedTexLayer);
-				}
-				else
-				{
-					writeRotatedVertexRgb(vx[ia], vy[ia], vz[ia], cos, sin, worldX, worldY, worldZ, light, r, g, b, u0, v0, packedTexLayer);
-					writeRotatedVertexRgb(vx[ib], vy[ib], vz[ib], cos, sin, worldX, worldY, worldZ, light, r, g, b, u1, v1, packedTexLayer);
-					writeRotatedVertexRgb(vx[ic], vy[ic], vz[ic], cos, sin, worldX, worldY, worldZ, light, r, g, b, u2, v2, packedTexLayer);
-				}
-			}
-			else
-			{
-				int rgbOffset1 = (col1 & 0xFFFF) * 3;
-				int rgbOffset2 = (col2 & 0xFFFF) * 3;
-				int rgbOffset3 = (col3 & 0xFFFF) * 3;
-				if (noUv)
-				{
-					writeRotatedVertexRgbNoUv(vx[ia], vy[ia], vz[ia], cos, sin, worldX, worldY, worldZ,
-						(float) (col1 & 0xFFFF), HSL_RGB[rgbOffset1], HSL_RGB[rgbOffset1 + 1], HSL_RGB[rgbOffset1 + 2], packedTexLayer);
-					writeRotatedVertexRgbNoUv(vx[ib], vy[ib], vz[ib], cos, sin, worldX, worldY, worldZ,
-						(float) (col2 & 0xFFFF), HSL_RGB[rgbOffset2], HSL_RGB[rgbOffset2 + 1], HSL_RGB[rgbOffset2 + 2], packedTexLayer);
-					writeRotatedVertexRgbNoUv(vx[ic], vy[ic], vz[ic], cos, sin, worldX, worldY, worldZ,
-						(float) (col3 & 0xFFFF), HSL_RGB[rgbOffset3], HSL_RGB[rgbOffset3 + 1], HSL_RGB[rgbOffset3 + 2], packedTexLayer);
-				}
-				else
-				{
-					writeRotatedVertexRgb(vx[ia], vy[ia], vz[ia], cos, sin, worldX, worldY, worldZ,
-						(float) (col1 & 0xFFFF), HSL_RGB[rgbOffset1], HSL_RGB[rgbOffset1 + 1], HSL_RGB[rgbOffset1 + 2], u0, v0, packedTexLayer);
-					writeRotatedVertexRgb(vx[ib], vy[ib], vz[ib], cos, sin, worldX, worldY, worldZ,
-						(float) (col2 & 0xFFFF), HSL_RGB[rgbOffset2], HSL_RGB[rgbOffset2 + 1], HSL_RGB[rgbOffset2 + 2], u1, v1, packedTexLayer);
-					writeRotatedVertexRgb(vx[ic], vy[ic], vz[ic], cos, sin, worldX, worldY, worldZ,
-						(float) (col3 & 0xFFFF), HSL_RGB[rgbOffset3], HSL_RGB[rgbOffset3 + 1], HSL_RGB[rgbOffset3 + 2], u2, v2, packedTexLayer);
-				}
-			}
-			wrote += 3;
-		}
-		vertexCount += wrote;
-		if (detailedStats)
-		{
-			stats.unsortedModels.incrementAndGet();
-			stats.unsortedFaces.addAndGet(wrote / 3);
-			long emitNanos = System.nanoTime() - emitStart;
-			stats.modelEmitNanos.addAndGet(emitNanos);
-			stats.modelUnsortedEmitNanos.addAndGet(emitNanos);
-			stats.modelUvNanos.addAndGet(uvNanos);
-			stats.texturedEmitFaces.addAndGet(texturedFaces);
-			stats.overrideEmitFaces.addAndGet(overrideFaces);
-		}
+		modelEmitter.captureModelSorted(proj, m, orient, worldX, worldY, worldZ);
 	}
 
-	/**
-	 * Sorted variant of {@link #captureModel} — runs the model through
-	 * {@link ModelSorter} (camera-space depth bucketing + back-face cull),
-	 * then emits the model's triangles back-to-front. If sorting rejects the
-	 * model or emits no faces, this falls back to the unsorted path so
-	 * transient effects don't disappear.
-	 * Use this from the engine's {@code drawDynamic} / {@code drawTemp}
-	 * callbacks where a {@link Projection} is supplied; the existing
-	 * unsorted {@link #captureModel} stays in place for the actor walk,
-	 * which has no Projection of its own.
-	 *
-	 * <p>Stock GPU uploads every dynamic/temp callback independently, so this
-	 * path intentionally does not dedupe by model identity.
-	 */
-	void captureModelSorted(Projection proj, Model m, int orient, int worldX, int worldY, int worldZ)
+	void captureModelSorted(net.runelite.api.Projection proj, Model m, int orient, int worldX, int worldY, int worldZ, int renderMode)
 	{
-		captureModelSorted(proj, m, orient, worldX, worldY, worldZ, Renderable.RENDERMODE_DEFAULT);
+		modelEmitter.captureModelSorted(proj, m, orient, worldX, worldY, worldZ, renderMode);
 	}
 
-	void captureModelSorted(Projection proj, Model m, int orient, int worldX, int worldY, int worldZ, int renderMode)
-	{
-		captureModelSorted(proj, m, orient, worldX, worldY, worldZ, renderMode, false);
-	}
-
-	void captureModelSorted(Projection proj, Model m, int orient, int worldX, int worldY, int worldZ, int renderMode,
+	void captureModelSorted(net.runelite.api.Projection proj, Model m, int orient, int worldX, int worldY, int worldZ, int renderMode,
 		boolean actorModel)
 	{
-		if (m == null || proj == null) return;
-
-		boolean detailedStats = stats.isDetailedModelStats();
-		boolean prioritySort = renderMode == Renderable.RENDERMODE_SORTED_NO_DEPTH;
-		int priorityStart = prioritySort ? vertexCount : -1;
-		int faceCount = m.getFaceCount();
-		byte[] faceTransparencies = m.getFaceTransparencies();
-		if (!prioritySort && faceCount <= OPAQUE_UNSORTED_FACE_THRESHOLD
-			&& ModelFaceCache.countTransparentFaces(faceCount, faceTransparencies) == 0)
-		{
-			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
-			return;
-		}
-		ModelFaceCache.Entry modelInfo = modelFaceCache.info(faceCount, faceTransparencies);
-		boolean needsFaceSort = prioritySort || modelInfo.hasTransparentFaces;
-		if (!needsFaceSort && modelInfo.faceCount <= OPAQUE_UNSORTED_FACE_THRESHOLD)
-		{
-			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
-			recordPriorityRange(priorityStart);
-			return;
-		}
-
-		if (!needsFaceSort)
-		{
-			if (!captureModelCullOnlyFused(proj, m, orient, worldX, worldY, worldZ))
-			{
-				if (detailedStats)
-				{
-					stats.sortFallbackModels.incrementAndGet();
-				}
-				captureModelUnsorted(m, orient, worldX, worldY, worldZ);
-			}
-			recordPriorityRange(priorityStart);
-			return;
-		}
-
-		long sortStart = detailedStats ? System.nanoTime() : 0L;
-		boolean sorted = sorter.sort(proj, m, orient, worldX, worldY, worldZ, prioritySort);
-		if (detailedStats)
-		{
-			stats.addNanos(stats.modelFullSortNanos, sortStart);
-			stats.addNanos(stats.modelSortNanos, sortStart);
-		}
-		if (!sorted)
-		{
-			// Sorting is a quality pass, not a visibility gate. Some transient
-			// renderables (projectiles / spotanims) have bounds that make the
-			// sorter reject them; keep them visible by falling back to the basic
-			// model emitter.
-			if (detailedStats)
-			{
-				stats.sortFallbackModels.incrementAndGet();
-			}
-			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
-			recordPriorityRange(priorityStart);
-			return;
-		}
-
-		int faces = sorter.sortedCount;
-		if (faces == 0)
-		{
-			if (detailedStats)
-			{
-				stats.sortFallbackModels.incrementAndGet();
-			}
-			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
-			recordPriorityRange(priorityStart);
-			return;
-		}
-		if (!reserveVertices(faces * 3)) return;
-
-		// Vertex positions are read by computeFaceUvs only; emit uses the
-		// sorter's already-rotated localX/Y/Z.
-		float[] vxs = m.getVerticesX();
-		float[] vys = m.getVerticesY();
-		float[] vzs = m.getVerticesZ();
-		int[] fa = m.getFaceIndices1();
-		int[] fb = m.getFaceIndices2();
-		int[] fc = m.getFaceIndices3();
-
-		int[] c1 = m.getFaceColors1();
-		int[] c2 = m.getFaceColors2();
-		int[] c3 = m.getFaceColors3();
-
-		short[] faceTextures   = m.getFaceTextures();
-		byte[]  textureFaces   = m.getTextureFaces();
-		int[]   texIndicesA    = m.getTexIndices1();
-		int[]   texIndicesB    = m.getTexIndices2();
-		int[]   texIndicesC    = m.getTexIndices3();
-		byte[]  faceBiasArr = m.getFaceBias();
-
-		final byte overrideAmount = m.getOverrideAmount();
-		final byte overrideHue    = m.getOverrideHue();
-		final byte overrideSat    = m.getOverrideSaturation();
-		final byte overrideLum    = m.getOverrideLuminance();
-		final boolean hasOverride = (overrideAmount & 0xFF) != 0;
-
-		float[] uv = uvScratch;
-
-		// Sorter applies orientation + worldXYZ; positions are world-space.
-		float[] lx = sorter.localX;
-		float[] ly = sorter.localY;
-		float[] lz = sorter.localZ;
-
-		int wrote = 0;
-		long emitStart = detailedStats ? System.nanoTime() : 0L;
-		int texturedFaces = 0;
-		int overrideFaces = 0;
-		long uvNanos = 0;
-		for (int i = 0; i < faces; i++)
-		{
-			int f = sorter.sortedFaces[i];
-
-			// Sorter has already dropped c3 == -2 faces, so raw3 is
-			// never the skip sentinel here.
-			int col1 = c1 != null ? c1[f] : 0;
-			int col2 = col1, col3 = col1;
-			if (c3 != null)
-			{
-				int raw3 = c3[f];
-				if (raw3 != -1)
-				{
-					col2 = c2[f];
-					col3 = raw3;
-				}
-			}
-
-			int texLayer = 0;
-			float u0 = 0, v0 = 0, u1 = 0, v1 = 0, u2 = 0, v2 = 0;
-			if (faceTextures != null && faceTextures[f] != -1)
-			{
-				long uvStart = detailedStats ? System.nanoTime() : 0L;
-				texLayer = (faceTextures[f] & 0xFFFF) + 1;
-				computeFaceUvs(uv, vxs, vys, vzs, fa[f], fb[f], fc[f],
-					textureFaces, texIndicesA, texIndicesB, texIndicesC, f);
-				if (detailedStats)
-				{
-					uvNanos += System.nanoTime() - uvStart;
-				}
-				texturedFaces++;
-				u0 = uv[0]; v0 = uv[1];
-				u1 = uv[2]; v1 = uv[3];
-				u2 = uv[4]; v2 = uv[5];
-			}
-
-			if (hasOverride && texLayer == 0)
-			{
-				overrideFaces++;
-				col1 = HslColor.applyOverride(col1, overrideHue, overrideSat, overrideLum, overrideAmount);
-				col2 = HslColor.applyOverride(col2, overrideHue, overrideSat, overrideLum, overrideAmount);
-				col3 = HslColor.applyOverride(col3, overrideHue, overrideSat, overrideLum, overrideAmount);
-			}
-
-			int bias = faceBiasArr != null ? (faceBiasArr[f] & 0xFF) : 0;
-			int trans = faceTransparencies != null ? (faceTransparencies[f] & 0xFF) : 0;
-			int packedTexLayer = texLayer | (bias << 16) | (trans << 24);
-			boolean noUv = texLayer == 0;
-
-			int ia = fa[f];
-			int ib = fb[f];
-			int ic = fc[f];
-			if (col1 == col2 && col1 == col3)
-			{
-				int rgbOffset = (col1 & 0xFFFF) * 3;
-				float light = (float) (col1 & 0xFFFF);
-				float r = HSL_RGB[rgbOffset];
-				float g = HSL_RGB[rgbOffset + 1];
-				float b = HSL_RGB[rgbOffset + 2];
-				if (noUv)
-				{
-					writePackedTriangleRgbNoUv(
-						lx[ia], ly[ia], lz[ia],
-						lx[ib], ly[ib], lz[ib],
-						lx[ic], ly[ic], lz[ic],
-						light, r, g, b, packedTexLayer);
-				}
-				else
-				{
-					writePackedVertexRgb(lx[ia], ly[ia], lz[ia], light, r, g, b, u0, v0, packedTexLayer);
-					writePackedVertexRgb(lx[ib], ly[ib], lz[ib], light, r, g, b, u1, v1, packedTexLayer);
-					writePackedVertexRgb(lx[ic], ly[ic], lz[ic], light, r, g, b, u2, v2, packedTexLayer);
-				}
-			}
-			else
-			{
-				int rgbOffset1 = (col1 & 0xFFFF) * 3;
-				int rgbOffset2 = (col2 & 0xFFFF) * 3;
-				int rgbOffset3 = (col3 & 0xFFFF) * 3;
-				if (noUv)
-				{
-					writePackedVertexRgbNoUv(lx[ia], ly[ia], lz[ia],
-						(float) (col1 & 0xFFFF), HSL_RGB[rgbOffset1], HSL_RGB[rgbOffset1 + 1], HSL_RGB[rgbOffset1 + 2], packedTexLayer);
-					writePackedVertexRgbNoUv(lx[ib], ly[ib], lz[ib],
-						(float) (col2 & 0xFFFF), HSL_RGB[rgbOffset2], HSL_RGB[rgbOffset2 + 1], HSL_RGB[rgbOffset2 + 2], packedTexLayer);
-					writePackedVertexRgbNoUv(lx[ic], ly[ic], lz[ic],
-						(float) (col3 & 0xFFFF), HSL_RGB[rgbOffset3], HSL_RGB[rgbOffset3 + 1], HSL_RGB[rgbOffset3 + 2], packedTexLayer);
-				}
-				else
-				{
-					writePackedVertexRgb(lx[ia], ly[ia], lz[ia],
-						(float) (col1 & 0xFFFF), HSL_RGB[rgbOffset1], HSL_RGB[rgbOffset1 + 1], HSL_RGB[rgbOffset1 + 2], u0, v0, packedTexLayer);
-					writePackedVertexRgb(lx[ib], ly[ib], lz[ib],
-						(float) (col2 & 0xFFFF), HSL_RGB[rgbOffset2], HSL_RGB[rgbOffset2 + 1], HSL_RGB[rgbOffset2 + 2], u1, v1, packedTexLayer);
-					writePackedVertexRgb(lx[ic], ly[ic], lz[ic],
-						(float) (col3 & 0xFFFF), HSL_RGB[rgbOffset3], HSL_RGB[rgbOffset3 + 1], HSL_RGB[rgbOffset3 + 2], u2, v2, packedTexLayer);
-				}
-			}
-			wrote += 3;
-		}
-		vertexCount += wrote;
-		if (detailedStats)
-		{
-			stats.sortedModels.incrementAndGet();
-			if (needsFaceSort)
-			{
-				stats.fullSortModels.incrementAndGet();
-				stats.fullSortTransparentFaces.addAndGet(modelInfo.transparentFaces);
-			}
-			else
-			{
-				stats.cullOnlyModels.incrementAndGet();
-			}
-			stats.sortedFaces.addAndGet(wrote / 3);
-			long emitNanos = System.nanoTime() - emitStart;
-			stats.modelEmitNanos.addAndGet(emitNanos);
-			stats.modelSortedEmitNanos.addAndGet(emitNanos);
-			stats.modelUvNanos.addAndGet(uvNanos);
-			stats.texturedEmitFaces.addAndGet(texturedFaces);
-			stats.overrideEmitFaces.addAndGet(overrideFaces);
-		}
-		recordPriorityRange(priorityStart);
-	}
-
-	private void recordPriorityRange(int start)
-	{
-		if (start < 0 || vertexCount <= start)
-		{
-			return;
-		}
-		if (priorityRangeCount == priorityRangeStarts.length)
-		{
-			int newSize = priorityRangeStarts.length * 2;
-			priorityRangeStarts = java.util.Arrays.copyOf(priorityRangeStarts, newSize);
-			priorityRangeEnds = java.util.Arrays.copyOf(priorityRangeEnds, newSize);
-			prioritySkipPairs = java.util.Arrays.copyOf(prioritySkipPairs, newSize * 2);
-		}
-		priorityRangeStarts[priorityRangeCount] = start;
-		priorityRangeEnds[priorityRangeCount] = vertexCount;
-		prioritySkipPairs[priorityRangeCount * 2] = start;
-		prioritySkipPairs[priorityRangeCount * 2 + 1] = vertexCount;
-		priorityRangeCount++;
-	}
-
-	private boolean captureModelCullOnlyFused(Projection proj, Model m, int orientation, int wx, int wy, int wz)
-	{
-		boolean detailedStats = stats.isDetailedModelStats();
-		final int modelVertexCount = m.getVerticesCount();
-		if (modelVertexCount > ModelSorter.MAX_VERTEX_COUNT)
-		{
-			return false;
-		}
-
-		final float[] vxs = m.getVerticesX();
-		final float[] vys = m.getVerticesY();
-		final float[] vzs = m.getVerticesZ();
-		if (vxs == null || vys == null || vzs == null)
-		{
-			return false;
-		}
-
-		final int faceCount = Math.min(m.getFaceCount(), ModelSorter.MAX_FACE_COUNT);
-		final int[] fa = m.getFaceIndices1();
-		final int[] fb = m.getFaceIndices2();
-		final int[] fc = m.getFaceIndices3();
-		if (fa == null || fb == null || fc == null)
-		{
-			return false;
-		}
-
-		float orientSine = 0f;
-		float orientCosine = 0f;
-		if (orientation != 0)
-		{
-			orientSine = Perspective.SINE[orientation & 0x7FF] / 65536f;
-			orientCosine = Perspective.COSINE[orientation & 0x7FF] / 65536f;
-		}
-
-		long cullStart = detailedStats ? System.nanoTime() : 0L;
-		for (int v = 0; v < modelVertexCount; v++)
-		{
-			float vx = vxs[v];
-			float vy = vys[v];
-			float vz = vzs[v];
-
-			if (orientation != 0)
-			{
-				float x0 = vx;
-				vx = vz * orientSine + x0 * orientCosine;
-				vz = vz * orientCosine - x0 * orientSine;
-			}
-
-			vx += wx;
-			vy += wy;
-			vz += wz;
-
-			cullLocalX[v] = vx;
-			cullLocalY[v] = vy;
-			cullLocalZ[v] = vz;
-
-			float[] p = proj.project(vx, vy, vz, cullProjectScratch);
-			if (p[2] < 50f)
-			{
-				return false;
-			}
-
-			cullProjX[v] = p[0] / p[2];
-			cullProjY[v] = p[1] / p[2];
-		}
-		if (detailedStats)
-		{
-			long cullNanos = System.nanoTime() - cullStart;
-			stats.modelCullOnlyNanos.addAndGet(cullNanos);
-			stats.modelSortNanos.addAndGet(cullNanos);
-		}
-
-		int[] c1 = m.getFaceColors1();
-		int[] c2 = m.getFaceColors2();
-		int[] c3 = m.getFaceColors3();
-		short[] faceTextures = m.getFaceTextures();
-		byte[] textureFaces = m.getTextureFaces();
-		int[] texIndicesA = m.getTexIndices1();
-		int[] texIndicesB = m.getTexIndices2();
-		int[] texIndicesC = m.getTexIndices3();
-		byte[] faceTransparencies = m.getFaceTransparencies();
-		byte[] faceBiasArr = m.getFaceBias();
-
-		final byte overrideAmount = m.getOverrideAmount();
-		final byte overrideHue = m.getOverrideHue();
-		final byte overrideSat = m.getOverrideSaturation();
-		final byte overrideLum = m.getOverrideLuminance();
-		final boolean hasOverride = (overrideAmount & 0xFF) != 0;
-		float[] uv = uvScratch;
-
-		int wrote = 0;
-		int texturedFaces = 0;
-		int overrideFaces = 0;
-		long uvNanos = 0;
-		long emitStart = detailedStats ? System.nanoTime() : 0L;
-		for (int f = 0; f < faceCount; f++)
-		{
-			if (c3 != null && c3[f] == -2)
-			{
-				continue;
-			}
-
-			final int ia = fa[f];
-			final int ib = fb[f];
-			final int ic = fc[f];
-
-			final float aX = cullProjX[ia], aY = cullProjY[ia];
-			final float bX = cullProjX[ib], bY = cullProjY[ib];
-			final float cX = cullProjX[ic], cY = cullProjY[ic];
-
-			if ((aX - bX) * (cY - bY) - (cX - bX) * (aY - bY) <= 0)
-			{
-				continue;
-			}
-
-			if (vertexCount + wrote > writeVertexLimit - 3)
-			{
-				overflow();
-				break;
-			}
-
-			int col1 = c1 != null ? c1[f] : 0;
-			int col2 = col1;
-			int col3 = col1;
-			if (c3 != null)
-			{
-				int raw3 = c3[f];
-				if (raw3 != -1)
-				{
-					col2 = c2[f];
-					col3 = raw3;
-				}
-			}
-
-			int texLayer = 0;
-			float u0 = 0, v0 = 0, u1 = 0, v1 = 0, u2 = 0, v2 = 0;
-			if (faceTextures != null && faceTextures[f] != -1)
-			{
-				long uvStart = detailedStats ? System.nanoTime() : 0L;
-				texLayer = (faceTextures[f] & 0xFFFF) + 1;
-				computeFaceUvs(uv, vxs, vys, vzs, ia, ib, ic, textureFaces, texIndicesA, texIndicesB, texIndicesC, f);
-				if (detailedStats)
-				{
-					uvNanos += System.nanoTime() - uvStart;
-				}
-				texturedFaces++;
-				u0 = uv[0]; v0 = uv[1];
-				u1 = uv[2]; v1 = uv[3];
-				u2 = uv[4]; v2 = uv[5];
-			}
-
-			if (hasOverride && texLayer == 0)
-			{
-				overrideFaces++;
-				col1 = HslColor.applyOverride(col1, overrideHue, overrideSat, overrideLum, overrideAmount);
-				col2 = HslColor.applyOverride(col2, overrideHue, overrideSat, overrideLum, overrideAmount);
-				col3 = HslColor.applyOverride(col3, overrideHue, overrideSat, overrideLum, overrideAmount);
-			}
-
-			int bias = faceBiasArr != null ? (faceBiasArr[f] & 0xFF) : 0;
-			int trans = faceTransparencies != null ? (faceTransparencies[f] & 0xFF) : 0;
-			int packedTexLayer = texLayer | (bias << 16) | (trans << 24);
-			boolean noUv = texLayer == 0;
-
-			if (col1 == col2 && col1 == col3)
-			{
-				int rgbOffset = (col1 & 0xFFFF) * 3;
-				float light = (float) (col1 & 0xFFFF);
-				float r = HSL_RGB[rgbOffset];
-				float g = HSL_RGB[rgbOffset + 1];
-				float b = HSL_RGB[rgbOffset + 2];
-				if (noUv)
-				{
-					writePackedTriangleRgbNoUv(
-						cullLocalX[ia], cullLocalY[ia], cullLocalZ[ia],
-						cullLocalX[ib], cullLocalY[ib], cullLocalZ[ib],
-						cullLocalX[ic], cullLocalY[ic], cullLocalZ[ic],
-						light, r, g, b, packedTexLayer);
-				}
-				else
-				{
-					writePackedVertexRgb(cullLocalX[ia], cullLocalY[ia], cullLocalZ[ia], light, r, g, b, u0, v0, packedTexLayer);
-					writePackedVertexRgb(cullLocalX[ib], cullLocalY[ib], cullLocalZ[ib], light, r, g, b, u1, v1, packedTexLayer);
-					writePackedVertexRgb(cullLocalX[ic], cullLocalY[ic], cullLocalZ[ic], light, r, g, b, u2, v2, packedTexLayer);
-				}
-			}
-			else
-			{
-				int rgbOffset1 = (col1 & 0xFFFF) * 3;
-				int rgbOffset2 = (col2 & 0xFFFF) * 3;
-				int rgbOffset3 = (col3 & 0xFFFF) * 3;
-				if (noUv)
-				{
-					writePackedVertexRgbNoUv(cullLocalX[ia], cullLocalY[ia], cullLocalZ[ia],
-						(float) (col1 & 0xFFFF), HSL_RGB[rgbOffset1], HSL_RGB[rgbOffset1 + 1], HSL_RGB[rgbOffset1 + 2], packedTexLayer);
-					writePackedVertexRgbNoUv(cullLocalX[ib], cullLocalY[ib], cullLocalZ[ib],
-						(float) (col2 & 0xFFFF), HSL_RGB[rgbOffset2], HSL_RGB[rgbOffset2 + 1], HSL_RGB[rgbOffset2 + 2], packedTexLayer);
-					writePackedVertexRgbNoUv(cullLocalX[ic], cullLocalY[ic], cullLocalZ[ic],
-						(float) (col3 & 0xFFFF), HSL_RGB[rgbOffset3], HSL_RGB[rgbOffset3 + 1], HSL_RGB[rgbOffset3 + 2], packedTexLayer);
-				}
-				else
-				{
-					writePackedVertexRgb(cullLocalX[ia], cullLocalY[ia], cullLocalZ[ia],
-						(float) (col1 & 0xFFFF), HSL_RGB[rgbOffset1], HSL_RGB[rgbOffset1 + 1], HSL_RGB[rgbOffset1 + 2], u0, v0, packedTexLayer);
-					writePackedVertexRgb(cullLocalX[ib], cullLocalY[ib], cullLocalZ[ib],
-						(float) (col2 & 0xFFFF), HSL_RGB[rgbOffset2], HSL_RGB[rgbOffset2 + 1], HSL_RGB[rgbOffset2 + 2], u1, v1, packedTexLayer);
-					writePackedVertexRgb(cullLocalX[ic], cullLocalY[ic], cullLocalZ[ic],
-						(float) (col3 & 0xFFFF), HSL_RGB[rgbOffset3], HSL_RGB[rgbOffset3 + 1], HSL_RGB[rgbOffset3 + 2], u2, v2, packedTexLayer);
-				}
-			}
-			wrote += 3;
-		}
-
-		if (wrote == 0)
-		{
-			return true;
-		}
-
-		vertexCount += wrote;
-		if (detailedStats)
-		{
-			stats.sortedModels.incrementAndGet();
-			stats.cullOnlyModels.incrementAndGet();
-			stats.sortedFaces.addAndGet(wrote / 3);
-			long emitNanos = System.nanoTime() - emitStart;
-			stats.modelEmitNanos.addAndGet(emitNanos);
-			stats.modelSortedEmitNanos.addAndGet(emitNanos);
-			stats.modelUvNanos.addAndGet(uvNanos);
-			stats.texturedEmitFaces.addAndGet(texturedFaces);
-			stats.overrideEmitFaces.addAndGet(overrideFaces);
-		}
-		return true;
-	}
-
-	private final float[] uvScratch = new float[6];
-
-	/**
-	 * Port of stock {@code SceneUploader.computeFaceUvs}. Writes
-	 * {@code [u0, v0, u1, v1, u2, v2]} into {@code out}. Falls back to a
-	 * trivial mapping (0,0)/(1,0)/(0,1) when the face has no texture-face
-	 * mapping.
-	 */
-	private static void computeFaceUvs(float[] out,
-									   float[] vx, float[] vy, float[] vz,
-									   int triA, int triB, int triC,
-									   byte[] textureFaces,
-									   int[] texIndicesA, int[] texIndicesB, int[] texIndicesC,
-									   int face)
-	{
-		if (textureFaces == null || textureFaces[face] == -1
-			|| texIndicesA == null || texIndicesB == null || texIndicesC == null)
-		{
-			out[0] = 0f; out[1] = 0f;
-			out[2] = 1f; out[3] = 0f;
-			out[4] = 0f; out[5] = 1f;
-			return;
-		}
-
-		int tfaceIdx = textureFaces[face] & 0xff;
-		int texA = texIndicesA[tfaceIdx];
-		int texB = texIndicesB[tfaceIdx];
-		int texC = texIndicesC[tfaceIdx];
-
-		float v1x = vx[texA], v1y = vy[texA], v1z = vz[texA];
-		float v2x = vx[texB] - v1x, v2y = vy[texB] - v1y, v2z = vz[texB] - v1z;
-		float v3x = vx[texC] - v1x, v3y = vy[texC] - v1y, v3z = vz[texC] - v1z;
-
-		float v4x = vx[triA] - v1x, v4y = vy[triA] - v1y, v4z = vz[triA] - v1z;
-		float v5x = vx[triB] - v1x, v5y = vy[triB] - v1y, v5z = vz[triB] - v1z;
-		float v6x = vx[triC] - v1x, v6y = vy[triC] - v1y, v6z = vz[triC] - v1z;
-
-		float v7x = v2y * v3z - v2z * v3y;
-		float v7y = v2z * v3x - v2x * v3z;
-		float v7z = v2x * v3y - v2y * v3x;
-
-		// u: project onto v3-perpendicular axis through v2
-		float v8x = v3y * v7z - v3z * v7y;
-		float v8y = v3z * v7x - v3x * v7z;
-		float v8z = v3x * v7y - v3y * v7x;
-		float f = 1f / (v8x * v2x + v8y * v2y + v8z * v2z);
-		out[0] = (v8x * v4x + v8y * v4y + v8z * v4z) * f;
-		out[2] = (v8x * v5x + v8y * v5y + v8z * v5z) * f;
-		out[4] = (v8x * v6x + v8y * v6y + v8z * v6z) * f;
-
-		// v: project onto v2-perpendicular axis through v3
-		v8x = v2y * v7z - v2z * v7y;
-		v8y = v2z * v7x - v2x * v7z;
-		v8z = v2x * v7y - v2y * v7x;
-		f = 1f / (v8x * v3x + v8y * v3y + v8z * v3z);
-		out[1] = (v8x * v4x + v8y * v4y + v8z * v4z) * f;
-		out[3] = (v8x * v5x + v8y * v5y + v8z * v5z) * f;
-		out[5] = (v8x * v6x + v8y * v6y + v8z * v6z) * f;
+		modelEmitter.captureModelSorted(proj, m, orient, worldX, worldY, worldZ, renderMode, actorModel);
 	}
 
 	void recordDraw(VkCommandBuffer cmd, float[] mvp, float brightness,
@@ -1781,7 +869,7 @@ final class SceneRenderer implements AutoCloseable
 					int colorBlindMode, float colorBlindIntensity,
 					float smoothBanding)
 	{
-		recordSceneStats = stats.isEnabled();
+		drawEmitter.beginFrame(stats.isEnabled());
 		if (vertexCount == 0) return;
 		// LANDMINE: bind at offset 0 and shift via firstVertex rather than
 		// byte-offset binding — MoltenVK's offset translation produces no
@@ -1825,28 +913,13 @@ final class SceneRenderer implements AutoCloseable
 			alphaFragPush.putFloat(10f + smoothBanding);
 			alphaFragPush.flip();
 
-			// Skip-list of tile-roof ranges the engine wants hidden.
-			// recordRoofRange is called in captureScene order, so
-			// tileRoofStarts is already sorted by start.
-			int skipPairs = 0;
 			java.util.Set<Integer> hr = hideRoofIds;
-			if (!hr.isEmpty() && tileRoofCount > 0)
+			if (skipScratch.length < roofRanges.requiredSkipPairCapacity())
 			{
-				for (int r = 0; r < tileRoofCount; r++)
-				{
-					if (hr.contains(tileRoofIds[r]))
-					{
-						if (skipPairs * 2 + 2 > skipScratch.length)
-						{
-							skipScratch = java.util.Arrays.copyOf(skipScratch, skipScratch.length * 2);
-						}
-						skipScratch[skipPairs * 2]     = tileRoofStarts[r];
-						skipScratch[skipPairs * 2 + 1] = tileRoofStarts[r] + tileRoofCounts[r];
-						skipPairs++;
-					}
-				}
+				skipScratch = java.util.Arrays.copyOf(skipScratch, roofRanges.requiredSkipPairCapacity());
 			}
-			if (recordSceneStats)
+			int skipPairs = roofRanges.buildSkipPairs(hr, skipScratch);
+			if (stats.isEnabled())
 			{
 				stats.roofSkipPairs.addAndGet(skipPairs);
 				stats.overlayDirtyZones.addAndGet(overlaySlotHasZones[slot] ? countOverlayDirtyZones(slot) : 0);
@@ -1885,7 +958,7 @@ final class SceneRenderer implements AutoCloseable
 						want.layout(), 0, stack.longs(descriptorSet), null);
 					if (!repushConstantsEveryDraw)
 					{
-						pushDrawConstants(cmd, want.layout(), vertPush, fragPush);
+						drawEmitter.pushConstants(cmd, want.layout(), vertPush, fragPush);
 					}
 					boundPipeline = want;
 				}
@@ -1894,7 +967,7 @@ final class SceneRenderer implements AutoCloseable
 				{
 					int dynamicStart = overlayNextVertex[slot];
 					int dynamicEnd = dynamicOpaqueEnd >= dynamicStart ? Math.min(dynamicOpaqueEnd, regionEnd) : regionEnd;
-					drawRange(cmd, dynamicStart, dynamicEnd, prioritySkipPairs, priorityRangeCount, priorityRangeCount > 0, slotFirstVertex,
+					drawEmitter.drawRange(cmd, dynamicStart, dynamicEnd, priorityRanges.skipPairs(), priorityRanges.count(), priorityRanges.count() > 0, slotFirstVertex,
 						want.layout(), vertPush, fragPush);
 				}
 				else
@@ -1905,11 +978,11 @@ final class SceneRenderer implements AutoCloseable
 					// chopped when their roof id is hidden.
 					for (int p = loMin; p <= loMax; p++)
 					{
-						drawStaticPlane(cmd, i, p, layerStart,
+						zoneDrawScheduler.drawStaticPlane(cmd, i, p, layerStart,
 							fullZoneRange, minZoneX, maxZoneX, minZoneZ, maxZoneZ,
 							skipScratch, skipPairs, p > loCur,
 							slot, staticFirstVertex, want.layout(), vertPush, fragPush);
-						drawOverlayPlane(cmd, i, p, minZoneX, maxZoneX, minZoneZ, maxZoneZ,
+						zoneDrawScheduler.drawOverlayPlane(cmd, i, p, minZoneX, maxZoneX, minZoneZ, maxZoneZ,
 							skipScratch, skipPairs, p > loCur,
 							slot, slotFirstVertex, want.layout(), vertPush, fragPush);
 					}
@@ -1917,14 +990,14 @@ final class SceneRenderer implements AutoCloseable
 				layerStart = regionEnd;
 			}
 
-			if (priorityRangeCount > 0)
+			if (priorityRanges.count() > 0)
 			{
 				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, priorityColorPipeline.handle());
 				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
 					priorityColorPipeline.layout(), 0, stack.longs(descriptorSet), null);
 				if (!repushConstantsEveryDraw)
 				{
-					pushDrawConstants(cmd, priorityColorPipeline.layout(), vertPush, fragPush);
+					drawEmitter.pushConstants(cmd, priorityColorPipeline.layout(), vertPush, fragPush);
 				}
 				drawPriorityRanges(cmd, slotFirstVertex, priorityColorPipeline.layout(), vertPush, fragPush);
 
@@ -1933,7 +1006,7 @@ final class SceneRenderer implements AutoCloseable
 					priorityDepthPipeline.layout(), 0, stack.longs(descriptorSet), null);
 				if (!repushConstantsEveryDraw)
 				{
-					pushDrawConstants(cmd, priorityDepthPipeline.layout(), vertPush, fragPush);
+					drawEmitter.pushConstants(cmd, priorityDepthPipeline.layout(), vertPush, fragPush);
 				}
 				drawPriorityRanges(cmd, slotFirstVertex, priorityDepthPipeline.layout(), vertPush, fragPush);
 			}
@@ -1945,7 +1018,7 @@ final class SceneRenderer implements AutoCloseable
 					alphaPipeline.layout(), 0, stack.longs(descriptorSet), null);
 				if (!repushConstantsEveryDraw)
 				{
-					pushDrawConstants(cmd, alphaPipeline.layout(), vertPush, alphaFragPush);
+					drawEmitter.pushConstants(cmd, alphaPipeline.layout(), vertPush, alphaFragPush);
 				}
 				drawAlphaPass(cmd, loMin, loMax, fullZoneRange, minZoneX, maxZoneX, minZoneZ, maxZoneZ,
 					skipScratch, skipPairs, loCur,
@@ -1981,18 +1054,18 @@ final class SceneRenderer implements AutoCloseable
 			{
 				int dynamicStart = overlayNextVertex[slot];
 				int dynamicEnd = dynamicOpaqueEnd >= dynamicStart ? Math.min(dynamicOpaqueEnd, regionEnd) : regionEnd;
-				drawRange(cmd, dynamicStart, dynamicEnd, prioritySkipPairs, priorityRangeCount,
+				drawEmitter.drawRange(cmd, dynamicStart, dynamicEnd, priorityRanges.skipPairs(), priorityRanges.count(),
 					false, slotFirstVertex, pipelineLayout, vertPush, fragPush);
 			}
 			else
 			{
 				for (int p = loMin; p <= loMax; p++)
 				{
-					drawStaticPlane(cmd, i, p, layerStart,
+					zoneDrawScheduler.drawStaticPlane(cmd, i, p, layerStart,
 						fullZoneRange, minZoneX, maxZoneX, minZoneZ, maxZoneZ,
 						skips, skipPairs, p > currentPlane,
 						slot, staticFirstVertex, pipelineLayout, vertPush, fragPush);
-					drawOverlayPlane(cmd, i, p, minZoneX, maxZoneX, minZoneZ, maxZoneZ,
+					zoneDrawScheduler.drawOverlayPlane(cmd, i, p, minZoneX, maxZoneX, minZoneZ, maxZoneZ,
 						skips, skipPairs, p > currentPlane,
 						slot, slotFirstVertex, pipelineLayout, vertPush, fragPush);
 				}
@@ -2003,255 +1076,15 @@ final class SceneRenderer implements AutoCloseable
 	private void drawPriorityRanges(VkCommandBuffer cmd, int slotFirstVertex,
 									long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
 	{
-		for (int i = 0; i < priorityRangeCount; i++)
+		for (int i = 0; i < priorityRanges.count(); i++)
 		{
-			int start = priorityRangeStarts[i];
-			int end = priorityRangeEnds[i];
+			int start = priorityRanges.start(i);
+			int end = priorityRanges.end(i);
 			if (end <= start)
 			{
 				continue;
 			}
-			drawRange(cmd, start, end, skipScratch, 0, false,
-				slotFirstVertex, pipelineLayout, vertPush, fragPush);
-		}
-	}
-
-	private void drawStaticPlane(VkCommandBuffer cmd, int layer, int plane, int layerStart,
-								 boolean fullZoneRange, int minZoneX, int maxZoneX, int minZoneZ, int maxZoneZ,
-								 int[] skips, int skipPairs, boolean applySkips,
-								 int slot, int slotFirstVertex, long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
-	{
-		int planeStart = plane == 0 ? layerStart : planeEnds[layer][plane - 1];
-		int planeEnd = planeEnds[layer][plane];
-		if (planeEnd <= planeStart)
-		{
-			return;
-		}
-
-		if (fullZoneRange)
-		{
-			if (overlaySlotHasZones[slot])
-			{
-				int overlayPairs = buildOverlayStaticSkipPairs(layer, plane, slot);
-				if (!applySkips || skipPairs == 0)
-				{
-					drawRange(cmd, planeStart, planeEnd, overlaySkipScratch, overlayPairs, overlayPairs > 0,
-						slotFirstVertex, pipelineLayout, vertPush, fragPush);
-				}
-				else
-				{
-					int combinedPairs = mergeSkipPairs(skips, skipPairs, overlaySkipScratch, overlayPairs);
-					drawRange(cmd, planeStart, planeEnd, combinedSkipScratch, combinedPairs, combinedPairs > 0,
-						slotFirstVertex, pipelineLayout, vertPush, fragPush);
-				}
-				return;
-			}
-			else
-			{
-				drawRange(cmd, planeStart, planeEnd, skips, skipPairs, applySkips,
-					slotFirstVertex, pipelineLayout, vertPush, fragPush);
-				return;
-			}
-		}
-
-		boolean mergeRanges = !applySkips || skipPairs == 0;
-		int mergedStart = -1;
-		int mergedEnd = -1;
-		for (int zx = minZoneX; zx <= maxZoneX; zx++)
-		{
-			for (int zz = minZoneZ; zz <= maxZoneZ; zz++)
-			{
-				int zoneIdx = zx * ZONES_PER_SIDE + zz;
-				if (overlayZoneValid[slot][zoneIdx])
-				{
-					continue;
-				}
-				int count = zoneVertexCount[layer][plane][zoneIdx];
-				if (count <= 0)
-				{
-					continue;
-				}
-				int start = zoneVertexStart[layer][plane][zoneIdx];
-				int end = start + count;
-				if (mergeRanges)
-				{
-					if (mergedStart < 0)
-					{
-						mergedStart = start;
-						mergedEnd = end;
-					}
-					else if (start == mergedEnd)
-					{
-						mergedEnd = end;
-					}
-					else
-					{
-						drawRange(cmd, mergedStart, mergedEnd, skips, 0, false,
-							slotFirstVertex, pipelineLayout, vertPush, fragPush);
-						mergedStart = start;
-						mergedEnd = end;
-					}
-				}
-				else
-				{
-					drawRange(cmd, start, end, skips, skipPairs, true,
-						slotFirstVertex, pipelineLayout, vertPush, fragPush);
-				}
-			}
-		}
-		if (mergedStart >= 0)
-		{
-			drawRange(cmd, mergedStart, mergedEnd, skips, 0, false,
-				slotFirstVertex, pipelineLayout, vertPush, fragPush);
-		}
-	}
-
-	private int buildOverlayStaticSkipPairs(int layer, int plane, int slot)
-	{
-		int pairs = 0;
-		for (int zoneIdx = 0; zoneIdx < ZONE_COUNT; zoneIdx++)
-		{
-			if (!overlayZoneValid[slot][zoneIdx])
-			{
-				continue;
-			}
-			int count = zoneVertexCount[layer][plane][zoneIdx];
-			if (count <= 0)
-			{
-				continue;
-			}
-			if (pairs * 2 + 2 > overlaySkipScratch.length)
-			{
-				overlaySkipScratch = java.util.Arrays.copyOf(overlaySkipScratch, overlaySkipScratch.length * 2);
-			}
-			int start = zoneVertexStart[layer][plane][zoneIdx];
-			overlaySkipScratch[pairs * 2] = start;
-			overlaySkipScratch[pairs * 2 + 1] = start + count;
-			pairs++;
-		}
-		return pairs;
-	}
-
-	private int mergeSkipPairs(int[] a, int aPairs, int[] b, int bPairs)
-	{
-		int ai = 0;
-		int bi = 0;
-		int out = 0;
-		int pendingStart = -1;
-		int pendingEnd = -1;
-		while (ai < aPairs || bi < bPairs)
-		{
-			int start;
-			int end;
-			if (bi >= bPairs || (ai < aPairs && a[ai * 2] <= b[bi * 2]))
-			{
-				start = a[ai * 2];
-				end = a[ai * 2 + 1];
-				ai++;
-			}
-			else
-			{
-				start = b[bi * 2];
-				end = b[bi * 2 + 1];
-				bi++;
-			}
-			if (end <= start)
-			{
-				continue;
-			}
-			if (pendingStart < 0)
-			{
-				pendingStart = start;
-				pendingEnd = end;
-			}
-			else if (start <= pendingEnd)
-			{
-				pendingEnd = Math.max(pendingEnd, end);
-			}
-			else
-			{
-				out = writeCombinedSkipPair(out, pendingStart, pendingEnd);
-				pendingStart = start;
-				pendingEnd = end;
-			}
-		}
-		if (pendingStart >= 0)
-		{
-			out = writeCombinedSkipPair(out, pendingStart, pendingEnd);
-		}
-		return out;
-	}
-
-	private int writeCombinedSkipPair(int out, int start, int end)
-	{
-		if (out * 2 + 2 > combinedSkipScratch.length)
-		{
-			combinedSkipScratch = java.util.Arrays.copyOf(combinedSkipScratch, combinedSkipScratch.length * 2);
-		}
-		combinedSkipScratch[out * 2] = start;
-		combinedSkipScratch[out * 2 + 1] = end;
-		return out + 1;
-	}
-
-	private void drawOverlayPlane(VkCommandBuffer cmd, int layer, int plane,
-								  int minZoneX, int maxZoneX, int minZoneZ, int maxZoneZ,
-								  int[] skips, int skipPairs, boolean applySkips,
-								  int slot, int slotFirstVertex, long pipelineLayout,
-								  ByteBuffer vertPush, ByteBuffer fragPush)
-	{
-		if (!overlaySlotHasZones[slot])
-		{
-			return;
-		}
-
-		boolean mergeRanges = !applySkips || skipPairs == 0;
-		int mergedStart = -1;
-		int mergedEnd = -1;
-		for (int zx = minZoneX; zx <= maxZoneX; zx++)
-		{
-			for (int zz = minZoneZ; zz <= maxZoneZ; zz++)
-			{
-				int zoneIdx = zx * ZONES_PER_SIDE + zz;
-				if (!overlayZoneValid[slot][zoneIdx])
-				{
-					continue;
-				}
-				int count = overlayZoneCount[slot][layer][plane][zoneIdx];
-				if (count <= 0)
-				{
-					continue;
-				}
-				int start = overlayZoneStart[slot][layer][plane][zoneIdx];
-				int end = start + count;
-				if (mergeRanges)
-				{
-					if (mergedStart < 0)
-					{
-						mergedStart = start;
-						mergedEnd = end;
-					}
-					else if (start == mergedEnd)
-					{
-						mergedEnd = end;
-					}
-					else
-					{
-						drawRange(cmd, mergedStart, mergedEnd, skips, 0, false,
-							slotFirstVertex, pipelineLayout, vertPush, fragPush);
-						mergedStart = start;
-						mergedEnd = end;
-					}
-				}
-				else
-				{
-					drawRange(cmd, start, end, skips, skipPairs, true,
-						slotFirstVertex, pipelineLayout, vertPush, fragPush);
-				}
-			}
-		}
-		if (mergedStart >= 0)
-		{
-			drawRange(cmd, mergedStart, mergedEnd, skips, 0, false,
+			drawEmitter.drawRange(cmd, start, end, skipScratch, 0, false,
 				slotFirstVertex, pipelineLayout, vertPush, fragPush);
 		}
 	}
@@ -2261,161 +1094,13 @@ final class SceneRenderer implements AutoCloseable
 		return value < min ? min : (value > max ? max : value);
 	}
 
-	private static int tileRoofIdAt(int[][][] roofs, int p, int sx, int sy)
-	{
-		if (roofs == null || p >= roofs.length) return 0;
-		int[][] plane = roofs[p];
-		if (plane == null || sx >= plane.length) return 0;
-		int[] row = plane[sx];
-		if (row == null || sy >= row.length) return 0;
-		return row[sy];
-	}
-
-	private static final class RoofInfo
-	{
-		final boolean visbelow;
-		final int roofId;
-
-		private RoofInfo(boolean visbelow, int roofId)
-		{
-			this.visbelow = visbelow;
-			this.roofId = roofId;
-		}
-	}
-
-	private static RoofInfo roofInfoForTile(int[][][] roofs, byte[][][] tileSettings,
-											int sourceLevel, int msx, int msy)
-	{
-		int mapLevel = sourceLevel;
-		if (isBridge(tileSettings, msx, msy))
-		{
-			mapLevel++;
-		}
-
-		boolean visbelow = mapLevel < MAX_PLANES && hasTileFlag(tileSettings, mapLevel, msx, msy,
-			Constants.TILE_FLAG_VIS_BELOW);
-		int roofId = visbelow || mapLevel == 0 ? 0 : tileRoofIdAt(roofs, mapLevel - 1, msx, msy);
-		return new RoofInfo(visbelow, roofId);
-	}
-
-	private static boolean isBridge(byte[][][] tileSettings, int msx, int msy)
-	{
-		return hasTileFlag(tileSettings, 1, msx, msy, Constants.TILE_FLAG_BRIDGE);
-	}
-
-	private static boolean hasTileFlag(byte[][][] tileSettings, int plane, int x, int y, int flag)
-	{
-		if (tileSettings == null || plane < 0 || plane >= tileSettings.length) return false;
-		byte[][] planeSettings = tileSettings[plane];
-		if (planeSettings == null || x < 0 || x >= planeSettings.length) return false;
-		byte[] row = planeSettings[x];
-		return row != null && y >= 0 && y < row.length && (row[y] & flag) != 0;
-	}
-
-	private static int renderLevel(Tile tile, int fallbackLevel)
-	{
-		if (tile == null) return fallbackLevel;
-		return Math.max(0, Math.min(MAX_PLANES - 1, tile.getRenderLevel()));
-	}
-
 	private void recordRoofRange(int roofId, int vertexStart, int vertexCount)
 	{
 		if (rebuildingOverlayZone)
 		{
 			return;
 		}
-		if (tileRoofCount == tileRoofIds.length)
-		{
-			int newSize = tileRoofIds.length * 2;
-			tileRoofIds    = java.util.Arrays.copyOf(tileRoofIds,    newSize);
-			tileRoofStarts = java.util.Arrays.copyOf(tileRoofStarts, newSize);
-			tileRoofCounts = java.util.Arrays.copyOf(tileRoofCounts, newSize);
-		}
-		tileRoofIds   [tileRoofCount] = roofId;
-		tileRoofStarts[tileRoofCount] = vertexStart;
-		tileRoofCounts[tileRoofCount] = vertexCount;
-		tileRoofCount++;
-	}
-
-	private void drawRange(VkCommandBuffer cmd, int start, int end, int[] skips, int pairCount,
-								  boolean applySkips, int slotFirstVertex,
-								  long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
-	{
-		if (end <= start) return;
-		if (applySkips && pairCount > 0)
-		{
-			drawWithSkips(cmd, start, end, skips, pairCount, slotFirstVertex,
-				pipelineLayout, vertPush, fragPush);
-			return;
-		}
-
-		// LANDMINE (MoltenVK #2483): re-push every draw. Push constants can
-		// go undefined across consecutive draws without it.
-		if (repushConstantsEveryDraw)
-		{
-			pushDrawConstants(cmd, pipelineLayout, vertPush, fragPush);
-		}
-		vkCmdDraw(cmd, end - start, 1, slotFirstVertex + start, 0);
-		recordDrawCall(end - start);
-	}
-
-	/** Issue {@code vkCmdDraw} calls covering [start, end) but skipping each
-	 *  [skips[2k], skips[2k+1]) sub-range. {@code skips} must be sorted by
-	 *  start. Overlapping skip ranges are merged on the fly. */
-	private void drawWithSkips(VkCommandBuffer cmd, int start, int end, int[] skips, int pairCount, int slotFirstVertex,
-									  long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
-	{
-		int cursor = start;
-		for (int k = 0; k < pairCount; k++)
-		{
-			int s = skips[k * 2];
-			int e = skips[k * 2 + 1];
-			if (e <= cursor) continue;
-			if (s > cursor)
-			{
-				int n = Math.min(s, end) - cursor;
-				if (n > 0)
-				{
-					if (repushConstantsEveryDraw)
-					{
-						pushDrawConstants(cmd, pipelineLayout, vertPush, fragPush);
-					}
-					vkCmdDraw(cmd, n, 1, slotFirstVertex + cursor, 0);
-					recordDrawCall(n);
-				}
-			}
-			cursor = Math.max(cursor, e);
-			if (cursor >= end) return;
-		}
-		if (cursor < end)
-		{
-			if (repushConstantsEveryDraw)
-			{
-				pushDrawConstants(cmd, pipelineLayout, vertPush, fragPush);
-			}
-			vkCmdDraw(cmd, end - cursor, 1, slotFirstVertex + cursor, 0);
-			recordDrawCall(end - cursor);
-		}
-	}
-
-	private void pushDrawConstants(VkCommandBuffer cmd, long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
-	{
-		vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, vertPush);
-		vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
-		if (recordSceneStats)
-		{
-			stats.scenePushConstants.addAndGet(2);
-		}
-	}
-
-	private void recordDrawCall(int vertices)
-	{
-		if (!recordSceneStats)
-		{
-			return;
-		}
-		stats.sceneDrawCalls.incrementAndGet();
-		stats.sceneDrawVertices.addAndGet(vertices);
+		roofRanges.record(roofId, vertexStart, vertexCount);
 	}
 
 	private int countOverlayDirtyZones(int slot)
@@ -2432,6 +1117,29 @@ final class SceneRenderer implements AutoCloseable
 	}
 
 	int vertexCount() { return vertexCount; }
+
+	@Override
+	public int currentVertexCount()
+	{
+		return vertexCount;
+	}
+
+	@Override
+	public void addVertices(int vertices)
+	{
+		vertexCount += vertices;
+	}
+
+	@Override
+	public boolean canAppendVertices(int pendingVertices, int vertices)
+	{
+		if (vertices < 0 || vertexCount + pendingVertices > writeVertexLimit - vertices)
+		{
+			overflow();
+			return false;
+		}
+		return true;
+	}
 
 	@Override
 	public void close()
@@ -2455,7 +1163,8 @@ final class SceneRenderer implements AutoCloseable
 		writePackedVertex(rx + wx, ly + wy, rz + wz, hsl16, u, v, texLayer);
 	}
 
-	private void writeRotatedVertexRgb(float lx, float ly, float lz,
+	@Override
+	public void writeRotatedVertexRgb(float lx, float ly, float lz,
 									   float cos, float sin,
 									   int wx, int wy, int wz,
 									   float light, float r, float g, float b,
@@ -2466,7 +1175,8 @@ final class SceneRenderer implements AutoCloseable
 		writePackedVertexRgb(rx + wx, ly + wy, rz + wz, light, r, g, b, u, v, texLayer);
 	}
 
-	private void writeRotatedVertexRgbNoUv(float lx, float ly, float lz,
+	@Override
+	public void writeRotatedVertexRgbNoUv(float lx, float ly, float lz,
 										   float cos, float sin,
 										   int wx, int wy, int wz,
 										   float light, float r, float g, float b,
@@ -2477,7 +1187,8 @@ final class SceneRenderer implements AutoCloseable
 		writePackedVertexRgbNoUv(rx + wx, ly + wy, rz + wz, light, r, g, b, texLayer);
 	}
 
-	private void writeHslVert(float x, float y, float z, int hsl16, float u, float v, int texLayer)
+	@Override
+	public void writeHslVert(float x, float y, float z, int hsl16, float u, float v, int texLayer)
 	{
 		writePackedVertex(x, y, z, hsl16, u, v, texLayer);
 	}
@@ -2487,21 +1198,24 @@ final class SceneRenderer implements AutoCloseable
 		writePackedVertexPacked(x, y, z, hsl16, u, v, texLayer);
 	}
 
-	private void writePackedVertexRgb(float x, float y, float z,
+	@Override
+	public void writePackedVertexRgb(float x, float y, float z,
 									  float light, float r, float g, float b,
 									  float u, float v, int texLayer)
 	{
 		writePackedVertexPacked(x, y, z, (int) light, u, v, texLayer);
 	}
 
-	private void writePackedVertexRgbNoUv(float x, float y, float z,
+	@Override
+	public void writePackedVertexRgbNoUv(float x, float y, float z,
 										  float light, float r, float g, float b,
 										  int texLayer)
 	{
 		writePackedVertexPacked(x, y, z, (int) light, 0f, 0f, texLayer);
 	}
 
-	private void writePackedTriangleRgbNoUv(float x0, float y0, float z0,
+	@Override
+	public void writePackedTriangleRgbNoUv(float x0, float y0, float z0,
 											float x1, float y1, float z1,
 											float x2, float y2, float z2,
 											float light, float r, float g, float b,

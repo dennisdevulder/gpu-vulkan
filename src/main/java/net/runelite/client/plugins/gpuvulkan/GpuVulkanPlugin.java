@@ -26,9 +26,15 @@ package net.runelite.client.plugins.gpuvulkan;
 
 import com.google.inject.Provides;
 import java.awt.Canvas;
-import java.util.ArrayList;
+import java.awt.Container;
+import java.awt.IllegalComponentStateException;
+import java.awt.Point;
+import java.awt.Window;
+import java.awt.event.ComponentAdapter;
+import java.awt.event.ComponentEvent;
 import java.util.List;
 import java.util.Set;
+import javax.swing.SwingUtilities;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.BufferProvider;
@@ -99,23 +105,24 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	private Framebuffers framebuffers;
 	private FrameSync sync;
 	private VulkanRenderer renderer;
-	private GpuVulkanDebugOverlay debugOverlay;
-	private boolean debugOverlayRegistered;
-	private volatile List<String> debugOverlaySnapshot = List.of("GPU Vulkan", "status: starting");
+	private GpuVulkanDebugOverlayController debugOverlay;
 	private Canvas canvas;
 	private PlatformSurface platform;
 	private int lastDrawCanvasWidth = -1;
 	private int lastDrawCanvasHeight = -1;
+	private int lastDrawCanvasX = Integer.MIN_VALUE;
+	private int lastDrawCanvasY = Integer.MIN_VALUE;
+	private javax.swing.Timer macResizeWakeTimer;
+	private ComponentAdapter macResizeWakeListener;
+	private boolean dispatchingMacResizeWake;
 	private long x11Drawable;
-	/** Tracks whether startup actually flipped {@code setUnlockedFps(true)},
-	 *  so shutdown doesn't clobber a user-driven unlock. */
-	private boolean fpsTouched;
+	private ClientRuntimeConfig runtimeConfig;
 	private final DrawCallbackStats stats = new DrawCallbackStats();
 	private volatile double lastCamX, lastCamY, lastCamZ;
 	private volatile double lastCamPitch, lastCamYaw;
 	private volatile boolean startRequested;
 	private static boolean shutdownHookRegistered;
-	private final List<ExtensionRegistration> queuedExtensions = new ArrayList<>();
+	private final VulkanExtensionQueue extensionQueue = new VulkanExtensionQueue();
 
 	/** Read by the JVM shutdown hook to find the live instance — must be
 	 *  static because the hook outlives any single plugin instance. */
@@ -129,6 +136,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	{
 		log.info("Starting GPU (Vulkan)");
 		shuttingDown = false;
+		runtimeConfig = new ClientRuntimeConfig(client, config);
 		// Refuse to coexist with stock GPU — two owners of the rlawt context
 		// corrupt JAWT state and crash the JVM on disable.
 		if (isStockGpuEnabled())
@@ -136,10 +144,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			log.warn("Stock 'GPU' plugin is enabled — GPU (Vulkan) will not start. Disable 'GPU' first.");
 			return;
 		}
-		if (debugOverlay == null)
-		{
-			debugOverlay = new GpuVulkanDebugOverlay(this, config);
-		}
+		debugOverlay = new GpuVulkanDebugOverlayController(this, config, overlayManager, stats);
 		updateDebugOverlayRegistration();
 		startRequested = true;
 		boolean wantVsync = config.fpsMode() != GpuVulkanPluginConfig.FpsMode.UNCAPPED;
@@ -277,6 +282,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 				if (isMac)
 				{
 					MacOSMetalHelper.resizeMetalLayer(canvas);
+					installMacResizeWake();
 				}
 				sync.recreateRenderFinished(swapchain.imageCount());
 
@@ -324,13 +330,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 				renderExtensions = new RenderExtensions(
 					new DefaultVulkanRenderContext(client, config, gfx, device, sync, renderPass, textureArray, stats));
 				renderExtensions.register(new BaseRenderer());
-				synchronized (queuedExtensions)
-				{
-					for (ExtensionRegistration registration : queuedExtensions)
-					{
-						registration.attach(renderExtensions);
-					}
-				}
+				extensionQueue.attachQueued(renderExtensions);
 				disposables.add(renderExtensions);
 
 				framebuffers = new Framebuffers(device, renderPass, swapchain, depthBuffer, msaaColor);
@@ -368,6 +368,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			catch (RuntimeException e)
 			{
 				log.error("GPU (Vulkan) startup failed", e);
+				removeMacResizeWake();
 				// Mirror shutDown's order: drain Vulkan, undo any client-state
 				// flips, drop disposables, then unwind AWT/canvas. Without
 				// this, a mid-startup throw (device pick, swapchain, etc.)
@@ -385,11 +386,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 						log.warn("vkDeviceWaitIdle during startup-recovery: {}", waitEx.getMessage());
 					}
 				}
-				if (fpsTouched)
-				{
-					client.setUnlockedFps(false);
-					fpsTouched = false;
-				}
+				restoreClientRuntimeConfig();
 				client.setDrawCallbacks(null);
 				client.setGpuFlags(0);
 				if (disposables != null)
@@ -438,10 +435,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		log.info("Stopping GPU (Vulkan)");
 		startRequested = false;
 		shuttingDown = true;
-		if (debugOverlay != null)
-		{
-			removeDebugOverlay();
-		}
+		removeMacResizeWake();
+		removeDebugOverlay();
 		// Unpublish first so a concurrent shutdown hook sees null and bails,
 		// avoiding double-destroy from two threads.
 		activeInstance = null;
@@ -454,11 +449,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			// plugin enable fails JAWT_DrawingSurface_Lock.
 			client.setGpuFlags(0);
 			client.setDrawCallbacks(null);
-			if (fpsTouched)
-			{
-				client.setUnlockedFps(false);
-				fpsTouched = false;
-			}
+			restoreClientRuntimeConfig();
 
 			if (device != null)
 			{
@@ -546,25 +537,19 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 
 	private void applyClientRuntimeConfig()
 	{
-		// ZBUF is what makes the engine traverse zones and fire
-		// drawZoneOpaque / drawDynamic; without it we only get
-		// drawScene / postDrawScene boundary markers.
-		int gpuFlags = DrawCallbacks.GPU | DrawCallbacks.ZBUF;
-		if (config.removeVertexSnapping())
+		if (runtimeConfig == null)
 		{
-			gpuFlags |= DrawCallbacks.NO_VERTEX_SNAPPING;
+			runtimeConfig = new ClientRuntimeConfig(client, config);
 		}
-		client.setGpuFlags(gpuFlags);
-		client.setExpandedMapLoading(config.expandedMapLoadingChunks());
+		runtimeConfig.apply();
+	}
 
-		// Vulkan present mode is responsible for pacing. Keep the client
-		// engine unlocked in every FPS mode so VSYNC/FIFO can actually reach
-		// the display refresh instead of being limited by the stock 50 FPS
-		// game-loop cap before presentation.
-		int fpsTarget = Math.max(0, config.fpsTarget());
-		client.setUnlockedFps(true);
-		client.setUnlockedFpsTarget(fpsTarget);
-		fpsTouched = true;
+	private void restoreClientRuntimeConfig()
+	{
+		if (runtimeConfig != null)
+		{
+			runtimeConfig.restoreFpsIfTouched();
+		}
 	}
 
 	@Subscribe
@@ -604,80 +589,12 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	@Override
 	public AutoCloseable registerExtension(VulkanRenderExtension extension)
 	{
-		ExtensionRegistration registration = new ExtensionRegistration(extension);
-		synchronized (queuedExtensions)
-		{
-			queuedExtensions.add(registration);
-			if (renderExtensions != null)
-			{
-				registration.attach(renderExtensions);
-			}
-		}
-		return registration;
-	}
-
-	private final class ExtensionRegistration implements AutoCloseable
-	{
-		private final VulkanRenderExtension extension;
-		private RenderExtensions attachedRegistry;
-		private boolean closed;
-		private boolean closedByBackend;
-
-		private ExtensionRegistration(VulkanRenderExtension extension)
-		{
-			this.extension = extension;
-		}
-
-		private void attach(RenderExtensions registry)
-		{
-			if (closed || attachedRegistry == registry)
-			{
-				return;
-			}
-			registry.register(extension);
-			attachedRegistry = registry;
-			closedByBackend = false;
-		}
-
-		private void markBackendDetached()
-		{
-			attachedRegistry = null;
-			closedByBackend = true;
-		}
-
-		@Override
-		public void close()
-		{
-			synchronized (queuedExtensions)
-			{
-				if (closed)
-				{
-					return;
-				}
-				closed = true;
-				queuedExtensions.remove(this);
-				if (attachedRegistry != null)
-				{
-					attachedRegistry.unregister(extension);
-					attachedRegistry = null;
-				}
-				else if (!closedByBackend)
-				{
-					extension.close();
-				}
-			}
-		}
+		return extensionQueue.register(extension, renderExtensions);
 	}
 
 	private void markExtensionBackendDetached()
 	{
-		synchronized (queuedExtensions)
-		{
-			for (ExtensionRegistration registration : queuedExtensions)
-			{
-				registration.markBackendDetached();
-			}
-		}
+		extensionQueue.markBackendDetached();
 	}
 
 	// ---- DrawCallbacks --------------------------------------------------
@@ -696,20 +613,27 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		}
 		int w = canvas.getWidth();
 		int h = canvas.getHeight();
+		ResizeTrace.frame(w + "x" + h);
 		if (!ensureNativeSurfaceCurrent(w, h))
 		{
 			return;
 		}
-		if (w != lastDrawCanvasWidth || h != lastDrawCanvasHeight)
+		if (renderer.usesCustomPresent())
 		{
-			lastDrawCanvasWidth = w;
-			lastDrawCanvasHeight = h;
-			renderer.markSwapchainStale();
-			return;
+			updateCustomPresentGeometry(w, h);
 		}
-		if (w != swapchain.width() || h != swapchain.height())
+		else
 		{
-			renderer.markSwapchainStale();
+			if (w != lastDrawCanvasWidth || h != lastDrawCanvasHeight)
+			{
+				lastDrawCanvasWidth = w;
+				lastDrawCanvasHeight = h;
+				renderer.markSwapchainStale();
+			}
+			if (w != swapchain.width() || h != swapchain.height())
+			{
+				renderer.markSwapchainStale();
+			}
 		}
 		stats.setDetailedModelStats(config.detailedModelStats());
 		BufferProvider bp = client.getBufferProvider();
@@ -731,11 +655,145 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			client.getGameCycle() & 127,
 			config.smoothBanding() ? 1f : 0f,
 			overlayColor);
-		if (debugOverlayRegistered)
+		if (debugOverlay != null && debugOverlay.isRegistered())
 		{
 			updateDebugOverlaySnapshot();
 		}
 		stats.maybeLog();
+	}
+
+	private void updateCustomPresentGeometry(int width, int height)
+	{
+		int x = Integer.MIN_VALUE;
+		int y = Integer.MIN_VALUE;
+		try
+		{
+			Point location = canvas.getLocationOnScreen();
+			x = location.x;
+			y = location.y;
+		}
+		catch (IllegalComponentStateException ignored)
+		{
+			// Canvas is temporarily detached during AWT window changes.
+		}
+
+		boolean changed = width != lastDrawCanvasWidth
+			|| height != lastDrawCanvasHeight
+			|| x != lastDrawCanvasX
+			|| y != lastDrawCanvasY;
+		if (changed)
+		{
+			lastDrawCanvasWidth = width;
+			lastDrawCanvasHeight = height;
+			lastDrawCanvasX = x;
+			lastDrawCanvasY = y;
+			MacOSMetalHelper.resizeMetalLayerSize(width, height);
+			ResizeTrace.mark("plugin.geometry", width + "x" + height + " at " + x + "," + y);
+		}
+	}
+
+	private void installMacResizeWake()
+	{
+		if (canvas == null || macResizeWakeListener != null)
+		{
+			return;
+		}
+
+		macResizeWakeListener = new ComponentAdapter()
+		{
+			@Override
+			public void componentResized(ComponentEvent e)
+			{
+				if (!dispatchingMacResizeWake)
+				{
+					scheduleMacResizeWake();
+				}
+			}
+
+			@Override
+			public void componentMoved(ComponentEvent e)
+			{
+				if (!dispatchingMacResizeWake)
+				{
+					scheduleMacResizeWake();
+				}
+			}
+		};
+		canvas.addComponentListener(macResizeWakeListener);
+	}
+
+	private void removeMacResizeWake()
+	{
+		if (macResizeWakeTimer != null)
+		{
+			macResizeWakeTimer.stop();
+			macResizeWakeTimer = null;
+		}
+		if (canvas != null && macResizeWakeListener != null)
+		{
+			canvas.removeComponentListener(macResizeWakeListener);
+		}
+		macResizeWakeListener = null;
+	}
+
+	private void scheduleMacResizeWake()
+	{
+		SwingUtilities.invokeLater(() ->
+		{
+			if (macResizeWakeTimer != null)
+			{
+				macResizeWakeTimer.restart();
+				return;
+			}
+			macResizeWakeTimer = new javax.swing.Timer(180, ev -> runMacResizeWake());
+			macResizeWakeTimer.setRepeats(false);
+			macResizeWakeTimer.start();
+		});
+	}
+
+	private void runMacResizeWake()
+	{
+		Canvas currentCanvas = canvas;
+		if (currentCanvas == null || shuttingDown)
+		{
+			return;
+		}
+
+		ResizeTrace.mark("plugin.macResizeWake", currentCanvas.getWidth() + "x" + currentCanvas.getHeight());
+		MacOSMetalHelper.resizeMetalLayer(currentCanvas);
+		dispatchingMacResizeWake = true;
+		try
+		{
+			currentCanvas.dispatchEvent(new ComponentEvent(currentCanvas, ComponentEvent.COMPONENT_RESIZED));
+			Container parent = currentCanvas.getParent();
+			while (parent != null)
+			{
+				parent.invalidate();
+				parent.validate();
+				parent.repaint();
+				parent = parent.getParent();
+			}
+			Window window = SwingUtilities.getWindowAncestor(currentCanvas);
+			if (window != null)
+			{
+				window.invalidate();
+				window.validate();
+				window.repaint();
+			}
+			currentCanvas.repaint();
+		}
+		finally
+		{
+			dispatchingMacResizeWake = false;
+		}
+
+		clientThread.invokeLater(() ->
+		{
+			if (canvas != null && !shuttingDown)
+			{
+				client.resizeCanvas();
+			}
+		});
 	}
 
 	private boolean ensureNativeSurfaceCurrent(int width, int height)
@@ -890,42 +948,30 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 
 	List<String> debugOverlayLines()
 	{
-		return debugOverlaySnapshot;
+		return debugOverlay == null ? List.of("GPU Vulkan", "status: starting") : debugOverlay.lines();
 	}
 
 	private void updateDebugOverlaySnapshot()
 	{
-		debugOverlaySnapshot = GpuVulkanDebugSnapshot.build(device, swapchain, renderExtensions, stats);
+		if (debugOverlay != null)
+		{
+			debugOverlay.updateSnapshot(device, swapchain, renderExtensions);
+		}
 	}
 
 	private void updateDebugOverlayRegistration()
 	{
-		if (debugOverlay == null)
+		if (debugOverlay != null)
 		{
-			return;
-		}
-		if (config.debugOverlay())
-		{
-			if (!debugOverlayRegistered)
-			{
-				overlayManager.add(debugOverlay);
-				debugOverlayRegistered = true;
-				stats.setOverlayStatsEnabled(true);
-			}
-		}
-		else
-		{
-			removeDebugOverlay();
+			debugOverlay.updateRegistration();
 		}
 	}
 
 	private void removeDebugOverlay()
 	{
-		if (debugOverlayRegistered)
+		if (debugOverlay != null)
 		{
-			overlayManager.remove(debugOverlay);
-			debugOverlayRegistered = false;
-			stats.setOverlayStatsEnabled(false);
+			debugOverlay.remove();
 		}
 	}
 

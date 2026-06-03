@@ -157,7 +157,8 @@ final class VulkanDevice implements AutoCloseable
 			// VkQueue maps to, so we can present CAMetalDrawables ourselves
 			// (bypassing MoltenVK's vkQueuePresentKHR — see MacOSMetalHelper
 			// + VulkanRenderer.drawFrame). macOS only; advertised by MoltenVK.
-			boolean hasMetalObjects = deviceExtensions.contains("VK_EXT_metal_objects");
+			boolean hasMetalObjects = deviceExtensions.contains("VK_EXT_metal_objects")
+				&& !Boolean.getBoolean("vkgpu.disableCustomPresent");
 			this.supportsMetalObjects = hasMetalObjects;
 			this.supportsVideoQueue = deviceExtensions.contains(KHRVideoQueue.VK_KHR_VIDEO_QUEUE_EXTENSION_NAME);
 			this.supportsVideoEncodeQueue = deviceExtensions.contains(KHRVideoEncodeQueue.VK_KHR_VIDEO_ENCODE_QUEUE_EXTENSION_NAME);

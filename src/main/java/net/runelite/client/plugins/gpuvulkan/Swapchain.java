@@ -277,11 +277,13 @@ final class Swapchain implements AutoCloseable
 			else if (m == KHRSurface.VK_PRESENT_MODE_FIFO_RELAXED_KHR) hasFifoRelaxed = true;
 		}
 
-		// LANDMINE: force FIFO on macOS. MoltenVK's MAILBOX over
-		// CAMetalLayer can present drawables out of order for one refresh,
-		// flickering the previous frame's average colour through.
+		// LANDMINE: avoid MAILBOX on macOS for paced modes. MoltenVK's
+		// MAILBOX over CAMetalLayer can present drawables out of order for
+		// one refresh, flickering the previous frame's average colour
+		// through. UNCAPPED still needs IMMEDIATE/MAILBOX; FIFO hard-caps
+		// presentation to the display refresh rate.
 		boolean isMac = System.getProperty("os.name", "").toLowerCase().contains("mac");
-		if (isMac)
+		if (isMac && fpsMode != GpuVulkanPluginConfig.FpsMode.UNCAPPED)
 		{
 			return KHRSurface.VK_PRESENT_MODE_FIFO_KHR;
 		}

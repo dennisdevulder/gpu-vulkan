@@ -82,6 +82,13 @@ static CADisplayLink* gDisplayLink = nil;
 
 static DisplayLinkTicker* gTicker = nil;
 
+static void rlmtlFlushCoreAnimationAsync(void)
+{
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [CATransaction flush];
+    });
+}
+
 static void rlmtlStopDisplayLink(void)
 {
     if (gDisplayLink) {
@@ -150,17 +157,18 @@ Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nResizeMetalLayer(
 
         [CATransaction begin];
         [CATransaction setDisableActions: YES];
-        layer.anchorPoint = CGPointZero;
-        layer.position = CGPointZero;
-        layer.frame = CGRectMake(0, 0, w, h);
-        layer.drawableSize = CGSizeMake(w * scale, h * scale);
+        layer.contentsScale = scale;
+        CGSize bounds = layer.bounds.size;
+        CGFloat drawableWidth = bounds.width > 0 ? bounds.width : (CGFloat) w;
+        CGFloat drawableHeight = bounds.height > 0 ? bounds.height : (CGFloat) h;
+        layer.drawableSize = CGSizeMake(drawableWidth * scale, drawableHeight * scale);
         [CATransaction commit];
         [CATransaction flush];
     };
     if ([NSThread isMainThread]) {
         resize();
     } else {
-        dispatch_sync(dispatch_get_main_queue(), resize);
+        dispatch_async(dispatch_get_main_queue(), resize);
     }
 }
 
@@ -302,6 +310,10 @@ Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nPresentDrawable(
     @autoreleasepool {
         id<MTLCommandBuffer> cmd = [queue commandBuffer];
         [cmd presentDrawable: drawable];
+        [cmd addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+            (void) completed;
+            rlmtlFlushCoreAnimationAsync();
+        }];
         [cmd commit];
         /* Do NOT wait — Metal handles the present asynchronously on the
          * compositor side. Ordering with our Vulkan render is guaranteed
@@ -382,6 +394,7 @@ Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nAttachMetalLayer(
             [device release];
         }
         metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        metalLayer.allowsNextDrawableTimeout = YES;
         metalLayer.contentsScale = scale;
         metalLayer.anchorPoint = CGPointZero;
         metalLayer.position = CGPointZero;
