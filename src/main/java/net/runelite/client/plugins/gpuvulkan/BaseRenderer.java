@@ -187,7 +187,7 @@ final class BaseRenderer implements VulkanRenderExtension
 	}
 
 	@Override
-	public void recordRenderPass(VulkanFrameContext frame)
+	public void recordScenePass(VulkanFrameContext frame)
 	{
 		if (sceneRenderer != null)
 		{
@@ -196,10 +196,22 @@ final class BaseRenderer implements VulkanRenderExtension
 				sceneRenderer.recordDraw(frame);
 			}
 		}
+	}
+
+	@Override
+	public void recordUiPass(VulkanFrameContext frame)
+	{
 		if (interfaceRenderer != null && (config == null || !config.benchmarkSkipUi()))
 		{
 			interfaceRenderer.recordDraw(frame);
 		}
+	}
+
+	@Override
+	public void recordRenderPass(VulkanFrameContext frame)
+	{
+		recordScenePass(frame);
+		recordUiPass(frame);
 	}
 
 	@Override

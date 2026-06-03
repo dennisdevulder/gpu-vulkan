@@ -81,6 +81,9 @@ final class DrawCallbackStats
 	final Counter beginFrameNanos = new Counter();
 	final Counter pendingCaptureNanos = new Counter();
 	final Counter sceneCaptureNanos = new Counter();
+	final Counter dynamicCaptureNanos = new Counter();
+	final Counter tempCaptureNanos = new Counter();
+	final Counter singleCaptureNanos = new Counter();
 	final Counter modelSortNanos = new Counter();
 	final Counter modelFullSortNanos = new Counter();
 	final Counter modelCullOnlyNanos = new Counter();
@@ -226,6 +229,12 @@ final class DrawCallbackStats
 		long maxPendingCapture = pendingCaptureNanos.getMaxAndReset();
 		long sceneCapture = sceneCaptureNanos.getAndSet(0);
 		long maxSceneCapture = sceneCaptureNanos.getMaxAndReset();
+		long dynamicCapture = dynamicCaptureNanos.getAndSet(0);
+		long maxDynamicCapture = dynamicCaptureNanos.getMaxAndReset();
+		long tempCapture = tempCaptureNanos.getAndSet(0);
+		long maxTempCapture = tempCaptureNanos.getMaxAndReset();
+		long singleCapture = singleCaptureNanos.getAndSet(0);
+		long maxSingleCapture = singleCaptureNanos.getMaxAndReset();
 		long sceneDrawCallCount = sceneDrawCalls.getAndSet(0);
 		long sceneDrawVertexCount = sceneDrawVertices.getAndSet(0);
 		long scenePushConstantCount = scenePushConstants.getAndSet(0);
@@ -236,7 +245,7 @@ final class DrawCallbackStats
 		if (!detailedModelStats)
 		{
 			log.info(String.format(
-				"recon | scene=%d preSD=%d postSD=%d swap=%d load=%d | paint=%d tileModel=%d | zoneOpq=%d zoneAlpha=%d | dyn=%d temp=%d pass=%d single=%d | cam=(%.1f, %.1f, %.1f) plane=%d | anim=%d | submit: draws=%d drawVerts=%d pushes=%d roofSkips=%d overlayZones=%d uiBytes=%d readbackBytes=%d | cpu/frame avg ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f | cpu max ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f | scene avg/max ms: begin=%.2f/%.2f pending=%.2f/%.2f staticCaptureTotal=%.2f max=%.2f",
+				"recon | scene=%d preSD=%d postSD=%d swap=%d load=%d | paint=%d tileModel=%d | zoneOpq=%d zoneAlpha=%d | dyn=%d temp=%d pass=%d single=%d | cam=(%.1f, %.1f, %.1f) plane=%d | anim=%d | submit: draws=%d drawVerts=%d pushes=%d roofSkips=%d overlayZones=%d uiBytes=%d readbackBytes=%d | cpu/frame avg ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f | cpu max ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f | scene avg/max ms: begin=%.2f/%.2f pending=%.2f/%.2f staticCaptureTotal=%.2f max=%.2f | capture total/max ms: dyn=%.2f/%.2f temp=%.2f/%.2f single=%.2f/%.2f",
 				drawSceneCount,
 				preSceneDraw.getAndSet(0),
 				postDrawScene.getAndSet(0),
@@ -284,7 +293,13 @@ final class DrawCallbackStats
 				avgMs(pendingCapture, drawSceneCount),
 				maxMs(maxPendingCapture),
 				totalMs(sceneCapture),
-				maxMs(maxSceneCapture)
+				maxMs(maxSceneCapture),
+				totalMs(dynamicCapture),
+				maxMs(maxDynamicCapture),
+				totalMs(tempCapture),
+				maxMs(maxTempCapture),
+				totalMs(singleCapture),
+				maxMs(maxSingleCapture)
 			));
 			return;
 		}

@@ -37,7 +37,9 @@ layout(push_constant) uniform Push {
     layout(offset = 112) vec4 fragExtras;  // .x = textureLightMode (0 = light-only, 1 = full HSL tint)
                                            // .y = colorBlindMode (0 NONE, 1 PROTAN, 2 DEUTERAN, 3 TRITAN)
                                            // .z = colorBlindIntensity (0..1)
-                                           // .w = smoothBanding + 10 * alphaPass
+                                           // .w = smoothBanding + 10 * alphaMode
+                                           //      0 = opaque pass, 1 = blended alpha pass,
+                                           //      2 = single-pass alpha-to-coverage
 } push;
 
 layout(location = 0) in vec3 vColor;       // CPU-decoded per-vertex RGB; smooth-banding term
@@ -110,13 +112,13 @@ void main() {
     // Engine invisibility sentinel — discard rather than letting
     // alpha-to-coverage write zero samples (cheaper, skips depth write).
     if (vTrans == 255u) discard;
-    int alphaPass = int(push.fragExtras.w / 10.0);
-    if (alphaPass == 0 && vTrans != 0u) discard;
-    if (alphaPass != 0 && vTrans == 0u) discard;
+    int alphaMode = int(push.fragExtras.w / 10.0);
+    if (alphaMode == 0 && vTrans != 0u) discard;
+    if (alphaMode == 1 && vTrans == 0u) discard;
 
     int hsl = int(vHslPacked);
     int lum =  hsl        & 0x7F;
-    float smoothBanding = push.fragExtras.w - float(alphaPass * 10);
+    float smoothBanding = push.fragExtras.w - float(alphaMode * 10);
 
     vec3 rgb;
     if (vTexLayer == 0u) {

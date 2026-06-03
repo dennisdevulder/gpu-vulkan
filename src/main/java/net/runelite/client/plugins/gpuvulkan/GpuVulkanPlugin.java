@@ -28,6 +28,7 @@ import com.google.inject.Provides;
 import java.awt.Canvas;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.BufferProvider;
@@ -39,7 +40,6 @@ import net.runelite.api.Projection;
 import net.runelite.api.Renderable;
 import net.runelite.api.Scene;
 import net.runelite.api.SceneTileModel;
-import java.util.Set;
 import net.runelite.api.SceneTilePaint;
 import net.runelite.api.Texture;
 import net.runelite.api.TextureProvider;
@@ -104,6 +104,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	private volatile List<String> debugOverlaySnapshot = List.of("GPU Vulkan", "status: starting");
 	private Canvas canvas;
 	private PlatformSurface platform;
+	private int lastDrawCanvasWidth = -1;
+	private int lastDrawCanvasHeight = -1;
+	private long x11Drawable;
 	/** Tracks whether startup actually flipped {@code setUnlockedFps(true)},
 	 *  so shutdown doesn't clobber a user-driven unlock. */
 	private boolean fpsTouched;
@@ -238,6 +241,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 						awtContext.configurePixelFormat(0, 0, 0);
 					}
 					awtContext.createGLContext();
+					org.lwjgl.opengl.GL.createCapabilities();
 				}
 				canvas.setIgnoreRepaint(true);
 				canvas.setFocusable(true);
@@ -253,6 +257,10 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 
 				surface = new VulkanSurface(instance, platform, canvas);
 				disposables.add(surface);
+				if (platform instanceof X11PlatformSurface)
+				{
+					x11Drawable = X11PlatformSurface.currentDrawable(canvas);
+				}
 
 				device = new VulkanDevice(instance, surface);
 				disposables.add(device);
@@ -330,7 +338,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 				disposables.add(framebuffers);
 
 				renderer = new VulkanRenderer(device, renderPass, renderExtensions,
-					swapchain, depthBuffer, msaaColor, framebuffers, sync, stats);
+					swapchain, depthBuffer, msaaColor, framebuffers, sync, stats, config, gfx);
 				renderer.setDrawManager(drawManager);
 				disposables.add(renderer);
 
@@ -342,30 +350,10 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 				activeInstance = this;
 
 				client.setDrawCallbacks(this);
-				// ZBUF is what makes the engine traverse zones and fire
-				// drawZoneOpaque / drawDynamic; without it we only get
-				// drawScene / postDrawScene boundary markers.
-				int gpuFlags = DrawCallbacks.GPU | DrawCallbacks.ZBUF;
-				if (config.removeVertexSnapping()) gpuFlags |= DrawCallbacks.NO_VERTEX_SNAPPING;
-				client.setGpuFlags(gpuFlags);
-				client.setExpandedMapLoading(config.expandedMapLoadingChunks());
+				applyClientRuntimeConfig();
 				// Re-trigger BufferProvider so the canvas picks up an alpha
 				// channel; without it AWT paints opaque over our output.
 				client.resizeCanvas();
-
-				// Only call setUnlockedFps when we're actually opting in —
-				// never preemptively false, since that overrides a user-driven
-				// unlock from elsewhere. fpsTouched gates the shutdown undo.
-				int fpsTarget = Math.max(0, config.fpsTarget());
-				boolean unlockEngine =
-					config.fpsMode() == GpuVulkanPluginConfig.FpsMode.UNCAPPED
-					|| fpsTarget > 0;
-				if (unlockEngine)
-				{
-					client.setUnlockedFps(true);
-					client.setUnlockedFpsTarget(fpsTarget);
-					fpsTouched = true;
-				}
 
 				// Plugin enable mid-session: capture the already-loaded
 				// scene right away rather than waiting for the next chunk
@@ -532,6 +520,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			renderer = null;
 			canvas = null;
 			platform = null;
+			x11Drawable = 0L;
 			capturedScene = null;
 		});
 	}
@@ -544,10 +533,39 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		{
 			updateDebugOverlayRegistration();
 		}
+		if ("removeVertexSnapping".equals(ev.getKey())
+			|| "expandedMapLoadingChunks".equals(ev.getKey())
+			|| "fpsTarget".equals(ev.getKey()))
+		{
+			clientThread.invokeLater(this::applyClientRuntimeConfig);
+		}
 		if (renderExtensions != null)
 		{
 			renderExtensions.onConfigChanged(ev);
 		}
+	}
+
+	private void applyClientRuntimeConfig()
+	{
+		// ZBUF is what makes the engine traverse zones and fire
+		// drawZoneOpaque / drawDynamic; without it we only get
+		// drawScene / postDrawScene boundary markers.
+		int gpuFlags = DrawCallbacks.GPU | DrawCallbacks.ZBUF;
+		if (config.removeVertexSnapping())
+		{
+			gpuFlags |= DrawCallbacks.NO_VERTEX_SNAPPING;
+		}
+		client.setGpuFlags(gpuFlags);
+		client.setExpandedMapLoading(config.expandedMapLoadingChunks());
+
+		// Vulkan present mode is responsible for pacing. Keep the client
+		// engine unlocked in every FPS mode so VSYNC/FIFO can actually reach
+		// the display refresh instead of being limited by the stock 50 FPS
+		// game-loop cap before presentation.
+		int fpsTarget = Math.max(0, config.fpsTarget());
+		client.setUnlockedFps(true);
+		client.setUnlockedFpsTarget(fpsTarget);
+		fpsTouched = true;
 	}
 
 	@Subscribe
@@ -672,8 +690,24 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		{
 			return;
 		}
+		if (!canvas.isDisplayable() || !canvas.isValid())
+		{
+			renderer.markSwapchainStale();
+			return;
+		}
 		int w = canvas.getWidth();
 		int h = canvas.getHeight();
+		if (!ensureNativeSurfaceCurrent(w, h))
+		{
+			return;
+		}
+		if (w != lastDrawCanvasWidth || h != lastDrawCanvasHeight)
+		{
+			lastDrawCanvasWidth = w;
+			lastDrawCanvasHeight = h;
+			renderer.markSwapchainStale();
+			return;
+		}
 		if (w != swapchain.width() || h != swapchain.height())
 		{
 			renderer.markSwapchainStale();
@@ -703,6 +737,44 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			updateDebugOverlaySnapshot();
 		}
 		stats.maybeLog();
+	}
+
+	private boolean ensureNativeSurfaceCurrent(int width, int height)
+	{
+		if (!(platform instanceof X11PlatformSurface) || surface == null || swapchain == null)
+		{
+			return true;
+		}
+
+		long currentDrawable = X11PlatformSurface.currentDrawable(canvas);
+		if (currentDrawable == 0L || currentDrawable == x11Drawable)
+		{
+			return true;
+		}
+
+		log.warn("X11 canvas drawable changed 0x{} -> 0x{}; recreating Vulkan surface",
+			Long.toHexString(x11Drawable), Long.toHexString(currentDrawable));
+		recreateNativeSurface(width, height);
+		x11Drawable = X11PlatformSurface.currentDrawable(canvas);
+		lastDrawCanvasWidth = width;
+		lastDrawCanvasHeight = height;
+		return false;
+	}
+
+	private void recreateNativeSurface(int width, int height)
+	{
+		org.lwjgl.vulkan.VK13.vkDeviceWaitIdle(device.handle());
+		framebuffers.destroyAll();
+		swapchain.close();
+		surface.recreate(canvas);
+		swapchain.recreate(width, height);
+		depthBuffer.recreate(swapchain.width(), swapchain.height());
+		if (msaaColor != null)
+		{
+			msaaColor.recreate(swapchain.width(), swapchain.height());
+		}
+		framebuffers.recreate(renderPass, swapchain, depthBuffer, msaaColor);
+		sync.recreateRenderFinished(swapchain.imageCount());
 	}
 
 	@Override
@@ -996,8 +1068,13 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			stats.recordModel(m);
 		}
 		boolean actorModel = r instanceof net.runelite.api.Actor || tileObject == null;
-		if (renderExtensions != null) renderExtensions.captureModel(worldProjection, m, orient, x, y, z,
-			renderModeOf(r), actorModel);
+		if (renderExtensions != null)
+		{
+			long start = stats.isEnabled() ? System.nanoTime() : 0L;
+			renderExtensions.captureModel(worldProjection, m, orient, x, y, z,
+				renderModeOf(r), actorModel);
+			stats.addNanos(stats.dynamicCaptureNanos, start);
+		}
 	}
 
 	@Override
@@ -1012,8 +1089,13 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		{
 			return;
 		}
-		if (renderExtensions != null) renderExtensions.captureModel(worldProjection, m, orient, x, y, z,
-			renderModeOf(gameObject.getRenderable()), false);
+		if (renderExtensions != null)
+		{
+			long start = stats.isEnabled() ? System.nanoTime() : 0L;
+			renderExtensions.captureModel(worldProjection, m, orient, x, y, z,
+				renderModeOf(gameObject.getRenderable()), false);
+			stats.addNanos(stats.tempCaptureNanos, start);
+		}
 	}
 
 	private static int renderModeOf(Renderable renderable)
@@ -1050,7 +1132,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		if (renderable instanceof net.runelite.api.Actor) return;
 		Model m = (renderable instanceof Model) ? (Model) renderable : renderable.getModel();
 		if (m == null) return;
+		long start = stats.isEnabled() ? System.nanoTime() : 0L;
 		renderExtensions.captureModel(projection, m, orientation, x, y, z, renderModeOf(renderable), false);
+		stats.addNanos(stats.singleCaptureNanos, start);
 	}
 
 	@Override

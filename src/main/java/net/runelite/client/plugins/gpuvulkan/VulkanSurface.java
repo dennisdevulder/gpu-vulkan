@@ -36,12 +36,14 @@ import static org.lwjgl.vulkan.KHRSurface.vkDestroySurfaceKHR;
 final class VulkanSurface implements AutoCloseable
 {
 	private final VulkanInstance instance;
-	private final long handle;
+	private final PlatformSurface platform;
+	private long handle;
 
 	VulkanSurface(VulkanInstance instance, PlatformSurface platform, Canvas canvas)
 	{
 		this.instance = instance;
-		this.handle = platform.createSurface(instance, canvas);
+		this.platform = platform;
+		recreate(canvas);
 	}
 
 	long handle()
@@ -49,9 +51,19 @@ final class VulkanSurface implements AutoCloseable
 		return handle;
 	}
 
+	void recreate(Canvas canvas)
+	{
+		close();
+		handle = platform.createSurface(instance, canvas);
+	}
+
 	@Override
 	public void close()
 	{
-		vkDestroySurfaceKHR(instance.handle(), handle, null);
+		if (handle != 0L)
+		{
+			vkDestroySurfaceKHR(instance.handle(), handle, null);
+			handle = 0L;
+		}
 	}
 }

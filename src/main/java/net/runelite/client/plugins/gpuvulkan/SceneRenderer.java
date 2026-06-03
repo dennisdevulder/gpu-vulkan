@@ -89,12 +89,18 @@ final class SceneRenderer implements AutoCloseable
 	private static final long FRAME_BUFFER_BYTES = (long) MAX_FRAME_VERTICES * ScenePipeline.VERTEX_STRIDE;
 	private static final long TOTAL_BUFFER_BYTES = STATIC_BUFFER_BYTES + FRAME_BUFFER_BYTES * FrameSync.FRAMES_IN_FLIGHT;
 	private static final int HSL_HIDDEN = 12345678;
-	private static final int OPAQUE_UNSORTED_FACE_THRESHOLD = 24;
+	private static final int OPAQUE_UNSORTED_FACE_THRESHOLD = intProperty("vkgpu.opaqueUnsortedFaceThreshold", 64, 0, 256);
 	private static final int MAX_MODEL_CACHE_ENTRIES = 8192;
 	private static final int MODEL_CACHE_BUCKETS = 16384;
 	private static final int MODEL_CACHE_BUCKET_MASK = MODEL_CACHE_BUCKETS - 1;
 	private static final int SCENE_OFFSET = (Constants.EXTENDED_SCENE_SIZE - Constants.SCENE_SIZE) / 2;
 	private static final float[] HSL_RGB = buildHslRgbTable();
+
+	private static int intProperty(String name, int defaultValue, int min, int max)
+	{
+		int value = Integer.getInteger(name, defaultValue);
+		return Math.max(min, Math.min(max, value));
+	}
 
 	private final VulkanDevice device;
 	private final FrameSync sync;
@@ -109,6 +115,7 @@ final class SceneRenderer implements AutoCloseable
 	private final int slotBytes;
 	private final DrawCallbackStats stats;
 	private final boolean repushConstantsEveryDraw;
+	private final boolean singlePassAlpha;
 	private long writePtr;
 	private long writeBasePtr;
 	private int writeBaseVertex;
@@ -274,12 +281,13 @@ final class SceneRenderer implements AutoCloseable
 
 	SceneRenderer(VulkanDevice device, FrameSync sync,
 		RenderPass renderPass, TextureArray textureArray,
-		DrawCallbackStats stats, boolean alphaToCoverage)
+		DrawCallbackStats stats, boolean alphaToCoverage, boolean singlePassAlpha)
 	{
 		this.device = device;
 		this.sync = sync;
 		this.stats = stats;
 		this.repushConstantsEveryDraw = device.supportsMetalObjects();
+		this.singlePassAlpha = singlePassAlpha || Boolean.getBoolean("vkgpu.skipAlphaPass");
 		this.fillPipeline = new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL, true,
 			renderPass.samples(), alphaToCoverage);
 		this.alphaPipeline = new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL,
@@ -1891,7 +1899,7 @@ final class SceneRenderer implements AutoCloseable
 			fragPush.putFloat(textureLightMode);
 			fragPush.putFloat((float) colorBlindMode);
 			fragPush.putFloat(colorBlindIntensity);
-			fragPush.putFloat(smoothBanding);
+			fragPush.putFloat(singlePassAlpha ? 20f + smoothBanding : smoothBanding);
 			fragPush.flip();
 
 			ByteBuffer alphaFragPush = stack.malloc(32);
@@ -2015,16 +2023,19 @@ final class SceneRenderer implements AutoCloseable
 				drawPriorityRanges(cmd, slotFirstVertex, priorityDepthPipeline.layout(), vertPush, fragPush);
 			}
 
-			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, alphaPipeline.handle());
-			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-				alphaPipeline.layout(), 0, stack.longs(descriptorSet), null);
-			if (!repushConstantsEveryDraw)
+			if (!singlePassAlpha)
 			{
-				pushDrawConstants(cmd, alphaPipeline.layout(), vertPush, alphaFragPush);
+				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, alphaPipeline.handle());
+				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+					alphaPipeline.layout(), 0, stack.longs(descriptorSet), null);
+				if (!repushConstantsEveryDraw)
+				{
+					pushDrawConstants(cmd, alphaPipeline.layout(), vertPush, alphaFragPush);
+				}
+				drawAlphaPass(cmd, loMin, loMax, fullZoneRange, minZoneX, maxZoneX, minZoneZ, maxZoneZ,
+					skipScratch, skipPairs, loCur,
+					slot, staticFirstVertex, slotFirstVertex, alphaPipeline.layout(), vertPush, alphaFragPush);
 			}
-			drawAlphaPass(cmd, loMin, loMax, fullZoneRange, minZoneX, maxZoneX, minZoneZ, maxZoneZ,
-				skipScratch, skipPairs, loCur,
-				slot, staticFirstVertex, slotFirstVertex, alphaPipeline.layout(), vertPush, alphaFragPush);
 		}
 	}
 

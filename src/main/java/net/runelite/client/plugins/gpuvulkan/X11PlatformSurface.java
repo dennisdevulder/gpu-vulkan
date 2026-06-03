@@ -57,6 +57,27 @@ final class X11PlatformSurface implements PlatformSurface
 	@Override
 	public long createSurface(VulkanInstance instance, Canvas canvas)
 	{
+		long[] x11 = currentDisplayAndDrawable(canvas);
+		try (MemoryStack stack = stackPush())
+		{
+			VkXlibSurfaceCreateInfoKHR info = VkXlibSurfaceCreateInfoKHR.calloc(stack)
+				.sType$Default()
+				.dpy(x11[0])
+				.window(x11[1]);
+			LongBuffer pSurface = stack.mallocLong(1);
+			Vk.check("vkCreateXlibSurfaceKHR", KHRXlibSurface.vkCreateXlibSurfaceKHR(
+				instance.handle(), info, null, pSurface));
+			return pSurface.get(0);
+		}
+	}
+
+	static long currentDrawable(Canvas canvas)
+	{
+		return currentDisplayAndDrawable(canvas)[1];
+	}
+
+	private static long[] currentDisplayAndDrawable(Canvas canvas)
+	{
 		JAWT awt = JAWT.calloc();
 		awt.version(JAWTFunctions.JAWT_VERSION_9);
 		try
@@ -89,17 +110,7 @@ final class X11PlatformSurface implements PlatformSurface
 					try
 					{
 						JAWTX11DrawingSurfaceInfo x11 = JAWTX11DrawingSurfaceInfo.create(dsi.platformInfo());
-						try (MemoryStack stack = stackPush())
-						{
-							VkXlibSurfaceCreateInfoKHR info = VkXlibSurfaceCreateInfoKHR.calloc(stack)
-								.sType$Default()
-								.dpy(x11.display())
-								.window(x11.drawable());
-							LongBuffer pSurface = stack.mallocLong(1);
-							Vk.check("vkCreateXlibSurfaceKHR", KHRXlibSurface.vkCreateXlibSurfaceKHR(
-								instance.handle(), info, null, pSurface));
-							return pSurface.get(0);
-						}
+						return new long[] { x11.display(), x11.drawable() };
 					}
 					finally
 					{
