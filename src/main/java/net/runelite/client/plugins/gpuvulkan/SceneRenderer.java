@@ -90,11 +90,8 @@ final class SceneRenderer implements AutoCloseable
 	private static final long TOTAL_BUFFER_BYTES = STATIC_BUFFER_BYTES + FRAME_BUFFER_BYTES * FrameSync.FRAMES_IN_FLIGHT;
 	private static final int HSL_HIDDEN = 12345678;
 	private static final int OPAQUE_UNSORTED_FACE_THRESHOLD = intProperty("vkgpu.opaqueUnsortedFaceThreshold", 64, 0, 256);
-	private static final int MAX_MODEL_CACHE_ENTRIES = 8192;
-	private static final int MODEL_CACHE_BUCKETS = 16384;
-	private static final int MODEL_CACHE_BUCKET_MASK = MODEL_CACHE_BUCKETS - 1;
 	private static final int SCENE_OFFSET = (Constants.EXTENDED_SCENE_SIZE - Constants.SCENE_SIZE) / 2;
-	private static final float[] HSL_RGB = buildHslRgbTable();
+	private static final float[] HSL_RGB = HslColor.RGB_TABLE;
 
 	private static int intProperty(String name, int defaultValue, int min, int max)
 	{
@@ -126,10 +123,7 @@ final class SceneRenderer implements AutoCloseable
 	private final float[] cullProjX = new float[ModelSorter.MAX_VERTEX_COUNT];
 	private final float[] cullProjY = new float[ModelSorter.MAX_VERTEX_COUNT];
 	private final float[] cullProjectScratch = new float[3];
-	private final ModelCacheEntry[] modelCacheBuckets = new ModelCacheEntry[MODEL_CACHE_BUCKETS];
-	private int modelCacheSize;
-	private long modelCacheHits;
-	private long modelCacheMisses;
+	private final ModelFaceCache modelFaceCache = new ModelFaceCache();
 
 	private static final int MAX_PLANES = 4;
 
@@ -238,7 +232,7 @@ final class SceneRenderer implements AutoCloseable
 		java.util.Arrays.fill(dirtyZoneSlotMask, 0);
 		dirtyZoneCount = 0;
 		pendingRenderables.clear();
-		clearModelCache();
+		modelFaceCache.clear();
 		for (int i = 0; i < LAYER_COUNT; i++)
 		{
 			regionEnds[i] = 0;
@@ -342,9 +336,7 @@ final class SceneRenderer implements AutoCloseable
 		metrics.roofRanges += tileRoofCount;
 		metrics.pendingRenderables += pendingRenderables.size();
 		metrics.dirtyZones += dirtyZoneCount;
-		metrics.modelCacheEntries += modelCacheSize;
-		metrics.modelCacheHits += modelCacheHits;
-		metrics.modelCacheMisses += modelCacheMisses;
+		modelFaceCache.collectDebugMetrics(metrics);
 		metrics.sceneDrawCalls += stats.sceneDrawCalls.get();
 		metrics.sceneDrawVertices += stats.sceneDrawVertices.get();
 		metrics.scenePushConstants += stats.scenePushConstants.get();
@@ -388,65 +380,6 @@ final class SceneRenderer implements AutoCloseable
 			return false;
 		}
 		return true;
-	}
-
-	private ModelCacheEntry modelInfo(int faceCount, byte[] faceTransparencies)
-	{
-		int hash = 31 * faceCount + System.identityHashCode(faceTransparencies);
-
-		int bucket = hash & MODEL_CACHE_BUCKET_MASK;
-		for (ModelCacheEntry entry = modelCacheBuckets[bucket]; entry != null; entry = entry.next)
-		{
-			if (entry.matches(hash, faceCount, faceTransparencies))
-			{
-				modelCacheHits++;
-				return entry;
-			}
-		}
-
-		modelCacheMisses++;
-		if (modelCacheSize >= MAX_MODEL_CACHE_ENTRIES)
-		{
-			clearModelCache();
-			bucket = hash & MODEL_CACHE_BUCKET_MASK;
-		}
-		ModelCacheEntry cached = new ModelCacheEntry(hash, faceCount, faceTransparencies, modelCacheBuckets[bucket]);
-		modelCacheBuckets[bucket] = cached;
-		modelCacheSize++;
-		return cached;
-	}
-
-	private void clearModelCache()
-	{
-		java.util.Arrays.fill(modelCacheBuckets, null);
-		modelCacheSize = 0;
-	}
-
-	private static final class ModelCacheEntry
-	{
-		ModelCacheEntry next;
-		final int hash;
-		final int faceCount;
-		final byte[] faceTransparencies;
-		final int transparentFaces;
-		final boolean hasTransparentFaces;
-
-		ModelCacheEntry(int hash, int faceCount, byte[] faceTransparencies, ModelCacheEntry next)
-		{
-			this.next = next;
-			this.hash = hash;
-			this.faceCount = faceCount;
-			this.faceTransparencies = faceTransparencies;
-			this.transparentFaces = countTransparentFaces(faceCount, faceTransparencies);
-			this.hasTransparentFaces = transparentFaces > 0;
-		}
-
-		boolean matches(int hash, int faceCount, byte[] faceTransparencies)
-		{
-			return this.hash == hash
-				&& this.faceCount == faceCount
-				&& this.faceTransparencies == faceTransparencies;
-		}
 	}
 
 	/**
@@ -567,7 +500,7 @@ final class SceneRenderer implements AutoCloseable
 		tileRoofCount = 0;
 		clearOverlayRanges();
 		pendingRenderables.clear();
-		clearModelCache();
+		modelFaceCache.clear();
 
 		Tile[][][] tiles = scene.getTiles();
 		if (tiles == null) return;
@@ -1193,9 +1126,9 @@ final class SceneRenderer implements AutoCloseable
 			if (hasOverride && texLayer == 0)
 			{
 				overrideFaces++;
-				col1 = applyHslOverride(col1, overrideHue, overrideSat, overrideLum, overrideAmount);
-				col2 = applyHslOverride(col2, overrideHue, overrideSat, overrideLum, overrideAmount);
-				col3 = applyHslOverride(col3, overrideHue, overrideSat, overrideLum, overrideAmount);
+				col1 = HslColor.applyOverride(col1, overrideHue, overrideSat, overrideLum, overrideAmount);
+				col2 = HslColor.applyOverride(col2, overrideHue, overrideSat, overrideLum, overrideAmount);
+				col3 = HslColor.applyOverride(col3, overrideHue, overrideSat, overrideLum, overrideAmount);
 			}
 
 			// Pack [texLayer:16 | bias:8 | trans:8] = stock's alphaBias.
@@ -1302,12 +1235,12 @@ final class SceneRenderer implements AutoCloseable
 		int faceCount = m.getFaceCount();
 		byte[] faceTransparencies = m.getFaceTransparencies();
 		if (!prioritySort && faceCount <= OPAQUE_UNSORTED_FACE_THRESHOLD
-			&& countTransparentFaces(faceCount, faceTransparencies) == 0)
+			&& ModelFaceCache.countTransparentFaces(faceCount, faceTransparencies) == 0)
 		{
 			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
 			return;
 		}
-		ModelCacheEntry modelInfo = modelInfo(faceCount, faceTransparencies);
+		ModelFaceCache.Entry modelInfo = modelFaceCache.info(faceCount, faceTransparencies);
 		boolean needsFaceSort = prioritySort || modelInfo.hasTransparentFaces;
 		if (!needsFaceSort && modelInfo.faceCount <= OPAQUE_UNSORTED_FACE_THRESHOLD)
 		{
@@ -1442,9 +1375,9 @@ final class SceneRenderer implements AutoCloseable
 			if (hasOverride && texLayer == 0)
 			{
 				overrideFaces++;
-				col1 = applyHslOverride(col1, overrideHue, overrideSat, overrideLum, overrideAmount);
-				col2 = applyHslOverride(col2, overrideHue, overrideSat, overrideLum, overrideAmount);
-				col3 = applyHslOverride(col3, overrideHue, overrideSat, overrideLum, overrideAmount);
+				col1 = HslColor.applyOverride(col1, overrideHue, overrideSat, overrideLum, overrideAmount);
+				col2 = HslColor.applyOverride(col2, overrideHue, overrideSat, overrideLum, overrideAmount);
+				col3 = HslColor.applyOverride(col3, overrideHue, overrideSat, overrideLum, overrideAmount);
 			}
 
 			int bias = faceBiasArr != null ? (faceBiasArr[f] & 0xFF) : 0;
@@ -1701,9 +1634,9 @@ final class SceneRenderer implements AutoCloseable
 			if (hasOverride && texLayer == 0)
 			{
 				overrideFaces++;
-				col1 = applyHslOverride(col1, overrideHue, overrideSat, overrideLum, overrideAmount);
-				col2 = applyHslOverride(col2, overrideHue, overrideSat, overrideLum, overrideAmount);
-				col3 = applyHslOverride(col3, overrideHue, overrideSat, overrideLum, overrideAmount);
+				col1 = HslColor.applyOverride(col1, overrideHue, overrideSat, overrideLum, overrideAmount);
+				col2 = HslColor.applyOverride(col2, overrideHue, overrideSat, overrideLum, overrideAmount);
+				col3 = HslColor.applyOverride(col3, overrideHue, overrideSat, overrideLum, overrideAmount);
 			}
 
 			int bias = faceBiasArr != null ? (faceBiasArr[f] & 0xFF) : 0;
@@ -1779,24 +1712,6 @@ final class SceneRenderer implements AutoCloseable
 			stats.overrideEmitFaces.addAndGet(overrideFaces);
 		}
 		return true;
-	}
-
-	private static int countTransparentFaces(int faceCount, byte[] transparencies)
-	{
-		if (transparencies == null)
-		{
-			return 0;
-		}
-		int transparent = 0;
-		int faces = Math.min(faceCount, transparencies.length);
-		for (int i = 0; i < faces; i++)
-		{
-			if (transparencies[i] != 0)
-			{
-				transparent++;
-			}
-		}
-		return transparent;
 	}
 
 	private final float[] uvScratch = new float[6];
@@ -2605,94 +2520,14 @@ final class SceneRenderer implements AutoCloseable
 												   float light, float r, float g, float b,
 												   int texLayer)
 	{
-		writePackedVertexPackedAt(p, x, y, z, (int) light, 0f, 0f, texLayer);
+		SceneVertexPacker.writePacked(p, x, y, z, (int) light, 0f, 0f, texLayer);
 	}
 
 	private void writePackedVertexPacked(float x, float y, float z, int hsl16, float u, float v, int texLayer)
 	{
 		long p = writePtr;
-		writePackedVertexPackedAt(p, x, y, z, hsl16, u, v, texLayer);
+		SceneVertexPacker.writePacked(p, x, y, z, hsl16, u, v, texLayer);
 		writePtr = p + ScenePipeline.VERTEX_STRIDE;
-	}
-
-	private static void writePackedVertexPackedAt(long p, float x, float y, float z,
-												  int hsl16, float u, float v, int texLayer)
-	{
-		MemoryUtil.memPutShort(p, clampShort(Math.round(x)));
-		MemoryUtil.memPutShort(p + 2, clampShort(Math.round(y)));
-		MemoryUtil.memPutShort(p + 4, clampShort(Math.round(z)));
-		MemoryUtil.memPutShort(p + 6, (short) 0);
-		MemoryUtil.memPutInt(p + 8, (texLayer & 0xFFFF0000) | (hsl16 & 0xFFFF));
-		MemoryUtil.memPutShort(p + 12, clampShort(texLayer & 0xFFFF));
-		MemoryUtil.memPutShort(p + 14, clampShort(Math.round(u * 256f)));
-		MemoryUtil.memPutShort(p + 16, clampShort(Math.round(v * 256f)));
-		MemoryUtil.memPutShort(p + 18, (short) 0);
-	}
-
-	private static short clampShort(int value)
-	{
-		return (short) (value < Short.MIN_VALUE ? Short.MIN_VALUE : Math.min(value, Short.MAX_VALUE));
-	}
-
-
-	/**
-	 * Per-component HSL lerp toward an override target. Mirrors stock
-	 * {@code SceneUploader.interpolateHSL}. Override byte -1 keeps that
-	 * component unchanged. Result clamped to each component's bit width.
-	 */
-	private static int applyHslOverride(int hsl16, byte oH, byte oS, byte oL, byte oA)
-	{
-		int amount = oA & 0xFF;
-		int h = (hsl16 >> 10) & 0x3F;
-		int s = (hsl16 >>  7) & 0x07;
-		int l =  hsl16        & 0x7F;
-		if (oH != -1)
-		{
-			int blended = h + ((amount * ((oH & 0xFF) - h)) >> 7);
-			h = blended < 0 ? 0 : (blended > 0x3F ? 0x3F : blended);
-		}
-		if (oS != -1)
-		{
-			int blended = s + ((amount * ((oS & 0xFF) - s)) >> 7);
-			s = blended < 0 ? 0 : (blended > 0x07 ? 0x07 : blended);
-		}
-		if (oL != -1)
-		{
-			int blended = l + ((amount * ((oL & 0xFF) - l)) >> 7);
-			l = blended < 0 ? 0 : (blended > 0x7F ? 0x7F : blended);
-		}
-		return (h << 10) | (s << 7) | l;
-	}
-
-	private static float[] buildHslRgbTable()
-	{
-		float[] table = new float[0x10000 * 3];
-		for (int hsl16 = 0; hsl16 < 0x10000; hsl16++)
-		{
-			int h = (hsl16 >> 10) & 0x3F;
-			int s = (hsl16 >>  7) & 0x07;
-			int l =  hsl16        & 0x7F;
-			float hue = h / 64f + 0.0078125f;
-			float sat = s / 8f  + 0.0625f;
-			float lum = l / 128f;
-			float q = lum < 0.5f ? lum * (1f + sat) : lum + sat - lum * sat;
-			float p = 2f * lum - q;
-			int offset = hsl16 * 3;
-			table[offset] = hueToChannel(p, q, hue + 1f / 3f);
-			table[offset + 1] = hueToChannel(p, q, hue);
-			table[offset + 2] = hueToChannel(p, q, hue - 1f / 3f);
-		}
-		return table;
-	}
-
-	private static float hueToChannel(float p, float q, float t)
-	{
-		if (t > 1f) t -= 1f;
-		else if (t < 0f) t += 1f;
-		if (6f * t < 1f) return p + (q - p) * 6f * t;
-		if (2f * t < 1f) return q;
-		if (3f * t < 2f) return p + (q - p) * (2f / 3f - t) * 6f;
-		return p;
 	}
 
 	private void overflow()

@@ -35,6 +35,10 @@ public interface VulkanRenderBackend
 	 * Register a render extension. If the backend is not ready yet, the
 	 * extension is attached during the next successful startup.
 	 *
+	 * <p>Registration is serialized with render-extension callbacks. Calling
+	 * this or closing the returned handle from another thread is allowed, but it
+	 * may block until the current callback finishes.
+	 *
 	 * @return registration handle; closing it unregisters and closes the
 	 * extension.
 	 */

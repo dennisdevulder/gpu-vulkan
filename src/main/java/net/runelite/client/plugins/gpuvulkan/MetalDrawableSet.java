@@ -73,6 +73,7 @@ final class MetalDrawableSet implements AutoCloseable
 
 	static final class Entry
 	{
+		long textureHandle;
 		long image;
 		long view;
 		long framebuffer;
@@ -209,11 +210,13 @@ final class MetalDrawableSet implements AutoCloseable
 			}
 
 			Entry e = new Entry();
+			e.textureHandle = textureHandle;
 			e.image = image;
 			e.view = view;
 			e.framebuffer = pFb.get(0);
 			e.width = width;
 			e.height = height;
+			MacOSMetalHelper.retainObject(textureHandle);
 			log.debug("MetalDrawableSet: built entry for MTLTexture 0x{} {}x{}",
 				Long.toHexString(textureHandle), width, height);
 			return e;
@@ -233,6 +236,11 @@ final class MetalDrawableSet implements AutoCloseable
 		if (e.image != VK_NULL_HANDLE)
 		{
 			vkDestroyImage(device.handle(), e.image, null);
+		}
+		if (e.textureHandle != VK_NULL_HANDLE)
+		{
+			MacOSMetalHelper.releaseObject(e.textureHandle);
+			e.textureHandle = VK_NULL_HANDLE;
 		}
 	}
 

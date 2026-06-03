@@ -11,7 +11,11 @@ plugins {
 }
 
 repositories {
-	mavenLocal()
+	mavenLocal {
+		content {
+			includeGroupAndSubgroups('net.runelite')
+		}
+	}
 	maven {
 		url = uri('https://repo.runelite.net')
 		content {
@@ -46,17 +50,29 @@ dependencies {
 	compileOnly "org.projectlombok:lombok:${lombokVersion}"
 	annotationProcessor "org.projectlombok:lombok:${lombokVersion}"
 
-	testImplementation "net.runelite:client:${runeLiteVersion}"
-	testImplementation "net.runelite:jshell:${runeLiteVersion}"
+	testCompileOnly "net.runelite:client:${runeLiteVersion}"
 	testImplementation 'junit:junit:4.13.2'
+}
 
-	testRuntimeOnly "org.lwjgl:lwjgl:${lwjglVersion}:natives-linux"
-	testRuntimeOnly "org.lwjgl:lwjgl:${lwjglVersion}:natives-linux-arm64"
-	testRuntimeOnly "org.lwjgl:lwjgl:${lwjglVersion}:natives-windows"
-	testRuntimeOnly "org.lwjgl:lwjgl:${lwjglVersion}:natives-macos"
-	testRuntimeOnly "org.lwjgl:lwjgl:${lwjglVersion}:natives-macos-arm64"
-	testRuntimeOnly "org.lwjgl:lwjgl-vulkan:${lwjglVulkanVersion}:natives-macos"
-	testRuntimeOnly "org.lwjgl:lwjgl-vulkan:${lwjglVulkanVersion}:natives-macos-arm64"
+configurations {
+	launcherRuntime
+}
+
+dependencies {
+	launcherRuntime "net.runelite:client:${runeLiteVersion}"
+	launcherRuntime "net.runelite:jshell:${runeLiteVersion}"
+	launcherRuntime "org.lwjgl:lwjgl:${lwjglVersion}:natives-linux"
+	launcherRuntime "org.lwjgl:lwjgl:${lwjglVersion}:natives-linux-arm64"
+	launcherRuntime "org.lwjgl:lwjgl:${lwjglVersion}:natives-windows"
+	launcherRuntime "org.lwjgl:lwjgl:${lwjglVersion}:natives-macos"
+	launcherRuntime "org.lwjgl:lwjgl:${lwjglVersion}:natives-macos-arm64"
+	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglVersion}:natives-linux"
+	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglVersion}:natives-linux-arm64"
+	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglVersion}:natives-windows"
+	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglVersion}:natives-macos"
+	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglVersion}:natives-macos-arm64"
+	launcherRuntime "org.lwjgl:lwjgl-vulkan:${lwjglVulkanVersion}:natives-macos"
+	launcherRuntime "org.lwjgl:lwjgl-vulkan:${lwjglVulkanVersion}:natives-macos-arm64"
 }
 
 def gpuVulkanShaderSrc = file('src/main/shaders/gpuvulkan')
@@ -77,6 +93,9 @@ def compileGpuVulkanShaders = tasks.register('compileGpuVulkanShaders') {
 
 	doLast {
 		gpuVulkanShaderOut.mkdirs()
+		delete fileTree(gpuVulkanShaderOut).matching {
+			include '**/*.spv'
+		}
 		fileTree(gpuVulkanShaderSrc).matching {
 			include '**/*.vert', '**/*.frag', '**/*.comp', '**/*.geom'
 		}.each { src ->
@@ -144,14 +163,14 @@ tasks.withType(Test).configureEach {
 }
 
 tasks.register('run', JavaExec) {
-	classpath = sourceSets.test.runtimeClasspath
+	classpath = sourceSets.main.runtimeClasspath + sourceSets.test.output + configurations.launcherRuntime
 	mainClass = pluginMainClass
 	jvmArgs '-ea', '--add-exports=java.desktop/com.apple.eawt=ALL-UNNAMED'
 	args '--developer-mode', '--debug'
 }
 
 tasks.register('shadowJar', Jar) {
-	dependsOn configurations.testRuntimeClasspath, 'classes', 'testClasses'
+	dependsOn configurations.runtimeClasspath, configurations.launcherRuntime, 'classes', 'testClasses'
 	manifest {
 		attributes(
 			'Main-Class': pluginMainClass,
@@ -164,7 +183,10 @@ tasks.register('shadowJar', Jar) {
 	from sourceSets.main.output
 	from sourceSets.test.output
 	from {
-		configurations.testRuntimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+		configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+	}
+	from {
+		configurations.launcherRuntime.collect { it.isDirectory() ? it : zipTree(it) }
 	}
 
 	exclude 'META-INF/INDEX.LIST'
@@ -172,6 +194,7 @@ tasks.register('shadowJar', Jar) {
 	exclude 'META-INF/*.DSA'
 	exclude 'META-INF/*.RSA'
 	exclude '**/module-info.class'
+	exclude 'net/runelite/client/plugins/gpu/**'
 	exclude 'runelite-plugin.properties'
 
 	group = BasePlugin.BUILD_GROUP
