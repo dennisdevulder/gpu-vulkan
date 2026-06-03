@@ -59,16 +59,18 @@ configurations {
 }
 
 dependencies {
-	launcherRuntime("net.runelite:client:${runeLiteVersion}") {
-		exclude group: 'org.lwjgl', module: 'lwjgl-opencl'
-		exclude group: 'org.lwjgl', module: 'lwjgl-opengl'
-	}
+	launcherRuntime "net.runelite:client:${runeLiteVersion}"
 	launcherRuntime "net.runelite:jshell:${runeLiteVersion}"
 	launcherRuntime "org.lwjgl:lwjgl:${lwjglVersion}:natives-linux"
 	launcherRuntime "org.lwjgl:lwjgl:${lwjglVersion}:natives-linux-arm64"
 	launcherRuntime "org.lwjgl:lwjgl:${lwjglVersion}:natives-windows"
 	launcherRuntime "org.lwjgl:lwjgl:${lwjglVersion}:natives-macos"
 	launcherRuntime "org.lwjgl:lwjgl:${lwjglVersion}:natives-macos-arm64"
+	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglVersion}:natives-linux"
+	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglVersion}:natives-linux-arm64"
+	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglVersion}:natives-windows"
+	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglVersion}:natives-macos"
+	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglVersion}:natives-macos-arm64"
 	launcherRuntime "org.lwjgl:lwjgl-vulkan:${lwjglVulkanVersion}:natives-macos"
 	launcherRuntime "org.lwjgl:lwjgl-vulkan:${lwjglVulkanVersion}:natives-macos-arm64"
 }
