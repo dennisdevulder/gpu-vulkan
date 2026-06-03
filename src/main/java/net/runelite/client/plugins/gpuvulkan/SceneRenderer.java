@@ -65,6 +65,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	private final ScenePipeline fillPipeline;
 	private final ScenePipeline linePipeline;
 	private final ScenePipeline alphaPipeline;
+	private final ScenePipeline skyboxPipeline;
 	private final ScenePipeline priorityColorPipeline;
 	private final ScenePipeline priorityDepthPipeline;
 	private final SceneVertexBuffer vbuf;
@@ -90,6 +91,10 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	private static final int TOPLEVEL_ZONE_OFFSET = SCENE_OFFSET / ZONE_SIZE;
 
 	private final int[] regionEnds = new int[LAYER_COUNT];
+	private int skyboxStart = -1;
+	private int skyboxEnd = -1;
+	private int loggedSkyboxFaces = Integer.MIN_VALUE;
+	private int loggedSkyboxVertices = Integer.MIN_VALUE;
 	/** Per-layer, per-plane: vertex count after that plane's tiles emitted.
 	 *  Used to clip at {@code planeEnds[layer][maxPlane]} so upper-plane
 	 *  geometry is culled when the player is below. */
@@ -159,6 +164,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			regionEnds[i] = 0;
 			for (int p = 0; p < MAX_PLANES; p++) planeEnds[i][p] = 0;
 		}
+		skyboxStart = skyboxEnd = -1;
 		clearOverlayRanges();
 	}
 
@@ -202,6 +208,8 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		this.fillPipeline = new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL, true,
 			renderPass.samples(), alphaToCoverage);
 		this.alphaPipeline = new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL,
+			true, false, true, renderPass.samples(), false, true);
+		this.skyboxPipeline = new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL,
 			true, false, true, renderPass.samples(), false, true);
 		this.priorityColorPipeline = new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL,
 			true, false, true, renderPass.samples(), alphaToCoverage);
@@ -408,6 +416,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			}
 		}
 		vertexCount = 0;
+		skyboxStart = skyboxEnd = -1;
 		useStaticWriteArena();
 		overflowed = false;
 		roofRanges.clear();
@@ -417,6 +426,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 
 		Tile[][][] tiles = scene.getTiles();
 		if (tiles == null) return;
+		captureSkybox(scene);
 		final int planes = Math.min(tiles.length, MAX_PLANES);
 		final int sceneSize = Constants.SCENE_SIZE;
 
@@ -498,6 +508,30 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 					java.util.Arrays.fill(overlayZoneStart[slot][layer][plane], 0);
 					java.util.Arrays.fill(overlayZoneCount[slot][layer][plane], 0);
 				}
+			}
+		}
+	}
+
+	void captureSkybox(Scene scene)
+	{
+		skyboxStart = skyboxEnd = -1;
+		if (scene == null)
+		{
+			return;
+		}
+		Model skybox = scene.getSkybox();
+		if (skybox != null)
+		{
+			int faces = skybox.getFaceCount();
+			skyboxStart = vertexCount;
+			captureModel(skybox, 0, 0, 0, 0);
+			skyboxEnd = vertexCount;
+			int vertices = skyboxEnd - skyboxStart;
+			if (faces != loggedSkyboxFaces || vertices != loggedSkyboxVertices)
+			{
+				log.info("Vulkan skybox: model faces={} capturedVertices={}", faces, vertices);
+				loggedSkyboxFaces = faces;
+				loggedSkyboxVertices = vertices;
 			}
 		}
 	}
@@ -863,7 +897,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	}
 
 	void recordDraw(VkCommandBuffer cmd, float[] mvp, float brightness,
-					float cameraX, float cameraZ, float drawDistanceTiles, float fogDepthTiles,
+					float cameraX, float cameraY, float cameraZ, float drawDistanceTiles, float fogDepthTiles,
 					float fogR, float fogG, float fogB,
 					int tick, float textureLightMode,
 					int colorBlindMode, float colorBlindIntensity,
@@ -940,7 +974,33 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			int maxZoneX = fullZoneRange ? ZONES_PER_SIDE - 1 : Math.min(ZONES_PER_SIDE - 1, camZoneX + radiusZones);
 			int minZoneZ = fullZoneRange ? 0 : Math.max(0, camZoneZ - radiusZones);
 			int maxZoneZ = fullZoneRange ? ZONES_PER_SIDE - 1 : Math.min(ZONES_PER_SIDE - 1, camZoneZ + radiusZones);
-			int layerStart = 0;
+			if (skyboxEnd > skyboxStart)
+			{
+				float[] skyboxMvp = mvp.clone();
+				Mat4Ops.mul(skyboxMvp, Mat4Ops.translate(cameraX, cameraY, cameraZ));
+
+				ByteBuffer skyboxVertPush = stack.malloc(96);
+				Mat4Ops.writeTo(skyboxVertPush, skyboxMvp);
+				skyboxVertPush.position(64);
+				skyboxVertPush.putFloat(cameraX);
+				skyboxVertPush.putFloat(cameraZ);
+				skyboxVertPush.putFloat(drawDistanceTiles * 128f);
+				skyboxVertPush.putFloat(0f);
+				skyboxVertPush.putInt(tick).putInt(0).putInt(0).putInt(0);
+				skyboxVertPush.flip();
+
+				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipeline.handle());
+				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+					skyboxPipeline.layout(), 0, stack.longs(descriptorSet), null);
+				if (!repushConstantsEveryDraw)
+				{
+					drawEmitter.pushConstants(cmd, skyboxPipeline.layout(), skyboxVertPush, fragPush);
+				}
+				drawEmitter.drawRange(cmd, skyboxStart, skyboxEnd, skipScratch, 0, false,
+					staticFirstVertex, skyboxPipeline.layout(), skyboxVertPush, fragPush);
+			}
+
+			int layerStart = skyboxEnd > skyboxStart ? skyboxEnd : 0;
 			for (int i = 0; i < LAYER_COUNT; i++)
 			{
 				int regionEnd = i == LAYER_COUNT - 1 ? vertexCount : regionEnds[i];
@@ -1046,10 +1106,6 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		{
 			int layerStart = layerStartFor(i);
 			int regionEnd = i == LAYER_COUNT - 1 ? vertexCount : regionEnds[i];
-			if (regionEnd <= layerStart)
-			{
-				continue;
-			}
 			if (LAYERS[i] == Layer.DYNAMIC)
 			{
 				int dynamicStart = overlayNextVertex[slot];
@@ -1059,6 +1115,10 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			}
 			else
 			{
+				if (regionEnd <= layerStart)
+				{
+					continue;
+				}
 				for (int p = loMin; p <= loMax; p++)
 				{
 					zoneDrawScheduler.drawStaticPlane(cmd, i, p, layerStart,
@@ -1148,6 +1208,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		vbuf.close();
 		fillPipeline.close();
 		alphaPipeline.close();
+		skyboxPipeline.close();
 		priorityColorPipeline.close();
 		priorityDepthPipeline.close();
 		if (linePipeline != null) linePipeline.close();

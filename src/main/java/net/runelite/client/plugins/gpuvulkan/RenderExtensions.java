@@ -136,6 +136,11 @@ final class RenderExtensions implements AutoCloseable
 		forEachExtension("rebuildDirtyZones", extension -> extension.rebuildDirtyZones(scene));
 	}
 
+	synchronized void captureSkybox(Scene scene)
+	{
+		forEachExtension("captureSkybox", extension -> extension.captureSkybox(scene));
+	}
+
 	synchronized void drawPass(int pass)
 	{
 		forEachExtension("drawPass", extension -> extension.drawPass(pass));

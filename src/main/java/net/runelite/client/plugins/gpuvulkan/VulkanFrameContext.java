@@ -55,6 +55,8 @@ public interface VulkanFrameContext
 
 	float cameraX();
 
+	float cameraY();
+
 	float cameraZ();
 
 	float brightness();

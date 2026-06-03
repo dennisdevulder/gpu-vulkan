@@ -855,7 +855,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			renderExtensions.beginFrame();
 			stats.addNanos(stats.beginFrameNanos, start);
 			start = statsEnabled ? System.nanoTime() : 0L;
-			renderExtensions.rebuildDirtyZones(capturedScene);
+			Scene sceneForFrame = currentScene != null ? currentScene : capturedScene;
+			renderExtensions.rebuildDirtyZones(sceneForFrame);
 			stats.addNanos(stats.sceneCaptureNanos, start);
 			start = statsEnabled ? System.nanoTime() : 0L;
 			renderExtensions.captureDynamicPending();
@@ -867,6 +868,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	 *  loadScene callbacks are unreliable in this engine version, so we
 	 *  detect scene transitions by reference comparison instead. */
 	private Scene capturedScene;
+	private Scene currentScene;
 
 	@Override
 	public void preSceneDraw(Scene scene,
@@ -887,6 +889,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			capturedScene = scene;
 			captureSceneNow(scene);
 		}
+		currentScene = scene;
 		if (renderExtensions != null)
 		{
 			renderExtensions.setLevelRange(minLevel, level, maxLevel);

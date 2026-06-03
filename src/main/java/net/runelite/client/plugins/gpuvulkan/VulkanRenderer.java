@@ -646,7 +646,7 @@ final class VulkanRenderer implements AutoCloseable
 			if (!skipScreenshotReadback)
 			{
 				stats.screenshotReadbackBytes.addAndGet((long) targetWidth * targetHeight * Integer.BYTES);
-				screenshotReadback.recordCopy(cmd, targetImage, targetWidth, targetHeight);
+				screenshotReadback.recordCopy(cmd, targetImage, targetWidth, targetHeight, sync.currentFrame());
 			}
 			Vk.check("vkEndCommandBuffer", vkEndCommandBuffer(cmd));
 			return;
@@ -731,7 +731,7 @@ final class VulkanRenderer implements AutoCloseable
 			viewportXOffset, viewportYOffset, viewportWidth, viewportHeight,
 			canvasWidth, canvasHeight, scale,
 			sceneMvp,
-			(float) cameraX, (float) cameraZ, brightness,
+			(float) cameraX, (float) cameraY, (float) cameraZ, brightness,
 			drawDistanceTiles, fogDepthTiles,
 			((skyboxColor >> 16) & 0xFF) / 255f,
 			((skyboxColor >>  8) & 0xFF) / 255f,
@@ -767,7 +767,7 @@ final class VulkanRenderer implements AutoCloseable
 		if (!skipScreenshotReadback)
 		{
 			stats.screenshotReadbackBytes.addAndGet((long) targetWidth * targetHeight * Integer.BYTES);
-			screenshotReadback.recordCopy(cmd, targetImage, targetWidth, targetHeight);
+			screenshotReadback.recordCopy(cmd, targetImage, targetWidth, targetHeight, sync.currentFrame());
 		}
 
 		Vk.check("vkEndCommandBuffer", vkEndCommandBuffer(cmd));
@@ -926,7 +926,7 @@ final class VulkanRenderer implements AutoCloseable
 			viewportXOffset, viewportYOffset, viewportWidth, viewportHeight,
 			canvasWidth, canvasHeight, scale,
 			sceneMvp,
-			(float) cameraX, (float) cameraZ, brightness,
+			(float) cameraX, (float) cameraY, (float) cameraZ, brightness,
 			drawDistanceTiles, fogDepthTiles,
 			((skyboxColor >> 16) & 0xFF) / 255f,
 			((skyboxColor >>  8) & 0xFF) / 255f,

@@ -76,7 +76,7 @@ final class InterfaceRenderer implements AutoCloseable
 			.blendMode(RenderPipelineDesc.BlendMode.PREMUL_ALPHA)
 			.depthTest(RenderPipelineDesc.DepthTest.OFF)
 			.addBindGroupLayout(bgl)
-			.addPushConstantRange(ShaderStage.FRAGMENT, 0, 16)
+			.addPushConstantRange(ShaderStage.FRAGMENT, 0, 32)
 			.build());
 	}
 
@@ -109,8 +109,11 @@ final class InterfaceRenderer implements AutoCloseable
 			float r = ((overlayColor >>> 16) & 0xFF) / 255f;
 			float g = ((overlayColor >>>  8) & 0xFF) / 255f;
 			float b = ( overlayColor         & 0xFF) / 255f;
-			ByteBuffer push = stack.malloc(16);
+			ByteBuffer push = stack.malloc(32);
 			push.putFloat(r).putFloat(g).putFloat(b).putFloat(a);
+			push.putFloat((float) frame.colorBlindMode());
+			push.putFloat(frame.colorBlindIntensity());
+			push.putFloat(0f).putFloat(0f);
 			push.flip();
 			renderer.encodeInto(cmd)
 				.setViewport(0, 0, targetWidth, targetHeight)

@@ -55,6 +55,8 @@ public interface VulkanRenderExtension extends AutoCloseable
 
 	default void rebuildDirtyZones(Scene scene) {}
 
+	default void captureSkybox(Scene scene) {}
+
 	default void drawPass(int pass) {}
 
 	default void captureScene(Scene scene) {}

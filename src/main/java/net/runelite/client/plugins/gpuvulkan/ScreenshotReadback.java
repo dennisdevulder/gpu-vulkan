@@ -21,18 +21,20 @@ import static org.lwjgl.vulkan.VK13.*;
 final class ScreenshotReadback implements AutoCloseable
 {
 	private final VulkanDevice device;
-	private Buffer buffer;
+	private final Buffer[] buffers = new Buffer[FrameSync.FRAMES_IN_FLIGHT];
 	private int width;
 	private int height;
+	private int lastSlot = -1;
 
 	ScreenshotReadback(VulkanDevice device)
 	{
 		this.device = device;
 	}
 
-	void recordCopy(VkCommandBuffer cmd, long image, int width, int height)
+	void recordCopy(VkCommandBuffer cmd, long image, int width, int height, int slot)
 	{
-		ensureBuffer(width, height);
+		ensureBuffer(width, height, slot);
+		lastSlot = slot;
 		int presentLayout = device.supportsMetalObjects()
 			? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
 			: KHRSwapchain.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
@@ -58,7 +60,7 @@ final class ScreenshotReadback implements AutoCloseable
 				.mipLevel(0)
 				.baseArrayLayer(0).layerCount(1);
 			vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-				buffer.handle(), region);
+				buffers[slot].handle(), region);
 
 			transition(stack, cmd, image,
 				VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -72,10 +74,11 @@ final class ScreenshotReadback implements AutoCloseable
 
 	Image toImage()
 	{
-		if (buffer == null || width <= 0 || height <= 0)
+		if (lastSlot < 0 || buffers[lastSlot] == null || width <= 0 || height <= 0)
 		{
 			return null;
 		}
+		Buffer buffer = buffers[lastSlot];
 		buffer.invalidateIfNeeded();
 		BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
 		int[] dst = ((DataBufferInt) image.getRaster().getDataBuffer()).getData();
@@ -85,23 +88,27 @@ final class ScreenshotReadback implements AutoCloseable
 		return image;
 	}
 
-	private void ensureBuffer(int width, int height)
+	private void ensureBuffer(int width, int height, int slot)
 	{
-		if (buffer != null && this.width == width && this.height == height)
+		if (buffers[slot] != null && this.width == width && this.height == height)
 		{
 			return;
 		}
-		if (buffer != null)
+		if (this.width != width || this.height != height)
 		{
-			buffer.close();
+			closeBuffers();
+			this.width = width;
+			this.height = height;
 		}
-		this.width = width;
-		this.height = height;
-		buffer = new Buffer(device, (long) width * height * Integer.BYTES,
+		if (buffers[slot] != null)
+		{
+			buffers[slot].close();
+		}
+		buffers[slot] = new Buffer(device, (long) width * height * Integer.BYTES,
 			VK_BUFFER_USAGE_TRANSFER_DST_BIT,
 			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
 			VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
-		buffer.mapPersistent();
+		buffers[slot].mapPersistent();
 	}
 
 	private void transition(MemoryStack stack, VkCommandBuffer cmd, long image,
@@ -128,10 +135,19 @@ final class ScreenshotReadback implements AutoCloseable
 	@Override
 	public void close()
 	{
-		if (buffer != null)
+		closeBuffers();
+	}
+
+	private void closeBuffers()
+	{
+		for (int i = 0; i < buffers.length; i++)
 		{
-			buffer.close();
-			buffer = null;
+			if (buffers[i] != null)
+			{
+				buffers[i].close();
+				buffers[i] = null;
+			}
 		}
+		lastSlot = -1;
 	}
 }

@@ -72,6 +72,12 @@ final class DefaultVulkanSceneRenderer implements VulkanSceneRenderer
 	}
 
 	@Override
+	public void captureSkybox(Scene scene)
+	{
+		sceneRenderer.captureSkybox(scene);
+	}
+
+	@Override
 	public void drawPass(int pass)
 	{
 		sceneRenderer.drawPass(pass);
@@ -172,7 +178,7 @@ final class DefaultVulkanSceneRenderer implements VulkanSceneRenderer
 	public void recordDraw(VulkanFrameContext frame)
 	{
 		sceneRenderer.recordDraw(frame.commandBuffer(), frame.sceneMvp(), frame.brightness(),
-			frame.cameraX(), frame.cameraZ(), frame.drawDistanceTiles(), frame.fogDepthTiles(),
+			frame.cameraX(), frame.cameraY(), frame.cameraZ(), frame.drawDistanceTiles(), frame.fogDepthTiles(),
 			frame.fogR(), frame.fogG(), frame.fogB(), frame.gameTick(),
 			frame.textureLightMode(), frame.colorBlindMode(), frame.colorBlindIntensity(),
 			frame.smoothBanding());

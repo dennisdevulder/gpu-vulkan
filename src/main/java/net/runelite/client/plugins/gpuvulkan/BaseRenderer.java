@@ -100,6 +100,13 @@ final class BaseRenderer implements VulkanRenderExtension
 	}
 
 	@Override
+	public void captureSkybox(Scene scene)
+	{
+		if (sceneRenderer == null) return;
+		sceneRenderer.captureSkybox(scene);
+	}
+
+	@Override
 	public void drawPass(int pass)
 	{
 		if (sceneRenderer == null) return;

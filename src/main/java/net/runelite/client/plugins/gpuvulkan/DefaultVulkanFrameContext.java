@@ -40,6 +40,7 @@ final class DefaultVulkanFrameContext implements VulkanFrameContext
 	private final int scale;
 	private final float[] sceneMvp;
 	private final float cameraX;
+	private final float cameraY;
 	private final float cameraZ;
 	private final float brightness;
 	private final int drawDistanceTiles;
@@ -59,7 +60,7 @@ final class DefaultVulkanFrameContext implements VulkanFrameContext
 		int viewportXOffset, int viewportYOffset,
 		int viewportWidth, int viewportHeight,
 		int canvasWidth, int canvasHeight, int scale,
-		float[] sceneMvp, float cameraX, float cameraZ, float brightness,
+		float[] sceneMvp, float cameraX, float cameraY, float cameraZ, float brightness,
 		int drawDistanceTiles, int fogDepthTiles,
 		float fogR, float fogG, float fogB,
 		int gameTick, float textureLightMode,
@@ -78,6 +79,7 @@ final class DefaultVulkanFrameContext implements VulkanFrameContext
 		this.scale = scale;
 		this.sceneMvp = sceneMvp;
 		this.cameraX = cameraX;
+		this.cameraY = cameraY;
 		this.cameraZ = cameraZ;
 		this.brightness = brightness;
 		this.drawDistanceTiles = drawDistanceTiles;
@@ -105,6 +107,7 @@ final class DefaultVulkanFrameContext implements VulkanFrameContext
 	@Override public int scale() { return scale; }
 	@Override public float[] sceneMvp() { return sceneMvp; }
 	@Override public float cameraX() { return cameraX; }
+	@Override public float cameraY() { return cameraY; }
 	@Override public float cameraZ() { return cameraZ; }
 	@Override public float brightness() { return brightness; }
 	@Override public int drawDistanceTiles() { return drawDistanceTiles; }
