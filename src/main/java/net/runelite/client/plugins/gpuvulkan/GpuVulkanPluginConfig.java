@@ -132,9 +132,9 @@ public interface GpuVulkanPluginConfig extends Config
 	@ConfigItem(
 		keyName = "singlePassAlpha",
 		name = "Single-pass alpha",
-		description = "Render transparent faces in the main scene pass using alpha-to-coverage instead of replaying the scene in a blended alpha pass. Much faster; disable only if a transparent object looks wrong. Plugin must be re-enabled to take effect."
+		description = "Render transparent faces in the main scene pass using alpha-to-coverage instead of replaying the scene in a blended alpha pass. Faster, but less accurate. Plugin must be re-enabled to take effect."
 	)
-	default boolean singlePassAlpha() { return true; }
+	default boolean singlePassAlpha() { return false; }
 
 	@ConfigSection(
 		name = "Upscaling",
