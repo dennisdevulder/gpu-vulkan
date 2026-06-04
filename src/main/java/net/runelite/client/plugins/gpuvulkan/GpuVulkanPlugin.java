@@ -121,6 +121,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	private volatile double lastCamX, lastCamY, lastCamZ;
 	private volatile double lastCamPitch, lastCamYaw;
 	private volatile boolean startRequested;
+	private boolean pendingSceneIdentityRecapture;
 	private static boolean shutdownHookRegistered;
 	private final VulkanExtensionQueue extensionQueue = new VulkanExtensionQueue();
 
@@ -232,8 +233,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 				// context on the canvas's owning thread; without it, sidebar
 				// collapse exit_group(1)s the EDT mid-rebuild. We don't use
 				// the GL context for rendering, just keep it bound.
-				// Skipped on macOS — we attach our own Metal layer there.
-				if (!isMac)
+				// Windows must not set an OpenGL pixel format on this HWND
+				// before Vulkan creates its swapchain.
+				if (platform instanceof X11PlatformSurface)
 				{
 					net.runelite.rlawt.AWTContext.loadNatives();
 					synchronized (canvas.getTreeLock())
@@ -856,6 +858,11 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			stats.addNanos(stats.beginFrameNanos, start);
 			start = statsEnabled ? System.nanoTime() : 0L;
 			Scene sceneForFrame = currentScene != null ? currentScene : capturedScene;
+			if (pendingSceneIdentityRecapture && sceneForFrame != null)
+			{
+				pendingSceneIdentityRecapture = false;
+				captureSceneNow(sceneForFrame);
+			}
 			renderExtensions.rebuildDirtyZones(sceneForFrame);
 			stats.addNanos(stats.sceneCaptureNanos, start);
 			start = statsEnabled ? System.nanoTime() : 0L;
@@ -866,8 +873,15 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 
 	/** Identity of the scene captured into render extensions. swapScene /
 	 *  loadScene callbacks are unreliable in this engine version, so we
-	 *  detect scene transitions by reference comparison instead. */
+	 *  detect scene transitions by reference plus map identity. The engine
+	 *  can reuse the same Scene object across boundary shifts while changing
+	 *  its base coordinates; reference-only detection leaves stale static
+	 *  terrain until the plugin is restarted. */
 	private Scene capturedScene;
+	private int capturedSceneBaseX = Integer.MIN_VALUE;
+	private int capturedSceneBaseY = Integer.MIN_VALUE;
+	private int capturedSceneWorldViewId = Integer.MIN_VALUE;
+	private boolean capturedSceneInstance;
 	private Scene currentScene;
 
 	@Override
@@ -879,14 +893,13 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		{
 			stats.preSceneDraw.incrementAndGet();
 		}
-		// Scene-reference fallback: swapScene/loadScene callbacks don't fire
-		// in this engine version (recon shows swap=0 load=0), so the only
-		// reliable signal that the scene has been swapped is the Scene object
-		// reference itself changing between frames. Re-capture on identity
-		// change so geometry stays fresh after chunk transitions.
-		if (scene != capturedScene && renderExtensions != null)
+		// Scene lifecycle fallback: swapScene/loadScene callbacks don't fire
+		// reliably in this engine version. Re-capture when either the Scene
+		// object changes or the same object is reused with a different map
+		// identity after a boundary shift.
+		if (renderExtensions != null && sceneIdentityChanged(scene))
 		{
-			capturedScene = scene;
+			pendingSceneIdentityRecapture = false;
 			captureSceneNow(scene);
 		}
 		currentScene = scene;
@@ -947,6 +960,38 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		long start = stats.isEnabled() ? System.nanoTime() : 0L;
 		renderExtensions.captureScene(scene);
 		stats.addNanos(stats.sceneCaptureNanos, start);
+		recordCapturedSceneIdentity(scene);
+	}
+
+	private boolean sceneIdentityChanged(Scene scene)
+	{
+		if (scene == null)
+		{
+			return false;
+		}
+		return scene != capturedScene
+			|| scene.getBaseX() != capturedSceneBaseX
+			|| scene.getBaseY() != capturedSceneBaseY
+			|| scene.getWorldViewId() != capturedSceneWorldViewId
+			|| scene.isInstance() != capturedSceneInstance;
+	}
+
+	private void recordCapturedSceneIdentity(Scene scene)
+	{
+		if (scene == null)
+		{
+			capturedScene = null;
+			capturedSceneBaseX = Integer.MIN_VALUE;
+			capturedSceneBaseY = Integer.MIN_VALUE;
+			capturedSceneWorldViewId = Integer.MIN_VALUE;
+			capturedSceneInstance = false;
+			return;
+		}
+		capturedScene = scene;
+		capturedSceneBaseX = scene.getBaseX();
+		capturedSceneBaseY = scene.getBaseY();
+		capturedSceneWorldViewId = scene.getWorldViewId();
+		capturedSceneInstance = scene.isInstance();
 	}
 
 	List<String> debugOverlayLines()
@@ -1001,6 +1046,14 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	@Override
 	public void invalidateZone(Scene scene, int zx, int zz)
 	{
+		if (scene != null)
+		{
+			currentScene = scene;
+			if (sceneIdentityChanged(scene))
+			{
+				pendingSceneIdentityRecapture = true;
+			}
+		}
 		if (renderExtensions != null)
 		{
 			renderExtensions.invalidateZone(scene, zx, zz);
