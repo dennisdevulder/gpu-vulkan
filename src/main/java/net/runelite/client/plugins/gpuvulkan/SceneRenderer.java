@@ -38,7 +38,7 @@ import static org.lwjgl.vulkan.VK13.*;
  * the OSRS texture array as descriptor set 0.
  *
  * <p>Vertex layout (matches {@link ScenePipeline}):
- * {@code [posX posY posZ pad colorR colorG colorB pad light u v texLayer]}.
+ * {@code [float3 position, packed alpha/bias/HSL, packed texture/u/v]}.
  */
 @Slf4j
 final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,

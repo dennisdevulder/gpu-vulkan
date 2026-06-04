@@ -54,8 +54,8 @@ import static org.lwjgl.system.MemoryUtil.memFree;
 import static org.lwjgl.vulkan.VK13.*;
 
 /**
- * Pipeline for captured scene geometry. Vertex layout is 36 bytes:
- * {@code vec3 pos + vec3 color + vec2 uv + uint texLayer}.
+ * Pipeline for captured scene geometry. Vertex layout is 24 bytes:
+ * {@code float3 position + uint alpha/bias/hsl + short4 texture/u/v}.
  *
  * <p>Bindings:
  * <ul>
@@ -66,12 +66,14 @@ import static org.lwjgl.vulkan.VK13.*;
  */
 final class ScenePipeline implements AutoCloseable
 {
-	// Stock GPU-style packed scene vertex:
-	//   short4 position, uint [alpha:8 | bias:8 | hsl:16], short4 texture/u/v.
-	static final int VERTEX_STRIDE = 20;
+	// Stock GPU-style scene vertex, with float positions for dynamic models.
+	// Stock GPU uploads temp/animated models with putfff4(); keeping position
+	// as float here avoids reintroducing close-zoom vertex snapping jitter.
+	//   float3 position, uint [alpha:8 | bias:8 | hsl:16], short4 texture/u/v.
+	static final int VERTEX_STRIDE = 24;
 	static final int OFFSET_POS      = 0;
-	static final int OFFSET_ABHSL    = 8;
-	static final int OFFSET_TEX_UV   = 12;
+	static final int OFFSET_ABHSL    = 12;
+	static final int OFFSET_TEX_UV   = 16;
 
 	private final VulkanDevice device;
 	private final long descriptorSetLayout;
@@ -113,7 +115,7 @@ final class ScenePipeline implements AutoCloseable
 			binding.get(0).binding(0).stride(VERTEX_STRIDE).inputRate(VK_VERTEX_INPUT_RATE_VERTEX);
 
 			VkVertexInputAttributeDescription.Buffer attrs = VkVertexInputAttributeDescription.calloc(3, stack);
-			attrs.get(0).binding(0).location(0).format(VK_FORMAT_R16G16B16A16_SINT).offset(OFFSET_POS);
+			attrs.get(0).binding(0).location(0).format(VK_FORMAT_R32G32B32_SFLOAT).offset(OFFSET_POS);
 			attrs.get(1).binding(0).location(1).format(VK_FORMAT_R32_UINT).offset(OFFSET_ABHSL);
 			attrs.get(2).binding(0).location(2).format(VK_FORMAT_R16G16B16A16_SINT).offset(OFFSET_TEX_UV);
 

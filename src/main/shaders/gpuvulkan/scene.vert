@@ -1,8 +1,8 @@
 #version 450
 
-// Captured OSRS geometry in the stock GPU-style packed layout. World-space
-// scene coordinates are stored as signed shorts; colour is packed HSL plus
-// alpha/bias; texture id and UV are signed shorts.
+// Captured OSRS geometry. Positions stay float3 so animated/temp models keep
+// stock GPU's sub-unit coordinates; colour is packed HSL plus alpha/bias;
+// texture id and UV are signed shorts.
 //
 // Push layout:
 //   offset 0..63  : mat4 mvp                  (vertex)
@@ -31,7 +31,7 @@ layout(set = 0, binding = 1, std140) uniform TextureAnimations {
     vec4 anim[256];
 };
 
-layout(location = 0) in ivec4 inPosition;
+layout(location = 0) in vec3 inPosition;
 layout(location = 1) in uint inAlphaBiasHsl;
 layout(location = 2) in ivec4 inTextureUv;
 
@@ -93,7 +93,7 @@ void main() {
     uint biasByte = (inAlphaBiasHsl >> 16) & 0xFFu;
     vTrans = (inAlphaBiasHsl >> 24) & 0xFFu;
 
-    vec3 position = vec3(float(inPosition.x), float(inPosition.y), float(inPosition.z));
+    vec3 position = inPosition;
     vec4 clip = pc.mvp * vec4(position, 1.0);
     float bias = float(biasByte) / 128.0;
     clip.z += bias;
