@@ -7,6 +7,7 @@ import net.runelite.api.Constants;
 import net.runelite.api.Scene;
 import net.runelite.api.SceneTileModel;
 import net.runelite.api.SceneTilePaint;
+import net.runelite.api.WorldView;
 
 final class SceneTileEmitter
 {
@@ -30,8 +31,13 @@ final class SceneTileEmitter
 		int nwColor = paint.getNwColor();
 
 		int[][][] tileHeights = scene.getTileHeights();
-		int ex = sx + SCENE_OFFSET;
-		int ey = sy + SCENE_OFFSET;
+		int offset = scene.getWorldViewId() == WorldView.TOPLEVEL ? SCENE_OFFSET : 0;
+		int ex = sx + offset;
+		int ey = sy + offset;
+		if (!hasTileHeights(tileHeights, plane, ex, ey))
+		{
+			return;
+		}
 		int swH = tileHeights[plane][ex    ][ey    ];
 		int seH = tileHeights[plane][ex + 1][ey    ];
 		int neH = tileHeights[plane][ex + 1][ey + 1];
@@ -52,6 +58,22 @@ final class SceneTileEmitter
 		sink.writeHslVert(x0, nwH, z1, nwColor, 0f, 1f, texLayer);
 
 		sink.addVertices(6);
+	}
+
+	private static boolean hasTileHeights(int[][][] tileHeights, int plane, int x, int y)
+	{
+		if (tileHeights == null || plane < 0 || plane >= tileHeights.length)
+		{
+			return false;
+		}
+		int[][] heights = tileHeights[plane];
+		if (heights == null || x < 0 || x + 1 >= heights.length)
+		{
+			return false;
+		}
+		int[] row = heights[x];
+		int[] nextRow = heights[x + 1];
+		return row != null && nextRow != null && y >= 0 && y + 1 < row.length && y + 1 < nextRow.length;
 	}
 
 	void captureTileModel(SceneTileModel model, int sx, int sy)

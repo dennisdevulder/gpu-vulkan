@@ -84,15 +84,11 @@ final class SceneZoneDrawScheduler
 			for (int zz = minZoneZ; zz <= maxZoneZ; zz++)
 			{
 				int zoneIdx = zx * zonesPerSide + zz;
-				if (!overlayZoneValid[slot][zoneIdx])
+				if (!hasOverlayRange(slot, layer, plane, zoneIdx))
 				{
 					continue;
 				}
 				int count = overlayZoneCount[slot][layer][plane][zoneIdx];
-				if (count <= 0)
-				{
-					continue;
-				}
 				int start = overlayZoneStart[slot][layer][plane][zoneIdx];
 				int end = start + count;
 				if (mergeRanges)
@@ -165,7 +161,7 @@ final class SceneZoneDrawScheduler
 			for (int zz = minZoneZ; zz <= maxZoneZ; zz++)
 			{
 				int zoneIdx = zx * zonesPerSide + zz;
-				if (overlayZoneValid[slot][zoneIdx])
+				if (hasOverlayRange(slot, layer, plane, zoneIdx))
 				{
 					continue;
 				}
@@ -214,7 +210,7 @@ final class SceneZoneDrawScheduler
 		int pairs = 0;
 		for (int zoneIdx = 0; zoneIdx < zoneCount; zoneIdx++)
 		{
-			if (!overlayZoneValid[slot][zoneIdx])
+			if (!hasOverlayRange(slot, layer, plane, zoneIdx))
 			{
 				continue;
 			}
@@ -294,5 +290,11 @@ final class SceneZoneDrawScheduler
 		combinedSkipScratch[out * 2] = start;
 		combinedSkipScratch[out * 2 + 1] = end;
 		return out + 1;
+	}
+
+	private boolean hasOverlayRange(int slot, int layer, int plane, int zoneIdx)
+	{
+		return overlayZoneValid[slot][zoneIdx]
+			&& overlayZoneCount[slot][layer][plane][zoneIdx] > 0;
 	}
 }

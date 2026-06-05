@@ -84,11 +84,10 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 
 	private static final int MAX_PLANES = 4;
 
-	/** OSRS engine convention: SCENE_SIZE / ZONE_SIZE = 13 zones per side. */
+	/** Stock GPU uploads the whole extended scene: EXTENDED_SCENE_SIZE / 8. */
 	static final int ZONE_SIZE = 8;
-	static final int ZONES_PER_SIDE = Constants.SCENE_SIZE / ZONE_SIZE;
+	static final int ZONES_PER_SIDE = Constants.EXTENDED_SCENE_SIZE / ZONE_SIZE;
 	static final int ZONE_COUNT = ZONES_PER_SIDE * ZONES_PER_SIDE;
-	private static final int TOPLEVEL_ZONE_OFFSET = SCENE_OFFSET / ZONE_SIZE;
 
 	private final int[] regionEnds = new int[LAYER_COUNT];
 	private int skyboxStart = -1;
@@ -143,6 +142,9 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	private final PendingRenderables pendingRenderables = new PendingRenderables();
 	private final SceneModelEmitter modelEmitter;
 	private final SceneTileEmitter tileEmitter;
+	private int tileLookupOffset;
+	private int capturedSceneOrigin;
+	private int capturedSceneSize = Constants.SCENE_SIZE;
 
 	/**
 	 * Drops the captured scene so {@link #recordDraw} skips its work on the
@@ -170,11 +172,6 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 
 	void invalidateZone(Scene scene, int zx, int zz)
 	{
-		if (scene != null && scene.getWorldViewId() == net.runelite.api.WorldView.TOPLEVEL)
-		{
-			zx -= TOPLEVEL_ZONE_OFFSET;
-			zz -= TOPLEVEL_ZONE_OFFSET;
-		}
 		if (zx < 0 || zz < 0 || zx >= ZONES_PER_SIDE || zz >= ZONES_PER_SIDE)
 		{
 			return;
@@ -344,7 +341,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			return;
 		}
 
-		Tile[][][] tiles = scene.getTiles();
+		Tile[][][] tiles = captureTiles(scene);
 		if (tiles == null)
 		{
 			return;
@@ -357,7 +354,8 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		useFrameWriteArena(slot, vertexCount);
 
 		final int planes = Math.min(tiles.length, MAX_PLANES);
-		final int sceneSize = Constants.SCENE_SIZE;
+		final int sceneOrigin = capturedSceneOrigin;
+		final int sceneSize = capturedSceneSize;
 		final int[][][] roofs = scene.getRoofs();
 		final byte[][][] tileSettings = scene.getExtendedTileSettings();
 		final int roofOffset = scene.getWorldViewId() == net.runelite.api.WorldView.TOPLEVEL
@@ -371,17 +369,21 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			}
 
 			clearOverlayZone(slot, zone);
+			int zoneStart = vertexCount;
 			rebuildingOverlayZone = true;
 			try
 			{
-				captureDirtyZone(scene, tiles, planes, sceneSize, roofs, tileSettings, roofOffset, slot, zone);
+				captureDirtyZone(scene, tiles, planes, sceneOrigin, sceneSize, roofs, tileSettings, roofOffset, slot, zone);
 			}
 			finally
 			{
 				rebuildingOverlayZone = false;
 			}
-			overlayZoneValid[slot][zone] = true;
-			overlaySlotHasZones[slot] = true;
+			if (vertexCount > zoneStart)
+			{
+				overlayZoneValid[slot][zone] = true;
+				overlaySlotHasZones[slot] = true;
+			}
 			dirtyZones.markSlotRebuilt(zone, slotBit, allSlots);
 		}
 
@@ -424,11 +426,12 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		pendingRenderables.clear();
 		modelEmitter.clearCache();
 
-		Tile[][][] tiles = scene.getTiles();
+		Tile[][][] tiles = captureTiles(scene);
 		if (tiles == null) return;
 		captureSkybox(scene);
 		final int planes = Math.min(tiles.length, MAX_PLANES);
-		final int sceneSize = Constants.SCENE_SIZE;
+		final int sceneOrigin = capturedSceneOrigin;
+		final int sceneSize = capturedSceneSize;
 
 		// Scene.getRoofs() dims are EXTENDED_SCENE_SIZE (184) on toplevel,
 		// not SCENE_SIZE (104) like scene.getTiles(). Instances aren't
@@ -441,7 +444,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		// Pass order: emit each layer plane-by-plane so vertices are sorted
 		// (layer-major, plane-minor). recordDraw clips per layer at
 		// planeEnds[layer][visiblePlane] to hide roofs above the player.
-		captureLayer(Layer.TERRAIN, tiles, planes, sceneSize, roofs, tileSettings, roofOffset,
+		captureLayer(Layer.TERRAIN, tiles, planes, sceneOrigin, sceneSize, roofs, tileSettings, roofOffset,
 			(cur, p, sx, sy) ->
 			{
 				SceneTilePaint paint = cur.getSceneTilePaint();
@@ -450,7 +453,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 				if (m != null) captureTileModel(m, sx, sy);
 			});
 
-		captureLayer(Layer.WALLS, tiles, planes, sceneSize, roofs, tileSettings, roofOffset,
+		captureLayer(Layer.WALLS, tiles, planes, sceneOrigin, sceneSize, roofs, tileSettings, roofOffset,
 			(cur, p, sx, sy) ->
 			{
 				WallObject w = cur.getWallObject();
@@ -459,7 +462,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 				captureRenderable(w.getRenderable2(), 0, w.getX(), w.getZ(), w.getY());
 			});
 
-		captureLayer(Layer.DECORATIVE, tiles, planes, sceneSize, roofs, tileSettings, roofOffset,
+		captureLayer(Layer.DECORATIVE, tiles, planes, sceneOrigin, sceneSize, roofs, tileSettings, roofOffset,
 			(cur, p, sx, sy) ->
 			{
 				DecorativeObject d = cur.getDecorativeObject();
@@ -470,7 +473,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 					d.getX() + d.getXOffset2(), d.getZ(), d.getY() + d.getYOffset2());
 			});
 
-		captureLayer(Layer.GROUND, tiles, planes, sceneSize, roofs, tileSettings, roofOffset,
+		captureLayer(Layer.GROUND, tiles, planes, sceneOrigin, sceneSize, roofs, tileSettings, roofOffset,
 			(cur, p, sx, sy) ->
 			{
 				GroundObject g = cur.getGroundObject();
@@ -478,7 +481,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 				captureRenderable(g.getRenderable(), 0, g.getX(), g.getZ(), g.getY());
 			});
 
-		captureGameObjectsLayer(tiles, planes, sceneSize, roofs, tileSettings, roofOffset);
+		captureGameObjectsLayer(tiles, planes, sceneOrigin, sceneSize, roofs, tileSettings, roofOffset);
 
 		// Pad planeEnds past `planes` so max-plane lookups still draw
 		// everything if requested.
@@ -491,7 +494,15 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			overlayNextVertex[slot] = vertexCount;
 		}
 
-		log.debug("captureScene: {} vertices, {} roof tiles", vertexCount, roofRanges.count());
+		log.info("Vulkan scene capture: base=({}, {}) worldView={} instance={} tileOffset={} sceneOrigin={} sceneSize={} tileDims={} vertices total={} terrain={} walls={} decorative={} ground={} gameObjects={} roofTiles={}",
+			scene.getBaseX(), scene.getBaseY(), scene.getWorldViewId(), scene.isInstance(),
+			tileLookupOffset, sceneOrigin, sceneSize, tileDims(tiles), vertexCount,
+			regionEnds[Layer.TERRAIN.ordinal()],
+			regionEnds[Layer.WALLS.ordinal()] - regionEnds[Layer.TERRAIN.ordinal()],
+			regionEnds[Layer.DECORATIVE.ordinal()] - regionEnds[Layer.WALLS.ordinal()],
+			regionEnds[Layer.GROUND.ordinal()] - regionEnds[Layer.DECORATIVE.ordinal()],
+			regionEnds[Layer.GAME_OBJECTS.ordinal()] - regionEnds[Layer.GROUND.ordinal()],
+			roofRanges.count());
 	}
 
 	private void clearOverlayRanges()
@@ -549,13 +560,13 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		}
 	}
 
-	private void captureDirtyZone(Scene scene, Tile[][][] tiles, int planes, int sceneSize,
+	private void captureDirtyZone(Scene scene, Tile[][][] tiles, int planes, int sceneOrigin, int sceneSize,
 								  int[][][] roofs, byte[][][] tileSettings, int roofOffset,
 								  int slot, int zone)
 	{
 		int zx = zone / ZONES_PER_SIDE;
 		int zy = zone % ZONES_PER_SIDE;
-		captureOverlayLayer(Layer.TERRAIN, tiles, planes, sceneSize,
+		captureOverlayLayer(Layer.TERRAIN, tiles, planes, sceneOrigin, sceneSize,
 			roofs, tileSettings, roofOffset, slot, zone, zx, zy,
 			(cur, p, sx, sy) ->
 			{
@@ -565,7 +576,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 				if (m != null) captureTileModel(m, sx, sy);
 			});
 
-		captureOverlayLayer(Layer.WALLS, tiles, planes, sceneSize,
+		captureOverlayLayer(Layer.WALLS, tiles, planes, sceneOrigin, sceneSize,
 			roofs, tileSettings, roofOffset, slot, zone, zx, zy,
 			(cur, p, sx, sy) ->
 			{
@@ -575,7 +586,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 				captureRenderable(w.getRenderable2(), 0, w.getX(), w.getZ(), w.getY());
 			});
 
-		captureOverlayLayer(Layer.DECORATIVE, tiles, planes, sceneSize,
+		captureOverlayLayer(Layer.DECORATIVE, tiles, planes, sceneOrigin, sceneSize,
 			roofs, tileSettings, roofOffset, slot, zone, zx, zy,
 			(cur, p, sx, sy) ->
 			{
@@ -587,7 +598,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 					d.getX() + d.getXOffset2(), d.getZ(), d.getY() + d.getYOffset2());
 			});
 
-		captureOverlayLayer(Layer.GROUND, tiles, planes, sceneSize,
+		captureOverlayLayer(Layer.GROUND, tiles, planes, sceneOrigin, sceneSize,
 			roofs, tileSettings, roofOffset, slot, zone, zx, zy,
 			(cur, p, sx, sy) ->
 			{
@@ -596,18 +607,19 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 				captureRenderable(g.getRenderable(), 0, g.getX(), g.getZ(), g.getY());
 			});
 
-		captureOverlayGameObjectsLayer(tiles, planes, sceneSize,
+		captureOverlayGameObjectsLayer(tiles, planes, sceneOrigin, sceneSize,
 			roofs, tileSettings, roofOffset, slot, zone, zx, zy);
 	}
 
 	private void captureOverlayLayer(Layer layer,
-		Tile[][][] tiles, int planes, int sceneSize,
+		Tile[][][] tiles, int planes, int sceneOrigin, int sceneSize,
 		int[][][] roofs, byte[][][] tileSettings, int roofOffset,
 		int slot, int zone, int zx, int zy, TileCapture body)
 	{
 		final int L = layer.ordinal();
-		int x0 = zx * ZONE_SIZE, x1 = Math.min(x0 + ZONE_SIZE, sceneSize);
-		int y0 = zy * ZONE_SIZE, y1 = Math.min(y0 + ZONE_SIZE, sceneSize);
+		int sceneEnd = sceneOrigin + sceneSize;
+		int x0 = sceneOrigin + zx * ZONE_SIZE, x1 = Math.min(x0 + ZONE_SIZE, sceneEnd);
+		int y0 = sceneOrigin + zy * ZONE_SIZE, y1 = Math.min(y0 + ZONE_SIZE, sceneEnd);
 		for (int outputLevel = 0; outputLevel < planes; outputLevel++)
 		{
 			int start = vertexCount;
@@ -631,13 +643,14 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		}
 	}
 
-	private void captureOverlayGameObjectsLayer(Tile[][][] tiles, int planes, int sceneSize,
+	private void captureOverlayGameObjectsLayer(Tile[][][] tiles, int planes, int sceneOrigin, int sceneSize,
 		int[][][] roofs, byte[][][] tileSettings, int roofOffset,
 		int slot, int zone, int zx, int zy)
 	{
 		final int L = Layer.GAME_OBJECTS.ordinal();
-		int x0 = zx * ZONE_SIZE, x1 = Math.min(x0 + ZONE_SIZE, sceneSize);
-		int y0 = zy * ZONE_SIZE, y1 = Math.min(y0 + ZONE_SIZE, sceneSize);
+		int sceneEnd = sceneOrigin + sceneSize;
+		int x0 = sceneOrigin + zx * ZONE_SIZE, x1 = Math.min(x0 + ZONE_SIZE, sceneEnd);
+		int y0 = sceneOrigin + zy * ZONE_SIZE, y1 = Math.min(y0 + ZONE_SIZE, sceneEnd);
 		for (int outputLevel = 0; outputLevel < planes; outputLevel++)
 		{
 			int start = vertexCount;
@@ -669,11 +682,12 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	 * flat world-space clipping plane.
 	 */
 	private void captureLayer(Layer layer,
-		Tile[][][] tiles, int planes, int sceneSize,
+		Tile[][][] tiles, int planes, int sceneOrigin, int sceneSize,
 		int[][][] roofs, byte[][][] tileSettings, int roofOffset,
 		TileCapture body)
 	{
 		final int L = layer.ordinal();
+		int sceneEnd = sceneOrigin + sceneSize;
 		for (int outputLevel = 0; outputLevel < planes; outputLevel++)
 		{
 			for (int zx = 0; zx < ZONES_PER_SIDE; zx++)
@@ -681,8 +695,8 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 				for (int zy = 0; zy < ZONES_PER_SIDE; zy++)
 				{
 					int zoneStart = vertexCount;
-					int x0 = zx * ZONE_SIZE, x1 = Math.min(x0 + ZONE_SIZE, sceneSize);
-					int y0 = zy * ZONE_SIZE, y1 = Math.min(y0 + ZONE_SIZE, sceneSize);
+					int x0 = sceneOrigin + zx * ZONE_SIZE, x1 = Math.min(x0 + ZONE_SIZE, sceneEnd);
+					int y0 = sceneOrigin + zy * ZONE_SIZE, y1 = Math.min(y0 + ZONE_SIZE, sceneEnd);
 					if (outputLevel == 0)
 					{
 						captureLayerPass(tiles, planes, x0, x1, y0, y1, 0, false,
@@ -722,14 +736,17 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 				SceneRoofInfo roofInfo = SceneRoofInfo.forTile(roofs, tileSettings, sourceLevel, msx, msy);
 				if (roofInfo.visbelow != visbelow) continue;
 
-				Tile t = tiles[sourceLevel][sx][sy];
+				Tile t = tileAt(tiles, sourceLevel, sx + tileLookupOffset, sy + tileLookupOffset);
 				if (t == null) continue;
 				Tile cur = t;
 				while (cur != null)
 				{
 					int renderLevel = SceneRoofInfo.renderLevel(cur, sourceLevel);
+					net.runelite.api.Point sceneLocation = cur.getSceneLocation();
+					int tileX = sceneLocation != null ? sceneLocation.getX() : sx;
+					int tileY = sceneLocation != null ? sceneLocation.getY() : sy;
 					int before = vertexCount;
-					body.capture(cur, renderLevel, sx, sy);
+					body.capture(cur, renderLevel, tileX, tileY);
 					if (roofInfo.roofId != 0 && vertexCount > before)
 						recordRoofRange(roofInfo.roofId, before, vertexCount - before);
 					cur = (cur == t) ? t.getBridge() : null;
@@ -741,10 +758,11 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	/** GameObjects emit only on the sceneMinLocation tile (multi-tile
 	 *  objects naturally dedupe), and each gets its own roof-range entry
 	 *  instead of a merged-per-tile range. */
-	private void captureGameObjectsLayer(Tile[][][] tiles, int planes, int sceneSize,
+	private void captureGameObjectsLayer(Tile[][][] tiles, int planes, int sceneOrigin, int sceneSize,
 		int[][][] roofs, byte[][][] tileSettings, int roofOffset)
 	{
 		final int L = Layer.GAME_OBJECTS.ordinal();
+		int sceneEnd = sceneOrigin + sceneSize;
 		for (int outputLevel = 0; outputLevel < planes; outputLevel++)
 		{
 			for (int zx = 0; zx < ZONES_PER_SIDE; zx++)
@@ -752,8 +770,8 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 				for (int zy = 0; zy < ZONES_PER_SIDE; zy++)
 				{
 					int zoneStart = vertexCount;
-					int x0 = zx * ZONE_SIZE, x1 = Math.min(x0 + ZONE_SIZE, sceneSize);
-					int y0 = zy * ZONE_SIZE, y1 = Math.min(y0 + ZONE_SIZE, sceneSize);
+					int x0 = sceneOrigin + zx * ZONE_SIZE, x1 = Math.min(x0 + ZONE_SIZE, sceneEnd);
+					int y0 = sceneOrigin + zy * ZONE_SIZE, y1 = Math.min(y0 + ZONE_SIZE, sceneEnd);
 					if (outputLevel == 0)
 					{
 						captureGameObjectsPass(tiles, planes, x0, x1, y0, y1, 0, false,
@@ -793,7 +811,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 				SceneRoofInfo roofInfo = SceneRoofInfo.forTile(roofs, tileSettings, sourceLevel, msx, msy);
 				if (roofInfo.visbelow != visbelow) continue;
 
-				Tile t = tiles[sourceLevel][sx][sy];
+				Tile t = tileAt(tiles, sourceLevel, sx + tileLookupOffset, sy + tileLookupOffset);
 				if (t == null) continue;
 				Tile cur = t;
 				while (cur != null)
@@ -853,15 +871,17 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		return zone >= 0 && zone < ZONE_COUNT && dirtyZones.isDirty(zone);
 	}
 
-	private static int zoneForWorldPoint(int x, int z)
+	private int zoneForWorldPoint(int x, int z)
 	{
 		int sx = x >> 7;
 		int sz = z >> 7;
-		if (sx < 0 || sz < 0 || sx >= Constants.SCENE_SIZE || sz >= Constants.SCENE_SIZE)
+		int sceneEnd = capturedSceneOrigin + capturedSceneSize;
+		if (sx < capturedSceneOrigin || sz < capturedSceneOrigin || sx >= sceneEnd || sz >= sceneEnd)
 		{
 			return -1;
 		}
-		return (sx / ZONE_SIZE) * ZONES_PER_SIDE + (sz / ZONE_SIZE);
+		return ((sx - capturedSceneOrigin) / ZONE_SIZE) * ZONES_PER_SIDE
+			+ ((sz - capturedSceneOrigin) / ZONE_SIZE);
 	}
 
 	private void captureTilePaint(Scene scene, SceneTilePaint paint, int plane, int sx, int sy)
@@ -965,11 +985,17 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			final int loMax = maxPlane;
 			int radiusTiles = (int) Math.ceil(drawDistanceTiles + fogDepthTiles + 2f);
 			int radiusZones = Math.max(1, (radiusTiles + ZONE_SIZE - 1) / ZONE_SIZE);
-			boolean fullZoneRange = radiusZones >= ZONES_PER_SIDE;
-			int camTileX = clamp((int) Math.floor(cameraX / 128f), 0, Constants.SCENE_SIZE - 1);
-			int camTileZ = clamp((int) Math.floor(cameraZ / 128f), 0, Constants.SCENE_SIZE - 1);
-			int camZoneX = camTileX / ZONE_SIZE;
-			int camZoneZ = camTileZ / ZONE_SIZE;
+			// Conservative draw path. Stock GPU lets the engine call visible
+			// zones; our cached renderer derives visibility from camera-local
+			// math. The bad-tile black-scene failure has a full capture but an
+			// empty-looking frame, so draw the captured static scene until the
+			// zone scheduler is proven against extended-scene coordinates.
+			boolean fullZoneRange = true;
+			int sceneEnd = capturedSceneOrigin + capturedSceneSize;
+			int camTileX = clamp((int) Math.floor(cameraX / 128f), capturedSceneOrigin, sceneEnd - 1);
+			int camTileZ = clamp((int) Math.floor(cameraZ / 128f), capturedSceneOrigin, sceneEnd - 1);
+			int camZoneX = (camTileX - capturedSceneOrigin) / ZONE_SIZE;
+			int camZoneZ = (camTileZ - capturedSceneOrigin) / ZONE_SIZE;
 			int minZoneX = fullZoneRange ? 0 : Math.max(0, camZoneX - radiusZones);
 			int maxZoneX = fullZoneRange ? ZONES_PER_SIDE - 1 : Math.min(ZONES_PER_SIDE - 1, camZoneX + radiusZones);
 			int minZoneZ = fullZoneRange ? 0 : Math.max(0, camZoneZ - radiusZones);
@@ -1152,6 +1178,110 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	private static int clamp(int value, int min, int max)
 	{
 		return value < min ? min : (value > max ? max : value);
+	}
+
+	private Tile[][][] captureTiles(Scene scene)
+	{
+		Tile[][][] tiles = null;
+		tileLookupOffset = 0;
+		capturedSceneOrigin = 0;
+		capturedSceneSize = Constants.SCENE_SIZE;
+
+		if (scene.getWorldViewId() == net.runelite.api.WorldView.TOPLEVEL)
+		{
+			Tile[][][] extended = scene.getExtendedTiles();
+			if (canCoverScene(extended, 0, Constants.EXTENDED_SCENE_SIZE))
+			{
+				tiles = extended;
+				tileLookupOffset = SCENE_OFFSET;
+				capturedSceneOrigin = -SCENE_OFFSET;
+				capturedSceneSize = Constants.EXTENDED_SCENE_SIZE;
+			}
+		}
+
+		if (tiles == null)
+		{
+			Tile[][][] regular = scene.getTiles();
+			if (canCoverScene(regular, 0, Constants.SCENE_SIZE))
+			{
+				tiles = regular;
+				tileLookupOffset = 0;
+				capturedSceneOrigin = 0;
+				capturedSceneSize = Constants.SCENE_SIZE;
+			}
+		}
+
+		return tiles;
+	}
+
+	private static boolean canCoverScene(Tile[][][] tiles, int offset, int size)
+	{
+		if (tiles == null || tiles.length == 0)
+		{
+			return false;
+		}
+		int required = offset + size;
+		for (Tile[][] plane : tiles)
+		{
+			if (plane == null)
+			{
+				continue;
+			}
+			if (plane.length < required)
+			{
+				continue;
+			}
+			for (int x = offset; x < required; x++)
+			{
+				Tile[] row = plane[x];
+				if (row != null && row.length >= required)
+				{
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	private static Tile tileAt(Tile[][][] tiles, int plane, int x, int y)
+	{
+		if (tiles == null || plane < 0 || plane >= tiles.length)
+		{
+			return null;
+		}
+		Tile[][] tilePlane = tiles[plane];
+		if (tilePlane == null || x < 0 || x >= tilePlane.length)
+		{
+			return null;
+		}
+		Tile[] row = tilePlane[x];
+		return row != null && y >= 0 && y < row.length ? row[y] : null;
+	}
+
+	private static String tileDims(Tile[][][] tiles)
+	{
+		if (tiles == null)
+		{
+			return "null";
+		}
+		int x = 0;
+		int y = 0;
+		for (Tile[][] plane : tiles)
+		{
+			if (plane == null)
+			{
+				continue;
+			}
+			x = Math.max(x, plane.length);
+			for (Tile[] row : plane)
+			{
+				if (row != null)
+				{
+					y = Math.max(y, row.length);
+				}
+			}
+		}
+		return tiles.length + "x" + x + "x" + y;
 	}
 
 	private void recordRoofRange(int roofId, int vertexStart, int vertexCount)

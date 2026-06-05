@@ -148,6 +148,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		debugOverlay = new GpuVulkanDebugOverlayController(this, config, overlayManager, stats);
 		updateDebugOverlayRegistration();
 		startRequested = true;
+		recordCapturedSceneIdentity(null);
 		boolean wantVsync = config.fpsMode() != GpuVulkanPluginConfig.FpsMode.UNCAPPED;
 		platform = PlatformSurface.current(wantVsync);
 		// macOS owns its CAMetalLayer attach via JAWT_SurfaceLayers in
@@ -364,7 +365,6 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 				if (currentScene != null)
 				{
 					captureSceneNow(currentScene);
-					capturedScene = currentScene;
 				}
 			}
 			catch (RuntimeException e)
@@ -513,7 +513,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			canvas = null;
 			platform = null;
 			x11Drawable = 0L;
-			capturedScene = null;
+			recordCapturedSceneIdentity(null);
 		});
 	}
 
@@ -565,7 +565,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		if (state.getState() < net.runelite.api.GameState.LOADING.getState())
 		{
 			renderExtensions.invalidateCapturedScene();
-			capturedScene = null;
+			recordCapturedSceneIdentity(null);
 		}
 	}
 
@@ -893,6 +893,10 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		{
 			stats.preSceneDraw.incrementAndGet();
 		}
+		if (!isTopLevelScene(scene))
+		{
+			return;
+		}
 		// Scene lifecycle fallback: swapScene/loadScene callbacks don't fire
 		// reliably in this engine version. Re-capture when either the Scene
 		// object changes or the same object is reused with a different map
@@ -934,30 +938,40 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		{
 			stats.swapScene.incrementAndGet();
 		}
-		// Belt-and-braces. The primary trigger is the reference check in
-		// preSceneDraw (engine doesn't reliably call swapScene), but if it
-		// does, preSceneDraw's check will see scene == capturedScene and
-		// won't double-capture.
-		if (renderExtensions != null)
+		if (!isTopLevelScene(scene))
 		{
-			capturedScene = scene;
+			return;
+		}
+		currentScene = scene;
+		if (renderExtensions != null && sceneIdentityChanged(scene))
+		{
 			captureSceneNow(scene);
 		}
 	}
 
 	private void prepareScene(Scene scene)
 	{
-		if (regionManager != null)
-		{
-			regionManager.prepare(scene, config.hideUnrelatedMaps());
-		}
+		// Region stripping mutates the live Scene via removeTile(). That is too
+		// strong an operation for this renderer: if the reference chunk is wrong
+		// for an overlapping/edge map, the first full capture after plugin start
+		// can permanently remove the active scene. Keep capture side-effect free.
 	}
 
 	private void captureSceneNow(Scene scene)
 	{
 		if (renderExtensions == null) return;
+		if (!isTopLevelScene(scene))
+		{
+			return;
+		}
+		if (!sceneIdentityChanged(scene))
+		{
+			return;
+		}
 		prepareScene(scene);
 		long start = stats.isEnabled() ? System.nanoTime() : 0L;
+		log.info("Vulkan recapture: base=({}, {}) worldView={} instance={}",
+			scene.getBaseX(), scene.getBaseY(), scene.getWorldViewId(), scene.isInstance());
 		renderExtensions.captureScene(scene);
 		stats.addNanos(stats.sceneCaptureNanos, start);
 		recordCapturedSceneIdentity(scene);
@@ -965,12 +979,11 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 
 	private boolean sceneIdentityChanged(Scene scene)
 	{
-		if (scene == null)
+		if (!isTopLevelScene(scene))
 		{
 			return false;
 		}
-		return scene != capturedScene
-			|| scene.getBaseX() != capturedSceneBaseX
+		return scene.getBaseX() != capturedSceneBaseX
 			|| scene.getBaseY() != capturedSceneBaseY
 			|| scene.getWorldViewId() != capturedSceneWorldViewId
 			|| scene.isInstance() != capturedSceneInstance;
@@ -1046,6 +1059,10 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	@Override
 	public void invalidateZone(Scene scene, int zx, int zz)
 	{
+		if (scene != null && !isTopLevelScene(scene))
+		{
+			return;
+		}
 		if (scene != null)
 		{
 			currentScene = scene;
@@ -1104,6 +1121,10 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			stats.drawDynamic.incrementAndGet();
 			stats.recordModel(m);
 		}
+		if (!isTopLevelScene(scene))
+		{
+			return;
+		}
 		boolean actorModel = r instanceof net.runelite.api.Actor || tileObject == null;
 		if (renderExtensions != null)
 		{
@@ -1121,6 +1142,10 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		{
 			stats.drawTemp.incrementAndGet();
 			stats.recordModel(m);
+		}
+		if (!isTopLevelScene(scene))
+		{
+			return;
 		}
 		if (gameObject == null)
 		{
@@ -1140,12 +1165,21 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		return renderable != null ? renderable.getRenderMode() : Renderable.RENDERMODE_DEFAULT;
 	}
 
+	private static boolean isTopLevelScene(Scene scene)
+	{
+		return scene != null && scene.getWorldViewId() == net.runelite.api.WorldView.TOPLEVEL;
+	}
+
 	@Override
 	public void drawPass(Projection entityProjection, Scene scene, int pass)
 	{
 		if (stats.isEnabled())
 		{
 			stats.drawPass.incrementAndGet();
+		}
+		if (!isTopLevelScene(scene))
+		{
+			return;
 		}
 		if (renderExtensions != null)
 		{
@@ -1165,7 +1199,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		// animations and the home-teleport graphic stop rendering without
 		// it — even though the stats counter above says this method never
 		// runs. We don't fully understand why yet; see issue #1.
-		if (renderExtensions == null) return;
+		if (renderExtensions == null || !isTopLevelScene(scene)) return;
 		if (renderable instanceof net.runelite.api.Actor) return;
 		Model m = (renderable instanceof Model) ? (Model) renderable : renderable.getModel();
 		if (m == null) return;
