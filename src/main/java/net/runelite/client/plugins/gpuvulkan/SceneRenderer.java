@@ -84,9 +84,9 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 
 	private static final int MAX_PLANES = 4;
 
-	/** Stock GPU uploads the whole extended scene: EXTENDED_SCENE_SIZE / 8. */
+	/** OSRS engine convention: SCENE_SIZE / ZONE_SIZE = 13 zones per side. */
 	static final int ZONE_SIZE = 8;
-	static final int ZONES_PER_SIDE = Constants.EXTENDED_SCENE_SIZE / ZONE_SIZE;
+	static final int ZONES_PER_SIDE = Constants.SCENE_SIZE / ZONE_SIZE;
 	static final int ZONE_COUNT = ZONES_PER_SIDE * ZONES_PER_SIDE;
 
 	private final int[] regionEnds = new int[LAYER_COUNT];
@@ -144,7 +144,6 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	private final SceneTileEmitter tileEmitter;
 	private int tileLookupOffset;
 	private int capturedSceneOrigin;
-	private int capturedSceneSize = Constants.SCENE_SIZE;
 
 	/**
 	 * Drops the captured scene so {@link #recordDraw} skips its work on the
@@ -355,7 +354,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 
 		final int planes = Math.min(tiles.length, MAX_PLANES);
 		final int sceneOrigin = capturedSceneOrigin;
-		final int sceneSize = capturedSceneSize;
+		final int sceneSize = Constants.SCENE_SIZE;
 		final int[][][] roofs = scene.getRoofs();
 		final byte[][][] tileSettings = scene.getExtendedTileSettings();
 		final int roofOffset = scene.getWorldViewId() == net.runelite.api.WorldView.TOPLEVEL
@@ -431,7 +430,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		captureSkybox(scene);
 		final int planes = Math.min(tiles.length, MAX_PLANES);
 		final int sceneOrigin = capturedSceneOrigin;
-		final int sceneSize = capturedSceneSize;
+		final int sceneSize = Constants.SCENE_SIZE;
 
 		// Scene.getRoofs() dims are EXTENDED_SCENE_SIZE (184) on toplevel,
 		// not SCENE_SIZE (104) like scene.getTiles(). Instances aren't
@@ -494,7 +493,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			overlayNextVertex[slot] = vertexCount;
 		}
 
-		log.info("Vulkan scene capture: base=({}, {}) worldView={} instance={} tileOffset={} sceneOrigin={} sceneSize={} tileDims={} vertices total={} terrain={} walls={} decorative={} ground={} gameObjects={} roofTiles={}",
+		log.debug("Vulkan scene capture: base=({}, {}) worldView={} instance={} tileOffset={} sceneOrigin={} sceneSize={} tileDims={} vertices total={} terrain={} walls={} decorative={} ground={} gameObjects={} roofTiles={}",
 			scene.getBaseX(), scene.getBaseY(), scene.getWorldViewId(), scene.isInstance(),
 			tileLookupOffset, sceneOrigin, sceneSize, tileDims(tiles), vertexCount,
 			regionEnds[Layer.TERRAIN.ordinal()],
@@ -875,7 +874,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	{
 		int sx = x >> 7;
 		int sz = z >> 7;
-		int sceneEnd = capturedSceneOrigin + capturedSceneSize;
+		int sceneEnd = capturedSceneOrigin + Constants.SCENE_SIZE;
 		if (sx < capturedSceneOrigin || sz < capturedSceneOrigin || sx >= sceneEnd || sz >= sceneEnd)
 		{
 			return -1;
@@ -985,13 +984,8 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			final int loMax = maxPlane;
 			int radiusTiles = (int) Math.ceil(drawDistanceTiles + fogDepthTiles + 2f);
 			int radiusZones = Math.max(1, (radiusTiles + ZONE_SIZE - 1) / ZONE_SIZE);
-			// Conservative draw path. Stock GPU lets the engine call visible
-			// zones; our cached renderer derives visibility from camera-local
-			// math. The bad-tile black-scene failure has a full capture but an
-			// empty-looking frame, so draw the captured static scene until the
-			// zone scheduler is proven against extended-scene coordinates.
-			boolean fullZoneRange = true;
-			int sceneEnd = capturedSceneOrigin + capturedSceneSize;
+			boolean fullZoneRange = radiusZones >= ZONES_PER_SIDE;
+			int sceneEnd = capturedSceneOrigin + Constants.SCENE_SIZE;
 			int camTileX = clamp((int) Math.floor(cameraX / 128f), capturedSceneOrigin, sceneEnd - 1);
 			int camTileZ = clamp((int) Math.floor(cameraZ / 128f), capturedSceneOrigin, sceneEnd - 1);
 			int camZoneX = (camTileX - capturedSceneOrigin) / ZONE_SIZE;
@@ -1185,17 +1179,15 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		Tile[][][] tiles = null;
 		tileLookupOffset = 0;
 		capturedSceneOrigin = 0;
-		capturedSceneSize = Constants.SCENE_SIZE;
 
 		if (scene.getWorldViewId() == net.runelite.api.WorldView.TOPLEVEL)
 		{
 			Tile[][][] extended = scene.getExtendedTiles();
-			if (canCoverScene(extended, 0, Constants.EXTENDED_SCENE_SIZE))
+			if (canCoverScene(extended, SCENE_OFFSET, Constants.SCENE_SIZE))
 			{
 				tiles = extended;
 				tileLookupOffset = SCENE_OFFSET;
-				capturedSceneOrigin = -SCENE_OFFSET;
-				capturedSceneSize = Constants.EXTENDED_SCENE_SIZE;
+				capturedSceneOrigin = 0;
 			}
 		}
 
@@ -1207,7 +1199,6 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 				tiles = regular;
 				tileLookupOffset = 0;
 				capturedSceneOrigin = 0;
-				capturedSceneSize = Constants.SCENE_SIZE;
 			}
 		}
 
