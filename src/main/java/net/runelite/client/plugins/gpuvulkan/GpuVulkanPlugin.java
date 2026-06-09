@@ -121,7 +121,6 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	private volatile double lastCamX, lastCamY, lastCamZ;
 	private volatile double lastCamPitch, lastCamYaw;
 	private volatile boolean startRequested;
-	private boolean sceneFramePrepared;
 	private boolean pendingSceneIdentityRecapture;
 	private static boolean shutdownHookRegistered;
 	private final VulkanExtensionQueue extensionQueue = new VulkanExtensionQueue();
@@ -614,7 +613,6 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		if (!canvas.isDisplayable() || !canvas.isValid())
 		{
 			renderer.markSwapchainStale();
-			sceneFramePrepared = false;
 			return;
 		}
 		int w = canvas.getWidth();
@@ -622,7 +620,6 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		ResizeTrace.frame(w + "x" + h);
 		if (!ensureNativeSurfaceCurrent(w, h))
 		{
-			sceneFramePrepared = false;
 			return;
 		}
 		if (renderer.usesCustomPresent())
@@ -644,37 +641,24 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		}
 		stats.setDetailedModelStats(config.detailedModelStats());
 		BufferProvider bp = client.getBufferProvider();
-		if (!sceneFramePrepared && renderExtensions != null)
-		{
-			long start = stats.isEnabled() ? System.nanoTime() : 0L;
-			renderExtensions.beginFrame();
-			stats.addNanos(stats.beginFrameNanos, start);
-		}
-		try
-		{
-			renderer.drawFrame(w, h, bp.getPixels(), bp.getWidth(), bp.getHeight(),
-				lastCamX, lastCamY, lastCamZ, lastCamPitch, lastCamYaw,
-				client.getViewportXOffset(), client.getViewportYOffset(),
-				client.getViewportWidth(), client.getViewportHeight(),
-				client.getCanvasWidth(), client.getCanvasHeight(),
-				client.getScale(),
-				client.getSkyboxColor(),
-				(float) client.getTextureProvider().getBrightness(),
-				config.brightTextures() ? 1f : 0f,
-				config.colorBlindMode().ordinal(),
-				Math.max(0, Math.min(100, config.colorBlindIntensity())) / 100f,
-				config.drawDistance(),
-				config.fogDepth(),
-				// Modulo prevents tick * anim_speed * (1/128) from accumulating
-				// float drift over a long session.
-				client.getGameCycle() & 127,
-				config.smoothBanding() ? 1f : 0f,
-				overlayColor);
-		}
-		finally
-		{
-			sceneFramePrepared = false;
-		}
+		renderer.drawFrame(w, h, bp.getPixels(), bp.getWidth(), bp.getHeight(),
+			lastCamX, lastCamY, lastCamZ, lastCamPitch, lastCamYaw,
+			client.getViewportXOffset(), client.getViewportYOffset(),
+			client.getViewportWidth(), client.getViewportHeight(),
+			client.getCanvasWidth(), client.getCanvasHeight(),
+			client.getScale(),
+			client.getSkyboxColor(),
+			(float) client.getTextureProvider().getBrightness(),
+			config.brightTextures() ? 1f : 0f,
+			config.colorBlindMode().ordinal(),
+			Math.max(0, Math.min(100, config.colorBlindIntensity())) / 100f,
+			config.drawDistance(),
+			config.fogDepth(),
+			// Modulo prevents tick * anim_speed * (1/128) from accumulating
+			// float drift over a long session.
+			client.getGameCycle() & 127,
+			config.smoothBanding() ? 1f : 0f,
+			overlayColor);
 		if (debugOverlay != null && debugOverlay.isRegistered())
 		{
 			updateDebugOverlaySnapshot();
@@ -873,7 +857,6 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		{
 			long start = statsEnabled ? System.nanoTime() : 0L;
 			renderExtensions.beginFrame();
-			sceneFramePrepared = true;
 			stats.addNanos(stats.beginFrameNanos, start);
 			start = statsEnabled ? System.nanoTime() : 0L;
 			Scene sceneForFrame = currentScene != null ? currentScene : capturedScene;
