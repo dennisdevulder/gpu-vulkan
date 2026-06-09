@@ -36,6 +36,7 @@ import org.lwjgl.vulkan.VkSurfaceFormatKHR;
 import org.lwjgl.vulkan.VkSwapchainCreateInfoKHR;
 
 import static org.lwjgl.system.MemoryStack.stackPush;
+import static org.lwjgl.vulkan.KHRSwapchain.VK_ERROR_OUT_OF_DATE_KHR;
 import static org.lwjgl.vulkan.VK13.*;
 
 /**
@@ -49,6 +50,8 @@ import static org.lwjgl.vulkan.VK13.*;
 @lombok.extern.slf4j.Slf4j
 final class Swapchain implements AutoCloseable
 {
+	private static final int CREATE_RETRIES = 4;
+
 	private final VulkanDevice device;
 	private final VulkanSurface surface;
 	private final GpuVulkanPluginConfig.FpsMode fpsMode;
@@ -65,7 +68,7 @@ final class Swapchain implements AutoCloseable
 		this.device = device;
 		this.surface = surface;
 		this.fpsMode = fpsMode;
-		create(desiredWidth, desiredHeight, VK_NULL_HANDLE);
+		createWithRetry(desiredWidth, desiredHeight, VK_NULL_HANDLE);
 	}
 
 	long handle()
@@ -114,7 +117,7 @@ final class Swapchain implements AutoCloseable
 		handle = VK_NULL_HANDLE;
 		imageViews = new long[0];
 		images = new long[0];
-		create(desiredWidth, desiredHeight, retiringHandle);
+		createWithRetry(desiredWidth, desiredHeight, retiringHandle);
 		for (long view : retiringViews)
 		{
 			if (view != VK_NULL_HANDLE) vkDestroyImageView(device.handle(), view, null);
@@ -134,6 +137,28 @@ final class Swapchain implements AutoCloseable
 	public void close()
 	{
 		destroy();
+	}
+
+	private void createWithRetry(int desiredWidth, int desiredHeight, long oldSwapchainHandle)
+	{
+		for (int attempt = 1; ; attempt++)
+		{
+			try
+			{
+				create(desiredWidth, desiredHeight, oldSwapchainHandle);
+				return;
+			}
+			catch (StaleSurfaceException e)
+			{
+				if (attempt >= CREATE_RETRIES)
+				{
+					throw e;
+				}
+				log.debug("vkCreateSwapchainKHR reported stale surface during creation; retry {}/{}",
+					attempt, CREATE_RETRIES);
+				sleepBeforeRetry();
+			}
+		}
 	}
 
 	private void create(int desiredWidth, int desiredHeight, long oldSwapchainHandle)
@@ -190,7 +215,12 @@ final class Swapchain implements AutoCloseable
 				.oldSwapchain(oldSwapchainHandle);
 
 			LongBuffer pSwap = stack.mallocLong(1);
-			Vk.check("vkCreateSwapchainKHR", KHRSwapchain.vkCreateSwapchainKHR(device.handle(), info, null, pSwap));
+			int createResult = KHRSwapchain.vkCreateSwapchainKHR(device.handle(), info, null, pSwap);
+			if (createResult == VK_ERROR_OUT_OF_DATE_KHR)
+			{
+				throw new StaleSurfaceException();
+			}
+			Vk.check("vkCreateSwapchainKHR", createResult);
 			handle = pSwap.get(0);
 
 			IntBuffer count = stack.mallocInt(1);
@@ -207,6 +237,27 @@ final class Swapchain implements AutoCloseable
 				images[i] = pImages.get(i);
 				imageViews[i] = createView(stack, images[i], imageFormat);
 			}
+		}
+	}
+
+	private static void sleepBeforeRetry()
+	{
+		try
+		{
+			Thread.sleep(16L);
+		}
+		catch (InterruptedException e)
+		{
+			Thread.currentThread().interrupt();
+			throw new StaleSurfaceException();
+		}
+	}
+
+	private static final class StaleSurfaceException extends RuntimeException
+	{
+		private StaleSurfaceException()
+		{
+			super("vkCreateSwapchainKHR failed: " + VK_ERROR_OUT_OF_DATE_KHR);
 		}
 	}
 

@@ -425,7 +425,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 				sync = null;
 				renderer = null;
 				canvas = null;
-				throw e;
+				platform = null;
+				x11Drawable = 0L;
+				startRequested = false;
 			}
 			return true;
 		});
