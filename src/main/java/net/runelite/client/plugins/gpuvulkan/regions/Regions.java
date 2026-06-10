@@ -62,6 +62,7 @@ public class Regions
 		this(new InputStreamReader(is, StandardCharsets.UTF_8), filename);
 	}
 
+	@SuppressWarnings("fallthrough")
 	public Regions(Reader reader, String filename) throws IOException
 	{
 		BufferedReader br = new BufferedReader(reader);

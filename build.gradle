@@ -66,11 +66,13 @@ dependencies {
 	launcherRuntime "org.lwjgl:lwjgl:${lwjglVersion}:natives-linux"
 	launcherRuntime "org.lwjgl:lwjgl:${lwjglVersion}:natives-linux-arm64"
 	launcherRuntime "org.lwjgl:lwjgl:${lwjglVersion}:natives-windows"
+	launcherRuntime "org.lwjgl:lwjgl:${lwjglVersion}:natives-windows-arm64"
 	launcherRuntime "org.lwjgl:lwjgl:${lwjglVersion}:natives-macos"
 	launcherRuntime "org.lwjgl:lwjgl:${lwjglVersion}:natives-macos-arm64"
 	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglVersion}:natives-linux"
 	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglVersion}:natives-linux-arm64"
 	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglVersion}:natives-windows"
+	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglVersion}:natives-windows-arm64"
 	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglVersion}:natives-macos"
 	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglVersion}:natives-macos-arm64"
 	launcherRuntime "org.lwjgl:lwjgl-vulkan:${lwjglVulkanVersion}:natives-macos"
@@ -128,6 +130,8 @@ def compileMacOSMetalHelper = tasks.register('compileMacOSMetalHelper') {
 				'-fno-objc-arc',
 				'-shared',
 				'-dynamiclib',
+				'-arch', 'arm64',
+				'-arch', 'x86_64',
 				'-framework', 'Cocoa',
 				'-framework', 'QuartzCore',
 				'-framework', 'Metal',
@@ -136,6 +140,9 @@ def compileMacOSMetalHelper = tasks.register('compileMacOSMetalHelper') {
 				'-Wl,-undefined,dynamic_lookup',
 				gpuVulkanNativeSrc.absolutePath,
 				'-o', gpuVulkanNativeOut.absolutePath
+		}
+		exec {
+			commandLine 'codesign', '--force', '--sign', '-', gpuVulkanNativeOut.absolutePath
 		}
 	}
 }
@@ -158,6 +165,7 @@ processResources {
 
 tasks.withType(JavaCompile).configureEach {
 	options.encoding = 'UTF-8'
+	options.compilerArgs += ['-Xlint:all', '-Xlint:-processing', '-Xlint:-serial']
 }
 
 tasks.withType(Test).configureEach {
