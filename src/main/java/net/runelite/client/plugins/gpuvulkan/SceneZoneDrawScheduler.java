@@ -161,7 +161,9 @@ final class SceneZoneDrawScheduler
 			for (int zz = minZoneZ; zz <= maxZoneZ; zz++)
 			{
 				int zoneIdx = zx * zonesPerSide + zz;
-				if (hasOverlayRange(slot, layer, plane, zoneIdx))
+				// A rebuilt zone replaces its static counterpart even when
+				// the rebuild emitted zero vertices (object removed).
+				if (overlayZoneValid[slot][zoneIdx])
 				{
 					continue;
 				}
@@ -210,7 +212,7 @@ final class SceneZoneDrawScheduler
 		int pairs = 0;
 		for (int zoneIdx = 0; zoneIdx < zoneCount; zoneIdx++)
 		{
-			if (!hasOverlayRange(slot, layer, plane, zoneIdx))
+			if (!overlayZoneValid[slot][zoneIdx])
 			{
 				continue;
 			}

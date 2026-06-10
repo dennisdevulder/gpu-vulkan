@@ -54,6 +54,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 
 	private static final int MAX_STATIC_VERTICES = 5_000_000;
 	private static final int MAX_FRAME_VERTICES = 3_000_000;
+	private static final int OVERLAY_HIGH_WATER_VERTICES = MAX_FRAME_VERTICES / 2;
 	private static final int MAX_LOGICAL_VERTICES = MAX_STATIC_VERTICES + MAX_FRAME_VERTICES;
 	private static final long STATIC_BUFFER_BYTES = (long) MAX_STATIC_VERTICES * ScenePipeline.VERTEX_STRIDE;
 	private static final long FRAME_BUFFER_BYTES = (long) MAX_FRAME_VERTICES * ScenePipeline.VERTEX_STRIDE;
@@ -316,7 +317,8 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	{
 		try (MemoryStack stack = stackPush())
 		{
-			vkWaitForFences(device.handle(), stack.longs(sync.inFlightFence()), true, Long.MAX_VALUE);
+			Vk.check("vkWaitForFences",
+				vkWaitForFences(device.handle(), stack.longs(sync.inFlightFence()), true, Long.MAX_VALUE));
 		}
 		int slot = sync.currentFrame();
 		vertexCount = overlayNextVertex[slot];
@@ -336,8 +338,24 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 
 	void rebuildDirtyZones(Scene scene)
 	{
+		// Restore the frame arena unconditionally: a mid-frame captureScene
+		// leaves the write cursor in the static arena.
+		int slot = sync.currentFrame();
+		vertexCount = overlayNextVertex[slot];
+		useFrameWriteArena(slot, vertexCount);
+
 		if (scene == null || dirtyZones.count() == 0)
 		{
+			return;
+		}
+
+		if (vertexCount - staticVertexCount() > OVERLAY_HIGH_WATER_VERTICES)
+		{
+			log.info("Overlay arena past high-water mark ({} verts), recapturing scene",
+				vertexCount - staticVertexCount());
+			captureScene(scene);
+			vertexCount = overlayNextVertex[slot];
+			useFrameWriteArena(slot, vertexCount);
 			return;
 		}
 
@@ -347,11 +365,8 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			return;
 		}
 
-		int slot = sync.currentFrame();
 		int slotBit = 1 << slot;
 		int allSlots = (1 << FrameSync.FRAMES_IN_FLIGHT) - 1;
-		vertexCount = overlayNextVertex[slot];
-		useFrameWriteArena(slot, vertexCount);
 
 		final int planes = Math.min(tiles.length, MAX_PLANES);
 		final int sceneOrigin = capturedSceneOrigin;
@@ -369,7 +384,8 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			}
 
 			clearOverlayZone(slot, zone);
-			int zoneStart = vertexCount;
+			boolean priorOverflow = overflowed;
+			overflowed = false;
 			rebuildingOverlayZone = true;
 			try
 			{
@@ -379,11 +395,17 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			{
 				rebuildingOverlayZone = false;
 			}
-			if (vertexCount > zoneStart)
+			boolean zoneOverflowed = overflowed;
+			overflowed |= priorOverflow;
+			if (zoneOverflowed)
 			{
-				overlayZoneValid[slot][zone] = true;
-				overlaySlotHasZones[slot] = true;
+				// Truncated capture: leave dirty for retry, don't mask static.
+				clearOverlayZone(slot, zone);
+				continue;
 			}
+			// Valid even at zero vertices — an emptied zone still masks static.
+			overlayZoneValid[slot][zone] = true;
+			overlaySlotHasZones[slot] = true;
 			dirtyZones.markSlotRebuilt(zone, slotBit, allSlots);
 		}
 
@@ -402,7 +424,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	{
 		// Drain the GPU before rewriting the buffer; captureScene is rare
 		// (region change) and the buffer is shared across all in-flight frames.
-		vkDeviceWaitIdle(device.handle());
+		Vk.check("vkDeviceWaitIdle", vkDeviceWaitIdle(device.handle()));
 
 		for (int i = 0; i < LAYER_COUNT; i++)
 		{
@@ -423,6 +445,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		overflowed = false;
 		roofRanges.clear();
 		clearOverlayRanges();
+		dirtyZones.clear();
 		pendingRenderables.clear();
 		modelEmitter.clearCache();
 
