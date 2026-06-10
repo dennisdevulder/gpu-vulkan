@@ -73,18 +73,35 @@ Maintained across sessions. Append, don't rewrite.
 
 **Partial confirmation 2026-06-10 (macOS):** farming-patch rake now updates correctly (weeds disappear) — validates the zone-rebuild masking fix (suspect #2, platform-independent). Does NOT validate the NVIDIA-specific suspects (stale dynamic-range replay, uninitialized frame-arena reads) — those need the Windows/NVIDIA Olm retest.
 
-## Travel-return FPS halving (open, 2026-06-10, Linux RX 6900 XT)
+## Travel-return FPS loss — RESOLVED 2026-06-10: engine-side, by design
 
-Symptom: ~160 FPS at a spot; teleport away and return → ~90 FPS; client restart resets. Reproducible.
+Controlled test (Linux RX 6900 XT, stock GPU plugin): boot 500-600 FPS at cook
+spot → same travel circle → return → ~420. The loss reproduces on STOCK, same
+order of magnitude proportionally. Mechanism: after traveling, the engine's
+cached neighboring-region data fully populates the extended scene on rebuild —
+the revisited Scene genuinely contains ~2x renderables (our capture logs:
+gameObjects 1.4M → 3.0M). Expanded map loading working as designed; affects
+every renderer; restart "fixed" it only because a fresh client has an empty
+region cache. NOT a gpu-vulkan bug. Felt severe on Vulkan only because our
+baseline FPS is lower (see next section). Do not reopen without new evidence.
+(Side notes from the chase: 117HD coexistence guard added in 4928780; one
+transient session of order-dependent renderer FPS was never explained and
+never reproduced — vsync/swap-interval interaction suspected, untraceable.)
 
-**Ruled out:**
-- Background system load (recurred on clean boot)
-- Drawn-geometry volume: zone-radius culling (5fe860f) active, did NOT change the halving
-- Our capture determinism: standing-still recaptures byte-stable (gameObjects 1,406,688 vs 1,406,973 across 5 recaptures)
+## Performance vs stock GPU (Linux RX 6900 XT, 2026-06-10 baseline)
 
-**Confirmed mechanism (cause unknown):** after travel-and-return, the engine Scene for ~the same area captures ~2x renderables (gameObjects 1.4M → 3.0M, walls 0.9M → 1.8M; log 2026-06-10 20:30-20:33). Doubling is INSIDE the draw radius. Likely co-located duplicate geometry (invisible — z-fights with itself), so drawn-vertex doubling halves FPS.
-
-**Decisive pending test:** when halved, toggle stock GPU plugin — if stock also halved → engine-side scene state (then test relog vs restart); if stock fine → our getExtendedTiles() read path. ALSO: user has 117HD hub plugin installed — check it is never enabled simultaneously (we only guard against stock GPU; two DrawCallbacks owners = undefined). Consider adding 117HD to the coexistence guard.
+Same scene: stock ~600 FPS, ours ~320 single-pass alpha, ~170 two-pass
+(default). Ranked engineering targets:
+1. **Alpha-face split at capture** — two-pass mode replays the ENTIRE static
+   scene in the blended pass (every opaque vertex processed twice, discarded
+   per-fragment). Stock uploads alpha faces into separate per-zone buffers and
+   its alpha pass draws only those. Splitting at capture should take default
+   mode from 170 toward ~300. Biggest single win.
+2. **Device-local static arena via staging upload** — vertex buffer is
+   host-visible (BAR-preferred); stock's VBOs are device-resident. Closes the
+   320→600 gap. Also resolves BAR-budget concerns from the growable arena
+   (42a2c69, grows to 7.5M+ verts in dense regions).
+3. Verify config parity before benchmarking (MSAA, draw distance, aniso).
 
 ## Sub-worldview rendering (branch feat/sub-worldview-rendering)
 
