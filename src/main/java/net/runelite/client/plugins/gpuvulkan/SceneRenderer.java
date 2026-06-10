@@ -52,14 +52,17 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	private static final int LAYER_COUNT = LAYERS.length;
 	private static final Layer LAST_STATIC = Layer.GAME_OBJECTS;
 
-	private static final int MAX_STATIC_VERTICES = 5_000_000;
-	private static final int MAX_FRAME_VERTICES = 3_000_000;
-	private static final int OVERLAY_HIGH_WATER_VERTICES = MAX_FRAME_VERTICES / 2;
-	private static final int MAX_LOGICAL_VERTICES = MAX_STATIC_VERTICES + MAX_FRAME_VERTICES;
-	private static final long STATIC_BUFFER_BYTES = (long) MAX_STATIC_VERTICES * ScenePipeline.VERTEX_STRIDE;
-	private static final long FRAME_BUFFER_BYTES = (long) MAX_FRAME_VERTICES * ScenePipeline.VERTEX_STRIDE;
-	private static final long TOTAL_BUFFER_BYTES = STATIC_BUFFER_BYTES + FRAME_BUFFER_BYTES * FrameSync.FRAMES_IN_FLIGHT;
+	/** Default arena sizes for the top-level scene. Sub-worldview instances
+	 *  use much smaller arenas — see the capacity constructor. */
+	static final int DEFAULT_STATIC_VERTICES = 5_000_000;
+	static final int DEFAULT_FRAME_VERTICES = 3_000_000;
+
+	private final int maxStaticVertices;
+	private final int maxFrameVertices;
+	private final int overlayHighWaterVertices;
 	private static final int SCENE_OFFSET = (Constants.EXTENDED_SCENE_SIZE - Constants.SCENE_SIZE) / 2;
+	/** False for sub-worldview renderers — only the top-level scene owns a skybox dome. */
+	private final boolean emitSkybox;
 
 	private final VulkanDevice device;
 	private final FrameSync sync;
@@ -81,7 +84,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	private long writePtr;
 	private long writeBasePtr;
 	private int writeBaseVertex;
-	private int writeVertexLimit = MAX_STATIC_VERTICES;
+	private int writeVertexLimit;
 
 	private static final int MAX_PLANES = 4;
 
@@ -190,6 +193,20 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		RenderPass renderPass, TextureArray textureArray,
 		DrawCallbackStats stats, boolean alphaToCoverage, boolean singlePassAlpha)
 	{
+		this(device, sync, renderPass, textureArray, stats, alphaToCoverage, singlePassAlpha,
+			DEFAULT_STATIC_VERTICES, DEFAULT_FRAME_VERTICES, true);
+	}
+
+	SceneRenderer(VulkanDevice device, FrameSync sync,
+		RenderPass renderPass, TextureArray textureArray,
+		DrawCallbackStats stats, boolean alphaToCoverage, boolean singlePassAlpha,
+		int maxStaticVertices, int maxFrameVertices, boolean emitSkybox)
+	{
+		this.maxStaticVertices = maxStaticVertices;
+		this.maxFrameVertices = maxFrameVertices;
+		this.overlayHighWaterVertices = maxFrameVertices / 2;
+		this.emitSkybox = emitSkybox;
+		this.writeVertexLimit = maxStaticVertices;
 		this.device = device;
 		this.sync = sync;
 		this.stats = stats;
@@ -219,7 +236,9 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			? new ScenePipeline(device, renderPass, VK_POLYGON_MODE_LINE, true,
 				renderPass.samples(), alphaToCoverage)
 			: null;
-		this.vbuf = new SceneVertexBuffer(device, TOTAL_BUFFER_BYTES, FRAME_BUFFER_BYTES,
+		this.vbuf = new SceneVertexBuffer(device,
+			staticBufferBytes() + frameBufferBytes() * FrameSync.FRAMES_IN_FLIGHT,
+			frameBufferBytes(),
 			fillPipeline.descriptorSetLayout(), textureArray);
 		this.mapped = vbuf.mapped();
 		this.descriptorSet = vbuf.descriptorSet();
@@ -255,7 +274,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	{
 		metrics.sceneVertices += regionEnds[LAST_STATIC.ordinal()];
 		metrics.totalVertices += vertexCount;
-		metrics.maxVertices += MAX_LOGICAL_VERTICES;
+		metrics.maxVertices += maxStaticVertices + maxFrameVertices;
 		metrics.roofRanges += roofRanges.count();
 		metrics.pendingRenderables += pendingRenderables.size();
 		metrics.dirtyZones += dirtyZones.count();
@@ -266,7 +285,17 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		metrics.roofSkipPairs += stats.roofSkipPairs.get();
 		metrics.overlayDirtyZones += stats.overlayDirtyZones.get();
 		metrics.overflowed |= overflowed;
-		metrics.sceneBufferBytes += TOTAL_BUFFER_BYTES;
+		metrics.sceneBufferBytes += staticBufferBytes() + frameBufferBytes() * FrameSync.FRAMES_IN_FLIGHT;
+	}
+
+	private long staticBufferBytes()
+	{
+		return (long) maxStaticVertices * ScenePipeline.VERTEX_STRIDE;
+	}
+
+	private long frameBufferBytes()
+	{
+		return (long) maxFrameVertices * ScenePipeline.VERTEX_STRIDE;
 	}
 
 	private int staticVertexCount()
@@ -277,7 +306,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	private void useStaticWriteArena()
 	{
 		writeBaseVertex = 0;
-		writeVertexLimit = MAX_STATIC_VERTICES;
+		writeVertexLimit = maxStaticVertices;
 		writeBasePtr = MemoryUtil.memAddress(mapped);
 		writePtr = writeBasePtr;
 	}
@@ -285,8 +314,8 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	private void useFrameWriteArena(int slot, int logicalVertex)
 	{
 		writeBaseVertex = staticVertexCount();
-		writeVertexLimit = writeBaseVertex + MAX_FRAME_VERTICES;
-		writeBasePtr = MemoryUtil.memAddress(mapped) + STATIC_BUFFER_BYTES + (long) slot * slotBytes;
+		writeVertexLimit = writeBaseVertex + maxFrameVertices;
+		writeBasePtr = MemoryUtil.memAddress(mapped) + staticBufferBytes() + (long) slot * slotBytes;
 		setWriteCursor(logicalVertex);
 	}
 
@@ -349,7 +378,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			return;
 		}
 
-		if (vertexCount - staticVertexCount() > OVERLAY_HIGH_WATER_VERTICES)
+		if (vertexCount - staticVertexCount() > overlayHighWaterVertices)
 		{
 			log.info("Overlay arena past high-water mark ({} verts), recapturing scene",
 				vertexCount - staticVertexCount());
@@ -549,7 +578,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	void captureSkybox(Scene scene)
 	{
 		skyboxStart = skyboxEnd = -1;
-		if (scene == null)
+		if (scene == null || !emitSkybox)
 		{
 			return;
 		}
@@ -946,13 +975,35 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 					int colorBlindMode, float colorBlindIntensity,
 					float smoothBanding)
 	{
+		recordOpaque(cmd, mvp, brightness, cameraX, cameraY, cameraZ, drawDistanceTiles, fogDepthTiles,
+			fogR, fogG, fogB, tick, textureLightMode, colorBlindMode, colorBlindIntensity, smoothBanding,
+			0, 0, 0);
+		recordAlpha(cmd, mvp, brightness, cameraX, cameraY, cameraZ, drawDistanceTiles, fogDepthTiles,
+			fogR, fogG, fogB, tick, textureLightMode, colorBlindMode, colorBlindIntensity, smoothBanding,
+			0, 0, 0);
+	}
+
+	/**
+	 * Opaque phase: skybox, static layers, dynamic layer, priority ranges.
+	 * {@code entityTx/entityTz/entityYawJau} are the sub-worldview placement
+	 * the shader uses to reconstruct toplevel-scene coordinates for fog —
+	 * zero for the top-level scene, where local == world (scene.vert misc.yzw).
+	 */
+	void recordOpaque(VkCommandBuffer cmd, float[] mvp, float brightness,
+					float cameraX, float cameraY, float cameraZ, float drawDistanceTiles, float fogDepthTiles,
+					float fogR, float fogG, float fogB,
+					int tick, float textureLightMode,
+					int colorBlindMode, float colorBlindIntensity,
+					float smoothBanding,
+					int entityTx, int entityTz, int entityYawJau)
+	{
 		drawEmitter.beginFrame(stats.isEnabled());
 		if (vertexCount == 0) return;
 		// LANDMINE: bind at offset 0 and shift via firstVertex rather than
 		// byte-offset binding — MoltenVK's offset translation produces no
 		// visible geometry at hundreds-of-MB offsets on Apple Silicon.
 		final int slot = sync.currentFrame();
-		final int slotFirstVertex = MAX_STATIC_VERTICES + slot * MAX_FRAME_VERTICES - staticVertexCount();
+		final int slotFirstVertex = maxStaticVertices + slot * maxFrameVertices - staticVertexCount();
 		final int staticFirstVertex = 0;
 		try (MemoryStack stack = stackPush())
 		{
@@ -960,7 +1011,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 				stack.longs(vbuf.handle()),
 				stack.longs(0L));
 
-			// Vertex push (96 bytes): mat4 mvp + vec4 fogVtx + ivec4 (tick + pad).
+			// Vertex push (96 bytes): mat4 mvp + vec4 fogVtx + ivec4 (tick, entity placement).
 			ByteBuffer vertPush = stack.malloc(96);
 			Mat4Ops.writeTo(vertPush, mvp);
 			vertPush.position(64);
@@ -968,7 +1019,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			vertPush.putFloat(cameraZ);
 			vertPush.putFloat(drawDistanceTiles * 128f);
 			vertPush.putFloat(fogDepthTiles * 128f);
-			vertPush.putInt(tick).putInt(0).putInt(0).putInt(0);
+			vertPush.putInt(tick).putInt(entityTx).putInt(entityTz).putInt(entityYawJau);
 			vertPush.flip();
 
 			// Fragment push (32 bytes at offset 96):
@@ -981,14 +1032,6 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			fragPush.putFloat(colorBlindIntensity);
 			fragPush.putFloat(singlePassAlpha ? 20f + smoothBanding : smoothBanding);
 			fragPush.flip();
-
-			ByteBuffer alphaFragPush = stack.malloc(32);
-			alphaFragPush.putFloat(fogR).putFloat(fogG).putFloat(fogB).putFloat(brightness);
-			alphaFragPush.putFloat(textureLightMode);
-			alphaFragPush.putFloat((float) colorBlindMode);
-			alphaFragPush.putFloat(colorBlindIntensity);
-			alphaFragPush.putFloat(10f + smoothBanding);
-			alphaFragPush.flip();
 
 			java.util.Set<Integer> hr = hideRoofIds;
 			if (skipScratch.length < roofRanges.requiredSkipPairCapacity())
@@ -1120,19 +1163,76 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 				drawPriorityRanges(cmd, slotFirstVertex, priorityDepthPipeline.layout(), vertPush, fragPush);
 			}
 
-			if (!singlePassAlpha)
+		}
+	}
+
+	/**
+	 * Blended-alpha phase. Self-contained: rebinds this renderer's vertex
+	 * buffer and pushes, so phases of different renderers (toplevel +
+	 * sub-worldviews) can interleave in one command buffer.
+	 */
+	void recordAlpha(VkCommandBuffer cmd, float[] mvp, float brightness,
+					float cameraX, float cameraY, float cameraZ, float drawDistanceTiles, float fogDepthTiles,
+					float fogR, float fogG, float fogB,
+					int tick, float textureLightMode,
+					int colorBlindMode, float colorBlindIntensity,
+					float smoothBanding,
+					int entityTx, int entityTz, int entityYawJau)
+	{
+		if (singlePassAlpha || vertexCount == 0) return;
+		final int slot = sync.currentFrame();
+		final int slotFirstVertex = maxStaticVertices + slot * maxFrameVertices - staticVertexCount();
+		final int staticFirstVertex = 0;
+		try (MemoryStack stack = stackPush())
+		{
+			vkCmdBindVertexBuffers(cmd, 0,
+				stack.longs(vbuf.handle()),
+				stack.longs(0L));
+
+			ByteBuffer vertPush = stack.malloc(96);
+			Mat4Ops.writeTo(vertPush, mvp);
+			vertPush.position(64);
+			vertPush.putFloat(cameraX);
+			vertPush.putFloat(cameraZ);
+			vertPush.putFloat(drawDistanceTiles * 128f);
+			vertPush.putFloat(fogDepthTiles * 128f);
+			vertPush.putInt(tick).putInt(entityTx).putInt(entityTz).putInt(entityYawJau);
+			vertPush.flip();
+
+			ByteBuffer alphaFragPush = stack.malloc(32);
+			alphaFragPush.putFloat(fogR).putFloat(fogG).putFloat(fogB).putFloat(brightness);
+			alphaFragPush.putFloat(textureLightMode);
+			alphaFragPush.putFloat((float) colorBlindMode);
+			alphaFragPush.putFloat(colorBlindIntensity);
+			alphaFragPush.putFloat(10f + smoothBanding);
+			alphaFragPush.flip();
+
+			if (skipScratch.length < roofRanges.requiredSkipPairCapacity())
 			{
-				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, alphaPipeline.handle());
-				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-					alphaPipeline.layout(), 0, stack.longs(descriptorSet), null);
-				if (!repushConstantsEveryDraw)
-				{
-					drawEmitter.pushConstants(cmd, alphaPipeline.layout(), vertPush, alphaFragPush);
-				}
-				drawAlphaPass(cmd, loMin, loMax, fullZoneRange, minZoneX, maxZoneX, minZoneZ, maxZoneZ,
-					skipScratch, skipPairs, loCur,
-					slot, staticFirstVertex, slotFirstVertex, alphaPipeline.layout(), vertPush, alphaFragPush);
+				skipScratch = java.util.Arrays.copyOf(skipScratch, roofRanges.requiredSkipPairCapacity());
 			}
+			int skipPairs = roofRanges.buildSkipPairs(hideRoofIds, skipScratch);
+
+			final int loMin = minPlane;
+			final int loCur = currentPlane;
+			final int loMax = maxPlane;
+			// Mirrors recordOpaque's conservative full zone range.
+			boolean fullZoneRange = true;
+			int minZoneX = 0;
+			int maxZoneX = ZONES_PER_SIDE - 1;
+			int minZoneZ = 0;
+			int maxZoneZ = ZONES_PER_SIDE - 1;
+
+			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, alphaPipeline.handle());
+			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+				alphaPipeline.layout(), 0, stack.longs(descriptorSet), null);
+			if (!repushConstantsEveryDraw)
+			{
+				drawEmitter.pushConstants(cmd, alphaPipeline.layout(), vertPush, alphaFragPush);
+			}
+			drawAlphaPass(cmd, loMin, loMax, fullZoneRange, minZoneX, maxZoneX, minZoneZ, maxZoneZ,
+				skipScratch, skipPairs, loCur,
+				slot, staticFirstVertex, slotFirstVertex, alphaPipeline.layout(), vertPush, alphaFragPush);
 		}
 	}
 

@@ -14,6 +14,12 @@
 //   offset 80..95 : ivec4 misc                (vertex)
 //                   .x = current game tick (modulo small enough that
 //                        `tick * anim * (1/128)` doesn't overflow visible UV)
+//                   .y = sub-worldview translate X (toplevel scene units)
+//                   .z = sub-worldview translate Z
+//                   .w = sub-worldview yaw (JAU, 0..2047)
+//                   .yzw are zero for top-level draws (local == world);
+//                   used only to reconstruct world XZ for fog — the clip
+//                   position comes from the pre-composed (world*entity) mvp
 //   offset 96..111: vec4 fogFrag              (fragment; not used here)
 //                   .rgb = fog color (= skybox)
 //                   .a   = brightness
@@ -113,6 +119,16 @@ void main() {
     vec2 uv = vec2(float(inTextureUv.y), float(inTextureUv.z)) / 256.0;
     vUv = uv + float(pc.misc.x) * anim2 * TEXTURE_ANIM_UNIT;
 
+    // Sub-worldview placement: rebuild toplevel-scene XZ for the fog window.
+    // Rotation matches the CPU capture convention (writeRotatedVertex):
+    // rx = x*cos + z*sin, rz = -x*sin + z*cos. Top-level draws push 0/0/0,
+    // making this an identity transform — one code path, no branch.
+    float entYaw = float(pc.misc.w) * 0.00306796157; // JAU -> radians (2pi/2048)
+    float entCos = cos(entYaw);
+    float entSin = sin(entYaw);
+    float worldX = position.x * entCos + position.z * entSin + float(pc.misc.y);
+    float worldZ = -position.x * entSin + position.z * entCos + float(pc.misc.z);
+
     // Fog from distance-to-scene-edge with corner rounding.
     float cameraX = pc.fogVtx.x;
     float cameraZ = pc.fogVtx.y;
@@ -122,8 +138,8 @@ void main() {
     float fogEast  = min(FOG_SCENE_EDGE_MAX, cameraX + drawDistance);
     float fogSouth = max(FOG_SCENE_EDGE_MIN, cameraZ - drawDistance);
     float fogNorth = min(FOG_SCENE_EDGE_MAX, cameraZ + drawDistance);
-    float xDist = min(position.x - fogWest, fogEast - position.x);
-    float zDist = min(position.z - fogSouth, fogNorth - position.z);
+    float xDist = min(worldX - fogWest, fogEast - worldX);
+    float zDist = min(worldZ - fogSouth, fogNorth - worldZ);
     float nearest = min(xDist, zDist);
     float second  = max(xDist, zDist);
     float fogDist = nearest - FOG_CORNER_ROUNDING * TILE_SIZE *

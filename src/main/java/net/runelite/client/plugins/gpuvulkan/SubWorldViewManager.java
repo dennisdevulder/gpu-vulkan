@@ -1,0 +1,294 @@
+/*
+ * Copyright (c) 2026, Dennis de Vulder
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
+package net.runelite.client.plugins.gpuvulkan;
+
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.Set;
+import lombok.extern.slf4j.Slf4j;
+import net.runelite.api.FloatProjection;
+import net.runelite.api.Model;
+import net.runelite.api.Projection;
+import net.runelite.api.Scene;
+import org.lwjgl.vulkan.VkCommandBuffer;
+
+/**
+ * Renders sub-worldview scenes (WorldEntity, e.g. sailing ships) with one
+ * small {@link SceneRenderer} per worldview — its own vertex arena, so a
+ * sub-scene can never clobber the top-level capture (the fbf75b8 bug class
+ * this replaces the isTopLevelScene quarantine for).
+ *
+ * <p>Placement follows stock GPU's model: the engine hands each zone draw a
+ * {@link FloatProjection} that maps sub-scene-local to toplevel-scene-local
+ * coordinates. Clip positions use the CPU-composed {@code world * entity}
+ * matrix; fog reconstructs world XZ in the shader from the entity translate
+ * and yaw (scene.vert misc.yzw). Dynamic models arrive with an
+ * engine-composed projection, so the CPU face sorter works unchanged.
+ *
+ * <p>Lifecycle mirrors the toplevel's: loadScene callbacks are unreliable in
+ * this engine version, so capture keys off the first preSceneDraw sighting
+ * plus identity changes, and {@code despawnWorldView} frees the renderer.
+ */
+@Slf4j
+final class SubWorldViewManager implements AutoCloseable
+{
+	/** Ships are a handful of zones; these are generous. ~12 MB per worldview. */
+	private static final int SUB_STATIC_VERTICES = 400_000;
+	private static final int SUB_FRAME_VERTICES = 40_000;
+	private static final double JAU_PER_RADIAN = 2048.0 / (2.0 * Math.PI);
+
+	private final VulkanDevice device;
+	private final FrameSync sync;
+	private final RenderPass renderPass;
+	private final TextureArray textureArray;
+	private final DrawCallbackStats stats;
+	private final boolean alphaToCoverage;
+	private final boolean singlePassAlpha;
+
+	private final Map<Integer, SubView> views = new HashMap<>();
+
+	private static final class SubView
+	{
+		final SceneRenderer renderer;
+		Scene scene;
+		int baseX;
+		int baseY;
+		boolean visible;
+		boolean placed;
+		final float[] entityMatrix = new float[16];
+		int entityTx;
+		int entityTz;
+		int entityYawJau;
+
+		SubView(SceneRenderer renderer)
+		{
+			this.renderer = renderer;
+		}
+	}
+
+	SubWorldViewManager(VulkanDevice device, FrameSync sync, RenderPass renderPass,
+		TextureArray textureArray, DrawCallbackStats stats,
+		boolean alphaToCoverage, boolean singlePassAlpha)
+	{
+		this.device = device;
+		this.sync = sync;
+		this.renderPass = renderPass;
+		this.textureArray = textureArray;
+		this.stats = stats;
+		this.alphaToCoverage = alphaToCoverage;
+		this.singlePassAlpha = singlePassAlpha;
+	}
+
+	/** Called at the toplevel preSceneDraw — the first scene callback of a frame. */
+	void beginFrame()
+	{
+		for (SubView view : views.values())
+		{
+			view.visible = false;
+			view.placed = false;
+			view.renderer.beginFrame();
+		}
+	}
+
+	void preScene(Scene scene, int minLevel, int level, int maxLevel, Set<Integer> hideRoofIds)
+	{
+		SubView view = views.get(scene.getWorldViewId());
+		if (view == null)
+		{
+			view = new SubView(new SceneRenderer(device, sync, renderPass, textureArray, stats,
+				alphaToCoverage, singlePassAlpha, SUB_STATIC_VERTICES, SUB_FRAME_VERTICES, false));
+			views.put(scene.getWorldViewId(), view);
+			capture(view, scene);
+			log.info("Sub-worldview {} renderer created", scene.getWorldViewId());
+		}
+		else if (scene != view.scene || scene.getBaseX() != view.baseX || scene.getBaseY() != view.baseY)
+		{
+			capture(view, scene);
+		}
+		view.visible = true;
+		view.renderer.setLevelRange(minLevel, level, maxLevel);
+		view.renderer.setHideRoofIds(hideRoofIds);
+	}
+
+	private void capture(SubView view, Scene scene)
+	{
+		view.renderer.captureScene(scene);
+		view.scene = scene;
+		view.baseX = scene.getBaseX();
+		view.baseY = scene.getBaseY();
+	}
+
+	/**
+	 * Records the entity placement from any per-zone/pass callback carrying
+	 * the engine's sub-to-toplevel transform. The engine reuses one
+	 * Projection per worldview per frame, so overwriting per call is cheap
+	 * and avoids stock's stale reference-identity cache.
+	 */
+	void recordProjection(Projection entityProjection, Scene scene)
+	{
+		if (!(entityProjection instanceof FloatProjection))
+		{
+			return;
+		}
+		SubView view = views.get(scene.getWorldViewId());
+		if (view == null)
+		{
+			return;
+		}
+		float[] m = ((FloatProjection) entityProjection).getProjection();
+		if (m == null || m.length < 16)
+		{
+			return;
+		}
+		System.arraycopy(m, 0, view.entityMatrix, 0, 16);
+		// Translate + yaw for the shader's fog-space reconstruction. Yaw from
+		// the rotY cells (column-major: m[0]=cos, m[8]=sin in the engine's
+		// orientation convention); pitch/roll, if the engine ever adds them,
+		// only perturb fog, never clip position.
+		view.entityTx = Math.round(m[12]);
+		view.entityTz = Math.round(m[14]);
+		view.entityYawJau = (int) Math.round(Math.atan2(m[8], m[0]) * JAU_PER_RADIAN) & 2047;
+		view.placed = true;
+	}
+
+	void drawPass(Scene scene, int pass)
+	{
+		SubView view = views.get(scene.getWorldViewId());
+		if (view != null)
+		{
+			view.renderer.drawPass(pass);
+		}
+	}
+
+	void captureDynamic(Projection projection, Scene scene, Model model,
+		int orientation, int x, int y, int z, int renderMode, boolean actorModel)
+	{
+		SubView view = views.get(scene.getWorldViewId());
+		if (view != null)
+		{
+			view.renderer.captureModelSorted(projection, model, orientation, x, y, z, renderMode, actorModel);
+		}
+	}
+
+	void invalidateZone(Scene scene, int zx, int zz)
+	{
+		SubView view = views.get(scene.getWorldViewId());
+		if (view != null)
+		{
+			view.renderer.invalidateZone(scene, zx, zz);
+		}
+	}
+
+	void rebuildDirtyZones()
+	{
+		for (SubView view : views.values())
+		{
+			if (view.scene != null)
+			{
+				view.renderer.rebuildDirtyZones(view.scene);
+			}
+		}
+	}
+
+	void despawn(int worldViewId)
+	{
+		SubView view = views.remove(worldViewId);
+		if (view != null)
+		{
+			view.renderer.close();
+			log.info("Sub-worldview {} renderer freed", worldViewId);
+		}
+	}
+
+	/** Logout/world hop: every sub-worldview is gone with the old world. */
+	void invalidateAll()
+	{
+		for (Iterator<SubView> it = views.values().iterator(); it.hasNext(); )
+		{
+			it.next().renderer.close();
+			it.remove();
+		}
+	}
+
+	void recordOpaque(VkCommandBuffer cmd, VulkanFrameContext frame)
+	{
+		record(cmd, frame, true);
+	}
+
+	void recordAlpha(VkCommandBuffer cmd, VulkanFrameContext frame)
+	{
+		record(cmd, frame, false);
+	}
+
+	private void record(VkCommandBuffer cmd, VulkanFrameContext frame, boolean opaque)
+	{
+		for (SubView view : views.values())
+		{
+			if (!view.visible || !view.placed)
+			{
+				continue;
+			}
+			float[] composed = frame.sceneMvp().clone();
+			Mat4Ops.mul(composed, view.entityMatrix);
+			if (opaque)
+			{
+				view.renderer.recordOpaque(cmd, composed, frame.brightness(),
+					frame.cameraX(), frame.cameraY(), frame.cameraZ(),
+					frame.drawDistanceTiles(), frame.fogDepthTiles(),
+					frame.fogR(), frame.fogG(), frame.fogB(),
+					frame.gameTick(), frame.textureLightMode(),
+					frame.colorBlindMode(), frame.colorBlindIntensity(),
+					frame.smoothBanding(),
+					view.entityTx, view.entityTz, view.entityYawJau);
+			}
+			else
+			{
+				view.renderer.recordAlpha(cmd, composed, frame.brightness(),
+					frame.cameraX(), frame.cameraY(), frame.cameraZ(),
+					frame.drawDistanceTiles(), frame.fogDepthTiles(),
+					frame.fogR(), frame.fogG(), frame.fogB(),
+					frame.gameTick(), frame.textureLightMode(),
+					frame.colorBlindMode(), frame.colorBlindIntensity(),
+					frame.smoothBanding(),
+					view.entityTx, view.entityTz, view.entityYawJau);
+			}
+		}
+	}
+
+	void collectDebugMetrics(GpuVulkanDebugMetrics metrics)
+	{
+		for (SubView view : views.values())
+		{
+			view.renderer.collectDebugMetrics(metrics);
+		}
+	}
+
+	@Override
+	public void close()
+	{
+		invalidateAll();
+	}
+}

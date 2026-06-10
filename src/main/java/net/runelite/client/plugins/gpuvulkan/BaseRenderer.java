@@ -36,6 +36,19 @@ final class BaseRenderer implements VulkanRenderExtension
 	private VulkanSceneRenderer sceneRenderer;
 	private InterfaceRenderer interfaceRenderer;
 	private GpuVulkanPluginConfig config;
+	/** Null when sub-worldview rendering is unavailable; then recordScenePass
+	 *  falls back to the single-scene recordDraw path. */
+	private final SubWorldViewManager subWorldViews;
+
+	BaseRenderer()
+	{
+		this(null);
+	}
+
+	BaseRenderer(SubWorldViewManager subWorldViews)
+	{
+		this.subWorldViews = subWorldViews;
+	}
 
 	@Override
 	public void onRegistered(VulkanRenderContext context)
@@ -196,12 +209,24 @@ final class BaseRenderer implements VulkanRenderExtension
 	@Override
 	public void recordScenePass(VulkanFrameContext frame)
 	{
-		if (sceneRenderer != null)
+		if (sceneRenderer == null || (config != null && config.benchmarkSkipScene()))
 		{
-			if (config == null || !config.benchmarkSkipScene())
-			{
-				sceneRenderer.recordDraw(frame);
-			}
+			return;
+		}
+		// Stock draw order across scenes: all opaque first, then blended
+		// alpha — a ship behind translucent toplevel geometry must already
+		// be in the depth buffer when that geometry blends.
+		if (subWorldViews != null && sceneRenderer instanceof DefaultVulkanSceneRenderer)
+		{
+			DefaultVulkanSceneRenderer toplevel = (DefaultVulkanSceneRenderer) sceneRenderer;
+			toplevel.recordOpaque(frame);
+			subWorldViews.recordOpaque(frame.commandBuffer(), frame);
+			toplevel.recordAlpha(frame);
+			subWorldViews.recordAlpha(frame.commandBuffer(), frame);
+		}
+		else
+		{
+			sceneRenderer.recordDraw(frame);
 		}
 	}
 

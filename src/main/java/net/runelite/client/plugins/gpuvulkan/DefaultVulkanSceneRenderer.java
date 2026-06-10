@@ -184,6 +184,26 @@ final class DefaultVulkanSceneRenderer implements VulkanSceneRenderer
 			frame.smoothBanding());
 	}
 
+	/** Phase-split variants so sub-worldview draws can interleave between
+	 *  the toplevel's opaque and blended-alpha phases. */
+	void recordOpaque(VulkanFrameContext frame)
+	{
+		sceneRenderer.recordOpaque(frame.commandBuffer(), frame.sceneMvp(), frame.brightness(),
+			frame.cameraX(), frame.cameraY(), frame.cameraZ(), frame.drawDistanceTiles(), frame.fogDepthTiles(),
+			frame.fogR(), frame.fogG(), frame.fogB(), frame.gameTick(),
+			frame.textureLightMode(), frame.colorBlindMode(), frame.colorBlindIntensity(),
+			frame.smoothBanding(), 0, 0, 0);
+	}
+
+	void recordAlpha(VulkanFrameContext frame)
+	{
+		sceneRenderer.recordAlpha(frame.commandBuffer(), frame.sceneMvp(), frame.brightness(),
+			frame.cameraX(), frame.cameraY(), frame.cameraZ(), frame.drawDistanceTiles(), frame.fogDepthTiles(),
+			frame.fogR(), frame.fogG(), frame.fogB(), frame.gameTick(),
+			frame.textureLightMode(), frame.colorBlindMode(), frame.colorBlindIntensity(),
+			frame.smoothBanding(), 0, 0, 0);
+	}
+
 	@Override
 	public void recordBeforeRenderPass(org.lwjgl.vulkan.VkCommandBuffer commandBuffer)
 	{

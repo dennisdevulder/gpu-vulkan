@@ -125,6 +125,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	private boolean pendingSceneIdentityRecapture;
 	private static boolean shutdownHookRegistered;
 	private final VulkanExtensionQueue extensionQueue = new VulkanExtensionQueue();
+	private SubWorldViewManager subWorldViews;
 
 	/** Read by the JVM shutdown hook to find the live instance — must be
 	 *  static because the hook outlives any single plugin instance. */
@@ -354,9 +355,13 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 
 		regionManager = new RegionManager();
 
+		subWorldViews = new SubWorldViewManager(device, sync, renderPass, textureArray, stats,
+			!config.benchmarkDisableAlphaCoverage(), config.singlePassAlpha());
+		disposables.add(subWorldViews);
+
 		renderExtensions = new RenderExtensions(
 			new DefaultVulkanRenderContext(client, config, gfx, device, sync, renderPass, textureArray, stats));
-		renderExtensions.register(new BaseRenderer());
+		renderExtensions.register(new BaseRenderer(subWorldViews));
 		if (config.upscalingMode() == GpuVulkanPluginConfig.UpscalingMode.FSR1)
 		{
 			renderExtensions.register(new FsrUpscalerExtension());
@@ -476,6 +481,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		regionManager = null;
 		textureArray = null;
 		renderExtensions = null;
+		subWorldViews = null;
 		gfx = null;
 		framebuffers = null;
 		sync = null;
@@ -605,6 +611,12 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		{
 			renderExtensions.invalidateCapturedScene();
 			recordCapturedSceneIdentity(null);
+			if (subWorldViews != null)
+			{
+				// The old world's entities are gone; despawn callbacks may
+				// not fire across a logout.
+				subWorldViews.invalidateAll();
+			}
 		}
 	}
 
@@ -911,6 +923,10 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		{
 			long start = statsEnabled ? System.nanoTime() : 0L;
 			renderExtensions.beginFrame();
+			if (subWorldViews != null)
+			{
+				subWorldViews.beginFrame();
+			}
 			sceneFramePrepared = true;
 			stats.addNanos(stats.beginFrameNanos, start);
 			start = statsEnabled ? System.nanoTime() : 0L;
@@ -921,6 +937,10 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 				captureSceneNow(sceneForFrame);
 			}
 			renderExtensions.rebuildDirtyZones(sceneForFrame);
+			if (subWorldViews != null)
+			{
+				subWorldViews.rebuildDirtyZones();
+			}
 			stats.addNanos(stats.sceneCaptureNanos, start);
 			start = statsEnabled ? System.nanoTime() : 0L;
 			renderExtensions.captureDynamicPending();
@@ -952,6 +972,12 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		}
 		if (!isTopLevelScene(scene))
 		{
+			// Sub-worldviews get their own renderer — never the toplevel
+			// capture path (fbf75b8 clobber class).
+			if (subWorldViews != null && scene != null)
+			{
+				subWorldViews.preScene(scene, minLevel, level, maxLevel, hideRoofIds);
+			}
 			return;
 		}
 		// Scene lifecycle fallback: swapScene/loadScene callbacks don't fire
@@ -1119,6 +1145,10 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	{
 		if (scene != null && !isTopLevelScene(scene))
 		{
+			if (subWorldViews != null)
+			{
+				subWorldViews.invalidateZone(scene, zx, zz);
+			}
 			return;
 		}
 		if (scene != null)
@@ -1160,6 +1190,10 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		{
 			stats.drawZoneOpaque.incrementAndGet();
 		}
+		if (subWorldViews != null && !isTopLevelScene(scene) && scene != null)
+		{
+			subWorldViews.recordProjection(entityProjection, scene);
+		}
 	}
 
 	@Override
@@ -1168,6 +1202,10 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		if (stats.isEnabled())
 		{
 			stats.drawZoneAlpha.incrementAndGet();
+		}
+		if (subWorldViews != null && !isTopLevelScene(scene) && scene != null)
+		{
+			subWorldViews.recordProjection(entityProjection, scene);
 		}
 	}
 
@@ -1181,6 +1219,11 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		}
 		if (!isTopLevelScene(scene))
 		{
+			if (subWorldViews != null && scene != null)
+			{
+				subWorldViews.captureDynamic(worldProjection, scene, m, orient, x, y, z,
+					renderModeOf(r), r instanceof net.runelite.api.Actor || tileObject == null);
+			}
 			return;
 		}
 		boolean actorModel = r instanceof net.runelite.api.Actor || tileObject == null;
@@ -1194,6 +1237,16 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	}
 
 	@Override
+	public void despawnWorldView(net.runelite.api.WorldView worldView)
+	{
+		if (subWorldViews != null && worldView != null
+			&& worldView.getId() != net.runelite.api.WorldView.TOPLEVEL)
+		{
+			subWorldViews.despawn(worldView.getId());
+		}
+	}
+
+	@Override
 	public void drawTemp(Projection worldProjection, Scene scene, GameObject gameObject, Model m, int orient, int x, int y, int z)
 	{
 		if (stats.isEnabled())
@@ -1203,6 +1256,11 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		}
 		if (!isTopLevelScene(scene))
 		{
+			if (subWorldViews != null && scene != null && gameObject != null)
+			{
+				subWorldViews.captureDynamic(worldProjection, scene, m, orient, x, y, z,
+					renderModeOf(gameObject.getRenderable()), false);
+			}
 			return;
 		}
 		if (gameObject == null)
@@ -1237,6 +1295,11 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		}
 		if (!isTopLevelScene(scene))
 		{
+			if (subWorldViews != null && scene != null)
+			{
+				subWorldViews.recordProjection(entityProjection, scene);
+				subWorldViews.drawPass(scene, pass);
+			}
 			return;
 		}
 		if (renderExtensions != null)
