@@ -65,8 +65,6 @@ final class SubWorldViewManager implements AutoCloseable
 	private final RenderPass renderPass;
 	private final TextureArray textureArray;
 	private final DrawCallbackStats stats;
-	private final boolean alphaToCoverage;
-	private final boolean singlePassAlpha;
 
 	private final Map<Integer, SubView> views = new HashMap<>();
 
@@ -90,16 +88,13 @@ final class SubWorldViewManager implements AutoCloseable
 	}
 
 	SubWorldViewManager(VulkanDevice device, FrameSync sync, RenderPass renderPass,
-		TextureArray textureArray, DrawCallbackStats stats,
-		boolean alphaToCoverage, boolean singlePassAlpha)
+		TextureArray textureArray, DrawCallbackStats stats)
 	{
 		this.device = device;
 		this.sync = sync;
 		this.renderPass = renderPass;
 		this.textureArray = textureArray;
 		this.stats = stats;
-		this.alphaToCoverage = alphaToCoverage;
-		this.singlePassAlpha = singlePassAlpha;
 	}
 
 	/** Called at the toplevel preSceneDraw — the first scene callback of a frame. */
@@ -119,7 +114,7 @@ final class SubWorldViewManager implements AutoCloseable
 		if (view == null)
 		{
 			view = new SubView(new SceneRenderer(device, sync, renderPass, textureArray, stats,
-				alphaToCoverage, singlePassAlpha, SUB_STATIC_VERTICES, SUB_FRAME_VERTICES, false));
+				SUB_STATIC_VERTICES, SUB_FRAME_VERTICES, false));
 			views.put(scene.getWorldViewId(), view);
 			capture(view, scene);
 			log.info("Sub-worldview {} renderer created", scene.getWorldViewId());

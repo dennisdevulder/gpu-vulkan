@@ -129,13 +129,6 @@ public interface GpuVulkanPluginConfig extends Config
 	)
 	default boolean hideUnrelatedMaps() { return true; }
 
-	@ConfigItem(
-		keyName = "singlePassAlpha",
-		name = "Single-pass alpha",
-		description = "Render transparent faces in the main scene pass using alpha-to-coverage instead of replaying the scene in a blended alpha pass. Faster, but less accurate. Plugin must be re-enabled to take effect."
-	)
-	default boolean singlePassAlpha() { return false; }
-
 	@ConfigSection(
 		name = "Upscaling",
 		description = "Render the 3D scene at a lower internal resolution and upscale before drawing UI.",
@@ -205,15 +198,6 @@ public interface GpuVulkanPluginConfig extends Config
 		position = 2
 	)
 	default boolean benchmarkSkipDynamicCapture() { return false; }
-
-	@ConfigItem(
-		keyName = "benchmarkDisableAlphaCoverage",
-		name = "Disable alpha coverage",
-		description = "Benchmark only: disables MSAA alpha-to-coverage for the scene. Transparent faces may render incorrectly; use only to isolate scene pipeline cost. Plugin must be re-enabled to take effect.",
-		section = BENCHMARK_SECTION,
-		position = 3
-	)
-	default boolean benchmarkDisableAlphaCoverage() { return false; }
 
 	@ConfigItem(
 		keyName = "fogDepth",

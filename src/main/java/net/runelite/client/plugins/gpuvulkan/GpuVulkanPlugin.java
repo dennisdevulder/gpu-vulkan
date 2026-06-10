@@ -362,8 +362,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		// path and all sub-scene callbacks drop like before.
 		if (!Boolean.getBoolean("vkgpu.disableSubWorldViews"))
 		{
-			subWorldViews = new SubWorldViewManager(device, sync, renderPass, textureArray, stats,
-				!config.benchmarkDisableAlphaCoverage(), config.singlePassAlpha());
+			subWorldViews = new SubWorldViewManager(device, sync, renderPass, textureArray, stats);
 			disposables.add(subWorldViews);
 		}
 

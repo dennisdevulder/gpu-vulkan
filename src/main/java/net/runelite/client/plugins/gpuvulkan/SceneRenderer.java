@@ -95,7 +95,10 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	private final boolean repushConstantsEveryDraw;
 	private final SceneDrawEmitter drawEmitter;
 	private final SceneZoneDrawScheduler zoneDrawScheduler;
-	private final boolean singlePassAlpha;
+	/** Benchmark-only: skip the blended alpha pass entirely (translucent
+	 *  statics and dynamics disappear). The single-pass-alpha MODE is gone —
+	 *  after the STATIC_ALPHA split it measured equal FPS with worse output. */
+	private final boolean skipAlphaPass = Boolean.getBoolean("vkgpu.skipAlphaPass");
 	private long writePtr;
 	private long writeBasePtr;
 	private int writeBaseVertex;
@@ -206,15 +209,15 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 
 	SceneRenderer(VulkanDevice device, FrameSync sync,
 		RenderPass renderPass, TextureArray textureArray,
-		DrawCallbackStats stats, boolean alphaToCoverage, boolean singlePassAlpha)
+		DrawCallbackStats stats)
 	{
-		this(device, sync, renderPass, textureArray, stats, alphaToCoverage, singlePassAlpha,
+		this(device, sync, renderPass, textureArray, stats,
 			DEFAULT_STATIC_VERTICES, DEFAULT_FRAME_VERTICES, true);
 	}
 
 	SceneRenderer(VulkanDevice device, FrameSync sync,
 		RenderPass renderPass, TextureArray textureArray,
-		DrawCallbackStats stats, boolean alphaToCoverage, boolean singlePassAlpha,
+		DrawCallbackStats stats,
 		int maxStaticVertices, int maxFrameVertices, boolean emitSkybox)
 	{
 		this.maxStaticVertices = maxStaticVertices;
@@ -235,22 +238,21 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			overlayZoneValid, overlaySlotHasZones);
 		this.modelEmitter = new SceneModelEmitter(stats, priorityRanges, this);
 		this.tileEmitter = new SceneTileEmitter(this);
-		this.singlePassAlpha = singlePassAlpha || Boolean.getBoolean("vkgpu.skipAlphaPass");
 		this.fillPipeline = new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL, true,
-			renderPass.samples(), alphaToCoverage);
+			renderPass.samples(), false);
 		this.alphaPipeline = new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL,
 			true, false, true, renderPass.samples(), false, true);
 		this.skyboxPipeline = new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL,
 			true, false, true, renderPass.samples(), false, true);
 		this.priorityColorPipeline = new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL,
-			true, false, true, renderPass.samples(), alphaToCoverage);
+			true, false, true, renderPass.samples(), false);
 		this.priorityDepthPipeline = new ScenePipeline(device, renderPass, VK_POLYGON_MODE_FILL,
-			true, true, false, renderPass.samples(), alphaToCoverage);
+			true, true, false, renderPass.samples(), false);
 		// fillModeNonSolid is required for VK_POLYGON_MODE_LINE; without it
 		// (llvmpipe, some embedded SoCs) wireframe collapses to FILL.
 		this.linePipeline = device.supportsFillModeNonSolid()
 			? new ScenePipeline(device, renderPass, VK_POLYGON_MODE_LINE, true,
-				renderPass.samples(), alphaToCoverage)
+				renderPass.samples(), false)
 			: null;
 		this.vbuf = new SceneVertexBuffer(device,
 			staticBufferBytes() + frameBufferBytes() * FrameSync.FRAMES_IN_FLIGHT,
@@ -1166,7 +1168,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			fragPush.putFloat(textureLightMode);
 			fragPush.putFloat((float) colorBlindMode);
 			fragPush.putFloat(colorBlindIntensity);
-			fragPush.putFloat(singlePassAlpha ? 20f + smoothBanding : smoothBanding);
+			fragPush.putFloat(smoothBanding);
 			fragPush.flip();
 
 			java.util.Set<Integer> hr = hideRoofIds;
@@ -1238,9 +1240,8 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 					layerStart = regionEnd;
 					continue;
 				}
-				// Translucent statics belong to the blended pass; in
-				// single-pass mode alpha-to-coverage handles them here.
-				if (LAYERS[i] == Layer.STATIC_ALPHA && !singlePassAlpha)
+				// Translucent statics belong to the blended pass.
+				if (LAYERS[i] == Layer.STATIC_ALPHA)
 				{
 					layerStart = regionEnd;
 					continue;
@@ -1323,7 +1324,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 					float smoothBanding,
 					int entityTx, int entityTz, int entityYawJau)
 	{
-		if (singlePassAlpha || vertexCount == 0) return;
+		if (skipAlphaPass || vertexCount == 0) return;
 		final int slot = sync.currentFrame();
 		final int slotFirstVertex = maxStaticVertices + slot * maxFrameVertices - staticVertexCount();
 		final int staticFirstVertex = 0;
