@@ -35,6 +35,20 @@ final class SceneModelEmitter
 		this.sink = sink;
 	}
 
+	/** Face filters for the static capture sweeps. The blended alpha pass
+	 *  draws a dedicated STATIC_ALPHA region instead of replaying the whole
+	 *  scene, so statics are captured twice: once keeping only opaque faces,
+	 *  once keeping only translucent ones. Dynamics always use ALL. */
+	static final int FILTER_ALL = 0;
+	static final int FILTER_OPAQUE = 1;
+	static final int FILTER_ALPHA = 2;
+	private int staticFaceFilter = FILTER_ALL;
+
+	void setStaticFaceFilter(int filter)
+	{
+		staticFaceFilter = filter;
+	}
+
 	void clearCache()
 	{
 		modelFaceCache.clear();
@@ -138,6 +152,11 @@ final class SceneModelEmitter
 
 			int bias = faceBias != null ? (faceBias[f] & 0xFF) : 0;
 			int trans = faceTransparencies != null ? (faceTransparencies[f] & 0xFF) : 0;
+			// Static sweeps split faces by transparency; 255 is the engine
+			// invisibility sentinel (discarded in every pass) and is dropped
+			// from static capture entirely.
+			if (staticFaceFilter == FILTER_OPAQUE && trans != 0) continue;
+			if (staticFaceFilter == FILTER_ALPHA && (trans == 0 || trans == 255)) continue;
 			int packedTexLayer = texLayer | (bias << 16) | (trans << 24);
 			boolean noUv = texLayer == 0;
 

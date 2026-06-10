@@ -46,11 +46,16 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 {
 	enum Layer
 	{
-		TERRAIN, WALLS, DECORATIVE, GROUND, GAME_OBJECTS, DYNAMIC;
+		TERRAIN, WALLS, DECORATIVE, GROUND, GAME_OBJECTS,
+		/** Translucent faces of all static object classes, captured in a
+		 *  second filtered sweep. The blended alpha pass draws only this
+		 *  layer (plus dynamics) instead of replaying the whole scene. */
+		STATIC_ALPHA,
+		DYNAMIC;
 	}
 	private static final Layer[] LAYERS = Layer.values();
 	private static final int LAYER_COUNT = LAYERS.length;
-	private static final Layer LAST_STATIC = Layer.GAME_OBJECTS;
+	private static final Layer LAST_STATIC = Layer.STATIC_ALPHA;
 
 	/** Default arena sizes for the top-level scene. Sub-worldview instances
 	 *  use much smaller arenas — see the capacity constructor. */
@@ -555,6 +560,10 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		// Pass order: emit each layer plane-by-plane so vertices are sorted
 		// (layer-major, plane-minor). recordDraw clips per layer at
 		// planeEnds[layer][visiblePlane] to hide roofs above the player.
+		// Static object sweeps keep only opaque faces; translucent faces are
+		// captured afterwards into STATIC_ALPHA so the blended pass doesn't
+		// replay the whole scene. Tiles are always opaque (no trans byte).
+		modelEmitter.setStaticFaceFilter(SceneModelEmitter.FILTER_OPAQUE);
 		captureLayer(Layer.TERRAIN, tiles, planes, sceneOrigin, sceneSize, roofs, tileSettings, roofOffset,
 			(cur, p, sx, sy) ->
 			{
@@ -594,6 +603,11 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 
 		captureGameObjectsLayer(tiles, planes, sceneOrigin, sceneSize, roofs, tileSettings, roofOffset);
 
+		modelEmitter.setStaticFaceFilter(SceneModelEmitter.FILTER_ALPHA);
+		captureLayer(Layer.STATIC_ALPHA, tiles, planes, sceneOrigin, sceneSize, roofs, tileSettings, roofOffset,
+			this::captureStaticAlphaTile);
+		modelEmitter.setStaticFaceFilter(SceneModelEmitter.FILTER_ALL);
+
 		// Pad planeEnds past `planes` so max-plane lookups still draw
 		// everything if requested.
 		for (int i = 0; i < LAYER_COUNT; i++)
@@ -605,7 +619,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			overlayNextVertex[slot] = vertexCount;
 		}
 
-		log.info("Vulkan scene capture: base=({}, {}) worldView={} instance={} tileOffset={} sceneOrigin={} sceneSize={} tileDims={} vertices total={} terrain={} walls={} decorative={} ground={} gameObjects={} roofTiles={}",
+		log.info("Vulkan scene capture: base=({}, {}) worldView={} instance={} tileOffset={} sceneOrigin={} sceneSize={} tileDims={} vertices total={} terrain={} walls={} decorative={} ground={} gameObjects={} staticAlpha={} roofTiles={}",
 			scene.getBaseX(), scene.getBaseY(), scene.getWorldViewId(), scene.isInstance(),
 			tileLookupOffset, sceneOrigin, sceneSize, tileDims(tiles), vertexCount,
 			regionEnds[Layer.TERRAIN.ordinal()],
@@ -613,6 +627,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			regionEnds[Layer.DECORATIVE.ordinal()] - regionEnds[Layer.WALLS.ordinal()],
 			regionEnds[Layer.GROUND.ordinal()] - regionEnds[Layer.DECORATIVE.ordinal()],
 			regionEnds[Layer.GAME_OBJECTS.ordinal()] - regionEnds[Layer.GROUND.ordinal()],
+			regionEnds[Layer.STATIC_ALPHA.ordinal()] - regionEnds[Layer.GAME_OBJECTS.ordinal()],
 			roofRanges.count());
 	}
 
@@ -677,6 +692,8 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	{
 		int zx = zone / ZONES_PER_SIDE;
 		int zy = zone % ZONES_PER_SIDE;
+		// Same opaque/alpha sweep split as captureScene.
+		modelEmitter.setStaticFaceFilter(SceneModelEmitter.FILTER_OPAQUE);
 		captureOverlayLayer(Layer.TERRAIN, tiles, planes, sceneOrigin, sceneSize,
 			roofs, tileSettings, roofOffset, slot, zone, zx, zy,
 			(cur, p, sx, sy) ->
@@ -720,6 +737,12 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 
 		captureOverlayGameObjectsLayer(tiles, planes, sceneOrigin, sceneSize,
 			roofs, tileSettings, roofOffset, slot, zone, zx, zy);
+
+		modelEmitter.setStaticFaceFilter(SceneModelEmitter.FILTER_ALPHA);
+		captureOverlayLayer(Layer.STATIC_ALPHA, tiles, planes, sceneOrigin, sceneSize,
+			roofs, tileSettings, roofOffset, slot, zone, zx, zy,
+			this::captureStaticAlphaTile);
+		modelEmitter.setStaticFaceFilter(SceneModelEmitter.FILTER_ALL);
 	}
 
 	private void captureOverlayLayer(Layer layer,
@@ -949,6 +972,60 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		}
 	}
 
+	/** Fused per-tile body for the STATIC_ALPHA sweep: every static object
+	 *  class in one walk so the layer gets a single coherent set of per-zone
+	 *  ranges. The model emitter's ALPHA filter (set by the caller) keeps
+	 *  only translucent faces; game objects dedupe on their min tile exactly
+	 *  like {@link #captureGameObjectsPass}. */
+	private void captureStaticAlphaTile(Tile cur, int p, int sx, int sy)
+	{
+		WallObject w = cur.getWallObject();
+		if (w != null)
+		{
+			captureAlphaRenderable(w.getRenderable1(), 0, w.getX(), w.getZ(), w.getY());
+			captureAlphaRenderable(w.getRenderable2(), 0, w.getX(), w.getZ(), w.getY());
+		}
+		DecorativeObject d = cur.getDecorativeObject();
+		if (d != null)
+		{
+			captureAlphaRenderable(d.getRenderable(), 0,
+				d.getX() + d.getXOffset(), d.getZ(), d.getY() + d.getYOffset());
+			captureAlphaRenderable(d.getRenderable2(), 0,
+				d.getX() + d.getXOffset2(), d.getZ(), d.getY() + d.getYOffset2());
+		}
+		GroundObject g = cur.getGroundObject();
+		if (g != null)
+		{
+			captureAlphaRenderable(g.getRenderable(), 0, g.getX(), g.getZ(), g.getY());
+		}
+		GameObject[] objs = cur.getGameObjects();
+		if (objs != null)
+		{
+			net.runelite.api.Point tilePoint = cur.getSceneLocation();
+			for (GameObject o : objs)
+			{
+				if (o == null) continue;
+				net.runelite.api.Point min = o.getSceneMinLocation();
+				if (min == null || !min.equals(tilePoint)) continue;
+				captureAlphaRenderable(o.getRenderable(), o.getModelOrientation(),
+					o.getX(), o.getZ(), o.getY());
+			}
+		}
+	}
+
+	/** Alpha-sweep variant of {@link #captureRenderable}: unstreamed models
+	 *  were already queued on {@code pendingRenderables} by the opaque sweep
+	 *  of the same tile — queuing again would double-emit once loaded. */
+	private void captureAlphaRenderable(Renderable r, int orient, int x, int y, int z)
+	{
+		if (r == null || r instanceof net.runelite.api.Actor) return;
+		Model m = PendingRenderables.resolveModel(r);
+		if (m != null)
+		{
+			captureModel(m, orient, x, y, z);
+		}
+	}
+
 	private void captureRenderable(Renderable r, int orient, int x, int y, int z)
 	{
 		if (r == null) return;
@@ -1161,6 +1238,13 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 					layerStart = regionEnd;
 					continue;
 				}
+				// Translucent statics belong to the blended pass; in
+				// single-pass mode alpha-to-coverage handles them here.
+				if (LAYERS[i] == Layer.STATIC_ALPHA && !singlePassAlpha)
+				{
+					layerStart = regionEnd;
+					continue;
+				}
 
 				ScenePipeline want = (wireframe[i] && linePipeline != null) ? linePipeline : fillPipeline;
 				if (want != boundPipeline)
@@ -1320,6 +1404,12 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	{
 		for (int i = 0; i < LAYER_COUNT; i++)
 		{
+			// Only translucent statics and dynamics blend; the opaque static
+			// layers were fully drawn (and depth-written) in the opaque phase.
+			if (LAYERS[i] != Layer.STATIC_ALPHA && LAYERS[i] != Layer.DYNAMIC)
+			{
+				continue;
+			}
 			int layerStart = layerStartFor(i);
 			int regionEnd = i == LAYER_COUNT - 1 ? vertexCount : regionEnds[i];
 			if (LAYERS[i] == Layer.DYNAMIC)
