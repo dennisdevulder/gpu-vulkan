@@ -88,20 +88,30 @@ baseline FPS is lower (see next section). Do not reopen without new evidence.
 transient session of order-dependent renderer FPS was never explained and
 never reproduced — vsync/swap-interval interaction suspected, untraceable.)
 
-## Performance vs stock GPU (Linux RX 6900 XT, 2026-06-10 baseline)
+## Performance vs stock GPU — RESOLVED 2026-06-10 (Linux RX 6900 XT)
 
-Same scene: stock ~600 FPS, ours ~320 single-pass alpha, ~170 two-pass
-(default). Ranked engineering targets:
-1. **Alpha-face split at capture** — two-pass mode replays the ENTIRE static
-   scene in the blended pass (every opaque vertex processed twice, discarded
-   per-fragment). Stock uploads alpha faces into separate per-zone buffers and
-   its alpha pass draws only those. Splitting at capture should take default
-   mode from 170 toward ~300. Biggest single win.
-2. **Device-local static arena via staging upload** — vertex buffer is
-   host-visible (BAR-preferred); stock's VBOs are device-resident. Closes the
-   320→600 gap. Also resolves BAR-budget concerns from the growable arena
-   (42a2c69, grows to 7.5M+ verts in dense regions).
-3. Verify config parity before benchmarking (MSAA, draw distance, aniso).
+Morning baseline: stock ~550-600 FPS, ours ~170 (default two-pass alpha).
+Evening: ~390-500 FPS. What closed it, in measured order of impact:
+1. **Alpha-face split** (869f2cb): blended pass replayed the whole static
+   scene; now draws only a STATIC_ALPHA layer. 170 → ~320. Single-pass-alpha
+   mode then measured equal-or-worse and was removed (d173d55).
+2. **Zone frustum culling** (107d895): the engine only invokes ~20 zones for
+   stock; we drew the whole radius square (~1.7M verts/frame, mostly behind
+   the camera). Gribb-Hartmann planes from the pass MVP. ~320 → ~500.
+   Escape hatch: -Dvkgpu.disableFrustumCull=true.
+3. Skybox drawn last instead of first (519d3c4) — overdraw.
+4. UI upload (~0.5ms/frame) is content-churn-bound (overlay plugins dirty
+   most rows); the dirty-row diff in GfxStreamingImage is already optimal.
+5. VRAM mirror (870ea0b) no-ops on this box (ReBAR confirmed, flags 0x7) —
+   it targets non-ReBAR machines.
+
+Diagnosis lessons (paid for, don't repeat): the per-second `recon` stats
+line and the debug overlay are the ground truth — three plausible theories
+(MSAA, draw-call count, memory residency) died against measurements; the
+real causes were found by reading `zoneOpq` (engine zone count) and
+`drawVerts/scene`. ALSO: a black screen with `preSD=0` + `ui=0.00` means
+the Benchmark "Skip UI upload" toggle is on and the user is staring at an
+invisible login screen — check config before suspecting commits.
 
 ## Sub-worldview rendering (branch feat/sub-worldview-rendering)
 
