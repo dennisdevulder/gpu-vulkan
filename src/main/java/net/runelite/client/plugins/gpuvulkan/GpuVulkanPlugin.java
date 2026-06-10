@@ -142,9 +142,11 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		runtimeConfig = new ClientRuntimeConfig(client, config);
 		// Refuse to coexist with stock GPU — two owners of the rlawt context
 		// corrupt JAWT state and crash the JVM on disable.
-		if (isStockGpuEnabled())
+		String otherRenderer = isRendererPluginEnabled("GPU", "117 HD");
+		if (otherRenderer != null)
 		{
-			log.warn("Stock 'GPU' plugin is enabled — GPU (Vulkan) will not start. Disable 'GPU' first.");
+			log.warn("'{}' plugin is enabled — GPU (Vulkan) will not start. Disable '{}' first.",
+				otherRenderer, otherRenderer);
 			return;
 		}
 		if (!isVulkanLoaderAvailable())
@@ -626,17 +628,27 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		}
 	}
 
-	private boolean isStockGpuEnabled()
+	/** Any other DrawCallbacks owner (stock GPU, 117HD, GPU forks) corrupts
+	 *  shared state if it runs alongside us — RuneLite has exactly one
+	 *  draw-callback slot. Returns the enabled plugin's name, or null. */
+	private String isRendererPluginEnabled(String... names)
 	{
 		for (Plugin p : pluginManager.getPlugins())
 		{
 			PluginDescriptor d = p.getClass().getAnnotation(PluginDescriptor.class);
-			if (d != null && "GPU".equals(d.name()))
+			if (d == null)
 			{
-				return pluginManager.isPluginEnabled(p);
+				continue;
+			}
+			for (String name : names)
+			{
+				if (name.equals(d.name()) && pluginManager.isPluginEnabled(p))
+				{
+					return d.name();
+				}
 			}
 		}
-		return false;
+		return null;
 	}
 
 	@Override

@@ -73,6 +73,23 @@ Maintained across sessions. Append, don't rewrite.
 
 **Partial confirmation 2026-06-10 (macOS):** farming-patch rake now updates correctly (weeds disappear) — validates the zone-rebuild masking fix (suspect #2, platform-independent). Does NOT validate the NVIDIA-specific suspects (stale dynamic-range replay, uninitialized frame-arena reads) — those need the Windows/NVIDIA Olm retest.
 
+## Travel-return FPS halving (open, 2026-06-10, Linux RX 6900 XT)
+
+Symptom: ~160 FPS at a spot; teleport away and return → ~90 FPS; client restart resets. Reproducible.
+
+**Ruled out:**
+- Background system load (recurred on clean boot)
+- Drawn-geometry volume: zone-radius culling (5fe860f) active, did NOT change the halving
+- Our capture determinism: standing-still recaptures byte-stable (gameObjects 1,406,688 vs 1,406,973 across 5 recaptures)
+
+**Confirmed mechanism (cause unknown):** after travel-and-return, the engine Scene for ~the same area captures ~2x renderables (gameObjects 1.4M → 3.0M, walls 0.9M → 1.8M; log 2026-06-10 20:30-20:33). Doubling is INSIDE the draw radius. Likely co-located duplicate geometry (invisible — z-fights with itself), so drawn-vertex doubling halves FPS.
+
+**Decisive pending test:** when halved, toggle stock GPU plugin — if stock also halved → engine-side scene state (then test relog vs restart); if stock fine → our getExtendedTiles() read path. ALSO: user has 117HD hub plugin installed — check it is never enabled simultaneously (we only guard against stock GPU; two DrawCallbacks owners = undefined). Consider adding 117HD to the coexistence guard.
+
+## Sub-worldview rendering (branch feat/sub-worldview-rendering)
+
+First live validation 2026-06-10 (Linux, sailing hub plugin, Port Sarim): worldviews 11 and 2830 created/freed cleanly, ship sails visible on water. Unverified detail: whether hulls render fully (user said "saw some ship sails in the water"). Static arena growth fix (42a2c69) and zone culling (5fe860f) also on this branch and confirmed working in the same session.
+
 Symptom: projectiles/ground items persist in Olm arena on Windows/NVIDIA, not on Linux/Mesa. Ranked code-cited suspects:
 1. `draw()` without `drawScene` replays stale dynamic ranges from rotated frame slots (`GpuVulkanPlugin.java:859` sole `beginFrame` site; `SceneRenderer.java:1052-1057`). Fix existed in 8c01644, reverted wholesale by 8220142 (revert coupled it to the broken 6085067 zone change — they were independent). NVIDIA visibility: unlocked FPS + IMMEDIATE/MAILBOX emits many stale presents; Mesa FIFO blocks, hides it. Confirm via existing `DrawCallbackStats`: `frames > drawScene`.
 2. `SceneZoneDrawScheduler.hasOverlayRange` (:295-299) requires per-layer `count > 0` — zone rebuilt to *empty* layer never masks static range → despawned objects draw forever. Platform-independent, deterministic.
