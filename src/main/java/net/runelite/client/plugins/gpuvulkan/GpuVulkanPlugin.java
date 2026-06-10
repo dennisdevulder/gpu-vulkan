@@ -121,6 +121,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	private volatile double lastCamX, lastCamY, lastCamZ;
 	private volatile double lastCamPitch, lastCamYaw;
 	private volatile boolean startRequested;
+	private boolean sceneFramePrepared;
 	private boolean pendingSceneIdentityRecapture;
 	private static boolean shutdownHookRegistered;
 	private final VulkanExtensionQueue extensionQueue = new VulkanExtensionQueue();
@@ -145,6 +146,11 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			log.warn("Stock 'GPU' plugin is enabled — GPU (Vulkan) will not start. Disable 'GPU' first.");
 			return;
 		}
+		if (!isVulkanLoaderAvailable())
+		{
+			log.warn("No Vulkan driver found — GPU (Vulkan) will not start.");
+			return;
+		}
 		debugOverlay = new GpuVulkanDebugOverlayController(this, config, overlayManager, stats);
 		updateDebugOverlayRegistration();
 		startRequested = true;
@@ -154,58 +160,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		// macOS owns its CAMetalLayer attach via JAWT_SurfaceLayers in
 		// MacOSPlatformSurface, and rlawt's CAOpenGLLayer would conflict.
 		final boolean isMac = platform instanceof MacOSPlatformSurface;
-		// JVM-lifetime hook: tear Vulkan down before the loader's atexit
-		// runs through the validation layer's torn-down state.
-		if (!shutdownHookRegistered)
-		{
-			shutdownHookRegistered = true;
-			Runtime.getRuntime().addShutdownHook(new Thread(() ->
-			{
-				log.info("JVM shutdown hook fired (clean exit)");
-				// Stop the Client thread from queueing more frames. draw()
-				// re-checks this flag on every callback.
-				shuttingDown = true;
-				GpuVulkanPlugin self = activeInstance;
-				if (self == null)
-				{
-					// Plugin.shutDown already ran. Nothing to do.
-					return;
-				}
-				// Best-effort teardown — Client thread may still be running.
-				// Wrap each step so one failure can't skip the rest.
-				try
-				{
-					VulkanDevice dev = self.device;
-					if (dev != null)
-					{
-						try
-						{
-							org.lwjgl.vulkan.VK13.vkDeviceWaitIdle(dev.handle());
-						}
-						catch (Throwable t)
-						{
-							log.warn("vkDeviceWaitIdle in shutdown hook: {}", t.getMessage());
-						}
-					}
-					Disposables dis = self.disposables;
-					if (dis != null)
-					{
-						try
-						{
-							dis.close();
-						}
-						catch (Throwable t)
-						{
-							log.warn("disposables.close in shutdown hook: {}", t.getMessage());
-						}
-					}
-				}
-				catch (Throwable t)
-				{
-					log.error("Shutdown hook teardown failed", t);
-				}
-			}, "vkgpu-shutdown-watch"));
-		}
+		registerShutdownHook();
 		clientThread.invoke(() ->
 		{
 			try
@@ -214,223 +169,316 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 				{
 					return true;
 				}
-				TextureProvider textureProvider = client.getTextureProvider();
-				if (textureProvider == null)
-				{
-					log.debug("Deferring GPU (Vulkan) startup until the texture provider is available");
-					return false;
-				}
-				// Defer attach until LOGGED_IN — attaching on the login screen
-				// leaves a blank canvas that's hard to distinguish from a
-				// broken surface, especially on macOS.
-				if (client.getGameState() != GameState.LOGGED_IN)
-				{
-					log.debug("Deferring GPU (Vulkan) startup until game state is LOGGED_IN (currently {})",
-						client.getGameState());
-					return false;
-				}
-				canvas = client.getCanvas();
-				// X11: AWT's libawt_xawt resize path expects a live GLX
-				// context on the canvas's owning thread; without it, sidebar
-				// collapse exit_group(1)s the EDT mid-rebuild. We don't use
-				// the GL context for rendering, just keep it bound.
-				// Windows must not set an OpenGL pixel format on this HWND
-				// before Vulkan creates its swapchain.
-				if (platform instanceof X11PlatformSurface)
-				{
-					net.runelite.rlawt.AWTContext.loadNatives();
-					synchronized (canvas.getTreeLock())
-					{
-						if (!canvas.isValid())
-						{
-							throw new RuntimeException("Canvas not valid at plugin start");
-						}
-						awtContext = new net.runelite.rlawt.AWTContext(canvas);
-						awtContext.configurePixelFormat(0, 0, 0);
-					}
-					awtContext.createGLContext();
-				}
-				canvas.setIgnoreRepaint(true);
-				canvas.setFocusable(true);
-				canvas.requestFocusInWindow();
-
-				disposables = new Disposables();
-				// -Dvkgpu.validation=true overrides the stored config so devs
-				// don't have to toggle the UI to enable validation.
-				boolean validationOn = Boolean.parseBoolean(System.getProperty("vkgpu.validation", "false"))
-					|| config.validation();
-				instance = new VulkanInstance(validationOn, platform);
-				disposables.add(instance);
-
-				surface = new VulkanSurface(instance, platform, canvas);
-				disposables.add(surface);
-				if (platform instanceof X11PlatformSurface)
-				{
-					x11Drawable = X11PlatformSurface.currentDrawable(canvas);
-				}
-
-				device = new VulkanDevice(instance, surface);
-				disposables.add(device);
-
-				// LANDMINE: register FrameSync BEFORE Swapchain. Disposables
-				// is LIFO so swapchain destroys first, releasing WSI refs to
-				// renderFinished[] semaphores; destroying those semaphores
-				// while WSI still holds them hangs AMD/RADV. vkDeviceWaitIdle
-				// does not drain the WSI presentation engine.
-				sync = new FrameSync(device);
-				disposables.add(sync);
-
-				swapchain = new Swapchain(device, surface, canvas.getWidth(), canvas.getHeight(), config.fpsMode());
-				disposables.add(swapchain);
-				if (isMac)
-				{
-					MacOSMetalHelper.resizeMetalLayer(canvas);
-					installMacResizeWake();
-				}
-				sync.recreateRenderFinished(swapchain.imageCount());
-
-				int desiredSamples;
-				switch (config.antiAliasingMode())
-				{
-					case MSAA_16: desiredSamples = 16; break;
-					case MSAA_8:  desiredSamples = 8;  break;
-					case MSAA_4:  desiredSamples = 4;  break;
-					case MSAA_2:  desiredSamples = 2;  break;
-					case DISABLED:
-					default:      desiredSamples = 1;  break;
-				}
-				int samples = device.pickSampleCount(desiredSamples);
-				if (device.supportsMetalObjects() && samples != org.lwjgl.vulkan.VK13.VK_SAMPLE_COUNT_1_BIT)
-				{
-					log.debug("Disabling MSAA on macOS custom-present path while isolating MoltenVK submit crash");
-					samples = org.lwjgl.vulkan.VK13.VK_SAMPLE_COUNT_1_BIT;
-				}
-
-				depthBuffer = new DepthBuffer(device, swapchain.width(), swapchain.height(), samples);
-				disposables.add(depthBuffer);
-
-				if (samples != org.lwjgl.vulkan.VK13.VK_SAMPLE_COUNT_1_BIT)
-				{
-					msaaColor = new MsaaColorBuffer(device,
-						swapchain.width(), swapchain.height(),
-						swapchain.imageFormat(), samples);
-					disposables.add(msaaColor);
-				}
-
-				renderPass = new RenderPass(device, swapchain.imageFormat(), samples,
-					!device.supportsMetalObjects());
-				disposables.add(renderPass);
-
-				gfx = Gfx.wrap(device, sync, renderPass);
-				disposables.add(gfx);
-
-				textureArray = new TextureArray(device, textureProvider,
-					config.anisotropicFilteringLevel());
-				disposables.add(textureArray);
-
-				regionManager = new RegionManager();
-
-				renderExtensions = new RenderExtensions(
-					new DefaultVulkanRenderContext(client, config, gfx, device, sync, renderPass, textureArray, stats));
-				renderExtensions.register(new BaseRenderer());
-				extensionQueue.attachQueued(renderExtensions);
-				disposables.add(renderExtensions);
-
-				framebuffers = new Framebuffers(device, renderPass, swapchain, depthBuffer, msaaColor);
-				disposables.add(framebuffers);
-
-				renderer = new VulkanRenderer(device, renderPass, renderExtensions,
-					swapchain, depthBuffer, msaaColor, framebuffers, sync, stats, config, gfx);
-				renderer.setDrawManager(drawManager);
-				disposables.add(renderer);
-
-				log.info("Vulkan ready: {} ({}x{}, {} swapchain images)",
-					device.deviceName(), swapchain.width(), swapchain.height(), swapchain.imageCount());
-
-				// Publish AFTER full init so the shutdown hook can't observe
-				// a half-built instance.
-				activeInstance = this;
-
-				client.setDrawCallbacks(this);
-				applyClientRuntimeConfig();
-				// Re-trigger BufferProvider so the canvas picks up an alpha
-				// channel; without it AWT paints opaque over our output.
-				client.resizeCanvas();
-
-				// Plugin enable mid-session: capture the already-loaded
-				// scene right away rather than waiting for the next chunk
-				// crossing.
-				Scene currentScene = client.getTopLevelWorldView() == null ? null
-					: client.getTopLevelWorldView().getScene();
-				if (currentScene != null)
-				{
-					captureSceneNow(currentScene);
-				}
+				return initializeRenderer(isMac);
 			}
-			catch (RuntimeException e)
+			catch (Throwable e)
 			{
-				log.error("GPU (Vulkan) startup failed", e);
-				removeMacResizeWake();
-				// Mirror shutDown's order: drain Vulkan, undo any client-state
-				// flips, drop disposables, then unwind AWT/canvas. Without
-				// this, a mid-startup throw (device pick, swapchain, etc.)
-				// leaves the canvas with ignoreRepaint=true and an AWTContext
-				// still attached — JAWT lock then fails on the next plugin
-				// enable, looking like "plugin can't toggle back on".
-				if (device != null)
+				log.error("Vulkan unavailable — GPU (Vulkan) startup failed", e);
+				cleanupFailedStartup();
+				return true;
+			}
+		});
+	}
+
+	private static boolean isVulkanLoaderAvailable()
+	{
+		try
+		{
+			org.lwjgl.vulkan.VK.getInstanceVersionSupported();
+			return true;
+		}
+		catch (Throwable t)
+		{
+			log.debug("Vulkan loader probe failed", t);
+			return false;
+		}
+	}
+
+	// JVM-lifetime hook: tear Vulkan down before the loader's atexit
+	// runs through the validation layer's torn-down state.
+	private void registerShutdownHook()
+	{
+		if (shutdownHookRegistered)
+		{
+			return;
+		}
+		shutdownHookRegistered = true;
+		Runtime.getRuntime().addShutdownHook(new Thread(() ->
+		{
+			log.info("JVM shutdown hook fired (clean exit)");
+			// Stop the Client thread from queueing more frames. draw()
+			// re-checks this flag on every callback.
+			shuttingDown = true;
+			GpuVulkanPlugin self = activeInstance;
+			if (self == null)
+			{
+				// Plugin.shutDown already ran. Nothing to do.
+				return;
+			}
+			// Best-effort teardown — Client thread may still be running.
+			// Wrap each step so one failure can't skip the rest.
+			try
+			{
+				VulkanDevice dev = self.device;
+				if (dev != null)
 				{
 					try
 					{
-						org.lwjgl.vulkan.VK13.vkDeviceWaitIdle(device.handle());
+						org.lwjgl.vulkan.VK13.vkDeviceWaitIdle(dev.handle());
 					}
-					catch (RuntimeException waitEx)
+					catch (Throwable t)
 					{
-						log.warn("vkDeviceWaitIdle during startup-recovery: {}", waitEx.getMessage());
+						log.warn("vkDeviceWaitIdle in shutdown hook: {}", t.getMessage());
 					}
 				}
-				restoreClientRuntimeConfig();
-				client.setDrawCallbacks(null);
-				client.setGpuFlags(0);
-				if (disposables != null)
+				Disposables dis = self.disposables;
+				if (dis != null)
 				{
-					disposables.close();
-					disposables = null;
-					markExtensionBackendDetached();
+					try
+					{
+						dis.close();
+					}
+					catch (Throwable t)
+					{
+						log.warn("disposables.close in shutdown hook: {}", t.getMessage());
+					}
 				}
-				if (awtContext != null)
-				{
-					awtContext.destroy();
-					awtContext = null;
-				}
-				if (canvas != null)
-				{
-					canvas.setIgnoreRepaint(false);
-				}
-				if (platform instanceof MacOSPlatformSurface)
-				{
-					MacOSMetalHelper.detachMetalLayer();
-				}
-				instance = null;
-				surface = null;
-				device = null;
-				swapchain = null;
-				depthBuffer = null;
-				msaaColor = null;
-				renderPass = null;
-				regionManager = null;
-				textureArray = null;
-				renderExtensions = null;
-				gfx = null;
-				framebuffers = null;
-				sync = null;
-				renderer = null;
-				canvas = null;
-				platform = null;
-				x11Drawable = 0L;
-				startRequested = false;
 			}
-			return true;
-		});
+			catch (Throwable t)
+			{
+				log.error("Shutdown hook teardown failed", t);
+			}
+		}, "vkgpu-shutdown-watch"));
+	}
+
+	private boolean initializeRenderer(boolean isMac)
+	{
+		TextureProvider textureProvider = client.getTextureProvider();
+		if (textureProvider == null)
+		{
+			log.debug("Deferring GPU (Vulkan) startup until the texture provider is available");
+			return false;
+		}
+		// Defer attach until LOGGED_IN — attaching on the login screen
+		// leaves a blank canvas that's hard to distinguish from a
+		// broken surface, especially on macOS.
+		if (client.getGameState() != GameState.LOGGED_IN)
+		{
+			log.debug("Deferring GPU (Vulkan) startup until game state is LOGGED_IN (currently {})",
+				client.getGameState());
+			return false;
+		}
+		canvas = client.getCanvas();
+		// X11: AWT's libawt_xawt resize path expects a live GLX
+		// context on the canvas's owning thread; without it, sidebar
+		// collapse exit_group(1)s the EDT mid-rebuild. We don't use
+		// the GL context for rendering, just keep it bound.
+		// Windows must not set an OpenGL pixel format on this HWND
+		// before Vulkan creates its swapchain.
+		if (platform instanceof X11PlatformSurface)
+		{
+			net.runelite.rlawt.AWTContext.loadNatives();
+			synchronized (canvas.getTreeLock())
+			{
+				if (!canvas.isValid())
+				{
+					throw new RuntimeException("Canvas not valid at plugin start");
+				}
+				awtContext = new net.runelite.rlawt.AWTContext(canvas);
+				awtContext.configurePixelFormat(0, 0, 0);
+			}
+			awtContext.createGLContext();
+		}
+		canvas.setIgnoreRepaint(true);
+		canvas.setFocusable(true);
+		canvas.requestFocusInWindow();
+
+		disposables = new Disposables();
+		// -Dvkgpu.validation=true overrides the stored config so devs
+		// don't have to toggle the UI to enable validation.
+		boolean validationOn = Boolean.parseBoolean(System.getProperty("vkgpu.validation", "false"))
+			|| config.validation();
+		instance = new VulkanInstance(validationOn, platform);
+		disposables.add(instance);
+
+		surface = new VulkanSurface(instance, platform, canvas);
+		disposables.add(surface);
+		if (platform instanceof X11PlatformSurface)
+		{
+			x11Drawable = X11PlatformSurface.currentDrawable(canvas);
+		}
+
+		device = new VulkanDevice(instance, surface);
+		disposables.add(device);
+
+		// LANDMINE: register FrameSync BEFORE Swapchain. Disposables
+		// is LIFO so swapchain destroys first, releasing WSI refs to
+		// renderFinished[] semaphores; destroying those semaphores
+		// while WSI still holds them hangs AMD/RADV. vkDeviceWaitIdle
+		// does not drain the WSI presentation engine.
+		sync = new FrameSync(device);
+		disposables.add(sync);
+
+		swapchain = new Swapchain(device, surface, canvas.getWidth(), canvas.getHeight(), config.fpsMode());
+		disposables.add(swapchain);
+		if (isMac)
+		{
+			MacOSMetalHelper.resizeMetalLayer(canvas);
+			installMacResizeWake();
+		}
+		sync.recreateRenderFinished(swapchain.imageCount());
+
+		int samples = pickMsaaSamples();
+
+		depthBuffer = new DepthBuffer(device, swapchain.width(), swapchain.height(), samples);
+		disposables.add(depthBuffer);
+
+		if (samples != org.lwjgl.vulkan.VK13.VK_SAMPLE_COUNT_1_BIT)
+		{
+			msaaColor = new MsaaColorBuffer(device,
+				swapchain.width(), swapchain.height(),
+				swapchain.imageFormat(), samples);
+			disposables.add(msaaColor);
+		}
+
+		renderPass = new RenderPass(device, swapchain.imageFormat(), samples,
+			!device.supportsMetalObjects());
+		disposables.add(renderPass);
+
+		gfx = Gfx.wrap(device, sync, renderPass);
+		disposables.add(gfx);
+
+		textureArray = new TextureArray(device, textureProvider,
+			config.anisotropicFilteringLevel());
+		disposables.add(textureArray);
+
+		regionManager = new RegionManager();
+
+		renderExtensions = new RenderExtensions(
+			new DefaultVulkanRenderContext(client, config, gfx, device, sync, renderPass, textureArray, stats));
+		renderExtensions.register(new BaseRenderer());
+		extensionQueue.attachQueued(renderExtensions);
+		disposables.add(renderExtensions);
+
+		framebuffers = new Framebuffers(device, renderPass, swapchain, depthBuffer, msaaColor);
+		disposables.add(framebuffers);
+
+		renderer = new VulkanRenderer(device, renderPass, renderExtensions,
+			swapchain, depthBuffer, msaaColor, framebuffers, sync, stats, config, gfx);
+		renderer.setDrawManager(drawManager);
+		disposables.add(renderer);
+
+		log.info("Vulkan ready: {} ({}x{}, {} swapchain images)",
+			device.deviceName(), swapchain.width(), swapchain.height(), swapchain.imageCount());
+
+		// Publish AFTER full init so the shutdown hook can't observe
+		// a half-built instance.
+		activeInstance = this;
+
+		client.setDrawCallbacks(this);
+		applyClientRuntimeConfig();
+		// Re-trigger BufferProvider so the canvas picks up an alpha
+		// channel; without it AWT paints opaque over our output.
+		client.resizeCanvas();
+
+		// Plugin enable mid-session: capture the already-loaded
+		// scene right away rather than waiting for the next chunk
+		// crossing.
+		Scene currentScene = client.getTopLevelWorldView() == null ? null
+			: client.getTopLevelWorldView().getScene();
+		if (currentScene != null)
+		{
+			captureSceneNow(currentScene);
+		}
+		return true;
+	}
+
+	private int pickMsaaSamples()
+	{
+		int desiredSamples;
+		switch (config.antiAliasingMode())
+		{
+			case MSAA_16: desiredSamples = 16; break;
+			case MSAA_8:  desiredSamples = 8;  break;
+			case MSAA_4:  desiredSamples = 4;  break;
+			case MSAA_2:  desiredSamples = 2;  break;
+			case DISABLED:
+			default:      desiredSamples = 1;  break;
+		}
+		int samples = device.pickSampleCount(desiredSamples);
+		if (device.supportsMetalObjects() && samples != org.lwjgl.vulkan.VK13.VK_SAMPLE_COUNT_1_BIT)
+		{
+			log.warn("MSAA is unavailable on macOS, rendering at 1x");
+			samples = org.lwjgl.vulkan.VK13.VK_SAMPLE_COUNT_1_BIT;
+		}
+		return samples;
+	}
+
+	private void cleanupFailedStartup()
+	{
+		removeMacResizeWake();
+		// Mirror shutDown's order: drain Vulkan, undo any client-state
+		// flips, drop disposables, then unwind AWT/canvas. Without
+		// this, a mid-startup throw (device pick, swapchain, etc.)
+		// leaves the canvas with ignoreRepaint=true and an AWTContext
+		// still attached — JAWT lock then fails on the next plugin
+		// enable, looking like "plugin can't toggle back on".
+		if (device != null)
+		{
+			try
+			{
+				org.lwjgl.vulkan.VK13.vkDeviceWaitIdle(device.handle());
+			}
+			catch (RuntimeException waitEx)
+			{
+				log.warn("vkDeviceWaitIdle during startup-recovery: {}", waitEx.getMessage());
+			}
+		}
+		restoreClientRuntimeConfig();
+		client.setDrawCallbacks(null);
+		client.setGpuFlags(0);
+		if (disposables != null)
+		{
+			disposables.close();
+			disposables = null;
+			markExtensionBackendDetached();
+		}
+		if (awtContext != null)
+		{
+			awtContext.destroy();
+			awtContext = null;
+		}
+		if (canvas != null)
+		{
+			canvas.setIgnoreRepaint(false);
+		}
+		if (platform instanceof MacOSPlatformSurface)
+		{
+			MacOSMetalHelper.detachMetalLayer();
+		}
+		clearRendererState();
+		startRequested = false;
+	}
+
+	private void clearRendererState()
+	{
+		instance = null;
+		surface = null;
+		device = null;
+		swapchain = null;
+		depthBuffer = null;
+		msaaColor = null;
+		renderPass = null;
+		regionManager = null;
+		textureArray = null;
+		renderExtensions = null;
+		gfx = null;
+		framebuffers = null;
+		sync = null;
+		renderer = null;
+		canvas = null;
+		platform = null;
+		x11Drawable = 0L;
 	}
 
 	@Override
@@ -499,22 +547,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			log.info("GPU (Vulkan) shutdown: resize canvas begin");
 			client.resizeCanvas();
 			log.info("GPU (Vulkan) shutdown: resize canvas end");
-			instance = null;
-			surface = null;
-			device = null;
-			swapchain = null;
-			depthBuffer = null;
-			msaaColor = null;
-			renderPass = null;
-			textureArray = null;
-			renderExtensions = null;
-			gfx = null;
-			framebuffers = null;
-			sync = null;
-			renderer = null;
-			canvas = null;
-			platform = null;
-			x11Drawable = 0L;
+			clearRendererState();
 			recordCapturedSceneIdentity(null);
 		});
 	}
@@ -613,6 +646,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		if (!canvas.isDisplayable() || !canvas.isValid())
 		{
 			renderer.markSwapchainStale();
+			sceneFramePrepared = false;
 			return;
 		}
 		int w = canvas.getWidth();
@@ -620,6 +654,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		ResizeTrace.frame(w + "x" + h);
 		if (!ensureNativeSurfaceCurrent(w, h))
 		{
+			sceneFramePrepared = false;
 			return;
 		}
 		if (renderer.usesCustomPresent())
@@ -641,24 +676,39 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		}
 		stats.setDetailedModelStats(config.detailedModelStats());
 		BufferProvider bp = client.getBufferProvider();
-		renderer.drawFrame(w, h, bp.getPixels(), bp.getWidth(), bp.getHeight(),
-			lastCamX, lastCamY, lastCamZ, lastCamPitch, lastCamYaw,
-			client.getViewportXOffset(), client.getViewportYOffset(),
-			client.getViewportWidth(), client.getViewportHeight(),
-			client.getCanvasWidth(), client.getCanvasHeight(),
-			client.getScale(),
-			client.getSkyboxColor(),
-			(float) client.getTextureProvider().getBrightness(),
-			config.brightTextures() ? 1f : 0f,
-			config.colorBlindMode().ordinal(),
-			Math.max(0, Math.min(100, config.colorBlindIntensity())) / 100f,
-			config.drawDistance(),
-			config.fogDepth(),
-			// Modulo prevents tick * anim_speed * (1/128) from accumulating
-			// float drift over a long session.
-			client.getGameCycle() & 127,
-			config.smoothBanding() ? 1f : 0f,
-			overlayColor);
+		// draw() without a scene pass this frame would replay the previous
+		// frame's dynamic capture against a rotated slot — reset instead.
+		if (!sceneFramePrepared && renderExtensions != null)
+		{
+			long start = stats.isEnabled() ? System.nanoTime() : 0L;
+			renderExtensions.beginFrame();
+			stats.addNanos(stats.beginFrameNanos, start);
+		}
+		try
+		{
+			renderer.drawFrame(w, h, bp.getPixels(), bp.getWidth(), bp.getHeight(),
+				lastCamX, lastCamY, lastCamZ, lastCamPitch, lastCamYaw,
+				client.getViewportXOffset(), client.getViewportYOffset(),
+				client.getViewportWidth(), client.getViewportHeight(),
+				client.getCanvasWidth(), client.getCanvasHeight(),
+				client.getScale(),
+				client.getSkyboxColor(),
+				(float) client.getTextureProvider().getBrightness(),
+				config.brightTextures() ? 1f : 0f,
+				config.colorBlindMode().ordinal(),
+				Math.max(0, Math.min(100, config.colorBlindIntensity())) / 100f,
+				config.drawDistance(),
+				config.fogDepth(),
+				// Modulo prevents tick * anim_speed * (1/128) from accumulating
+				// float drift over a long session.
+				client.getGameCycle() & 127,
+				config.smoothBanding() ? 1f : 0f,
+				overlayColor);
+		}
+		finally
+		{
+			sceneFramePrepared = false;
+		}
 		if (debugOverlay != null && debugOverlay.isRegistered())
 		{
 			updateDebugOverlaySnapshot();
@@ -857,6 +907,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		{
 			long start = statsEnabled ? System.nanoTime() : 0L;
 			renderExtensions.beginFrame();
+			sceneFramePrepared = true;
 			stats.addNanos(stats.beginFrameNanos, start);
 			start = statsEnabled ? System.nanoTime() : 0L;
 			Scene sceneForFrame = currentScene != null ? currentScene : capturedScene;
@@ -887,7 +938,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	private Scene currentScene;
 
 	@Override
-	public void preSceneDraw(Scene scene,
+	public void preSceneDraw(Scene scene, Projection projection,
 		float cameraX, float cameraY, float cameraZ, float cameraPitch, float cameraYaw,
 		int minLevel, int level, int maxLevel, Set<Integer> hideRoofIds)
 	{
@@ -985,7 +1036,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		{
 			return false;
 		}
-		return scene.getBaseX() != capturedSceneBaseX
+		return scene != capturedScene
+			|| scene.getBaseX() != capturedSceneBaseX
 			|| scene.getBaseY() != capturedSceneBaseY
 			|| scene.getWorldViewId() != capturedSceneWorldViewId
 			|| scene.isInstance() != capturedSceneInstance;

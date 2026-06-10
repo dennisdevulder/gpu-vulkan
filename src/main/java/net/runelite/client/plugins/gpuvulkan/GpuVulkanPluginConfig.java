@@ -90,7 +90,7 @@ public interface GpuVulkanPluginConfig extends Config
 		name = "FPS mode",
 		description = "Vsync = capped to refresh, no tearing. Adaptive vsync = vsync with single-frame tear when behind. Triple-buffer = decoupled render, no tearing. Uncapped = no vsync, tearing visible, max FPS for benchmarking. Plugin must be re-enabled for this to take effect."
 	)
-	default FpsMode fpsMode() { return FpsMode.UNCAPPED; }
+	default FpsMode fpsMode() { return FpsMode.VSYNC; }
 
 	@Range(min = 0, max = 999)
 	@ConfigItem(
@@ -227,7 +227,7 @@ public interface GpuVulkanPluginConfig extends Config
 	@ConfigItem(
 		keyName = "antiAliasingMode",
 		name = "Anti aliasing",
-		description = "Multisample anti-aliasing. Higher = cleaner edges, lower FPS. Stock GPU defaults to 2×. Plugin must be re-enabled to take effect."
+		description = "Multisample anti-aliasing. Higher = cleaner edges, lower FPS. Stock GPU defaults to 2×. Has no effect on macOS (rendered at 1x). Plugin must be re-enabled to take effect."
 	)
 	default AntiAliasingMode antiAliasingMode() { return AntiAliasingMode.MSAA_2; }
 
