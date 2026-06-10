@@ -37,6 +37,7 @@ import org.lwjgl.vulkan.VkDeviceQueueCreateInfo;
 import org.lwjgl.vulkan.VkPhysicalDevice;
 import org.lwjgl.vulkan.VkPhysicalDeviceFeatures;
 import org.lwjgl.vulkan.VkPhysicalDeviceProperties;
+import org.lwjgl.vulkan.VkPhysicalDeviceSynchronization2Features;
 import org.lwjgl.vulkan.VkQueue;
 import org.lwjgl.vulkan.VkQueueFamilyProperties;
 
@@ -90,6 +91,9 @@ final class VulkanDevice implements AutoCloseable
 	private static final String VK_KHR_VIDEO_ENCODE_H264_EXTENSION_NAME = "VK_KHR_video_encode_h264";
 	private static final String VK_KHR_VIDEO_ENCODE_H265_EXTENSION_NAME = "VK_KHR_video_encode_h265";
 	private static final String VK_KHR_VIDEO_ENCODE_AV1_EXTENSION_NAME = "VK_KHR_video_encode_av1";
+	/** Why no encode queue was created, for {@link VulkanEncodeContext#unavailableReason()}.
+	 *  Null when {@link #videoEncodeQueue} is non-null. */
+	private final String videoEncodeUnavailableDetail;
 	/** {@code id<MTLCommandQueue>} pointer the custom present path uses to
 	 *  schedule {@code [drawable present]} after our Vulkan render. Extracted
 	 *  via vkExportMetalObjectsEXT in {@link #extractMetalCommandQueue}.
@@ -141,11 +145,6 @@ final class VulkanDevice implements AutoCloseable
 				& props.limits().framebufferDepthSampleCounts();
 			this.maxSampleCount = highestSampleBit(counts);
 
-			VkDeviceQueueCreateInfo.Buffer qInfo = VkDeviceQueueCreateInfo.calloc(1, stack);
-			qInfo.get(0).sType$Default()
-				.queueFamilyIndex(graphicsQueueFamily)
-				.pQueuePriorities(stack.floats(1.0f));
-
 			// Spec: if a device advertises VK_KHR_portability_subset, the app
 			// MUST enable it at vkCreateDevice or device creation fails with
 			// VK_ERROR_EXTENSION_NOT_PRESENT. MoltenVK always reports it.
@@ -167,9 +166,83 @@ final class VulkanDevice implements AutoCloseable
 			this.supportsVideoEncodeAv1 = deviceExtensions.contains(VK_KHR_VIDEO_ENCODE_AV1_EXTENSION_NAME);
 			this.videoEncodeQueueFamily = findVideoEncodeQueueFamily(physicalDevice, stack);
 
+			// Video encode queue: created up front because queue families are
+			// fixed at vkCreateDevice — a recorder plugin can't add one later.
+			// The queue is unused by the renderer itself; consumers reach it
+			// through VulkanEncodeContext.
+			boolean hasEncodeCodec = supportsVideoEncodeH264 || supportsVideoEncodeH265 || supportsVideoEncodeAv1;
+			boolean wantEncodeQueue = supportsVideoQueue && supportsVideoEncodeQueue
+				&& hasEncodeCodec && videoEncodeQueueFamily >= 0;
+			String encodeDetail = null;
+			if (wantEncodeQueue && Boolean.getBoolean("vkgpu.disableVideoEncode"))
+			{
+				wantEncodeQueue = false;
+				encodeDetail = "Video encode queue disabled via -Dvkgpu.disableVideoEncode.";
+			}
+			// VK_KHR_video_queue's device-level functionality requires the
+			// synchronization2 feature, which is mandatory in Vulkan 1.3 —
+			// gate on the device's API version so the feature request below
+			// can't fail vkCreateDevice on an older driver.
+			if (wantEncodeQueue && props.apiVersion() < VK_API_VERSION_1_3)
+			{
+				wantEncodeQueue = false;
+				encodeDetail = "Device reports Vulkan " + VK_API_VERSION_MAJOR(props.apiVersion())
+					+ "." + VK_API_VERSION_MINOR(props.apiVersion())
+					+ "; encode queue creation requires 1.3 (synchronization2).";
+			}
+			boolean encodeSharesGraphicsFamily = videoEncodeQueueFamily == graphicsQueueFamily;
+			int encodeQueueIndex = 0;
+			if (wantEncodeQueue && encodeSharesGraphicsFamily)
+			{
+				// Sharing the render VkQueue with a recorder thread would need
+				// external synchronization on every submit — take a second
+				// queue from the family instead, or none at all.
+				if (queueFamilyQueueCount(physicalDevice, graphicsQueueFamily, stack) >= 2)
+				{
+					encodeQueueIndex = 1;
+				}
+				else
+				{
+					wantEncodeQueue = false;
+					encodeDetail = "Encode bit is on the graphics queue family but it exposes only one queue; "
+						+ "sharing the render queue is unsafe.";
+				}
+			}
+
+			VkDeviceQueueCreateInfo.Buffer qInfo;
+			if (wantEncodeQueue && !encodeSharesGraphicsFamily)
+			{
+				qInfo = VkDeviceQueueCreateInfo.calloc(2, stack);
+				qInfo.get(1).sType$Default()
+					.queueFamilyIndex(videoEncodeQueueFamily)
+					.pQueuePriorities(stack.floats(1.0f));
+			}
+			else if (wantEncodeQueue)
+			{
+				qInfo = VkDeviceQueueCreateInfo.calloc(1, stack);
+				// Encode at lower priority so background recording can't starve rendering.
+				qInfo.get(0).pQueuePriorities(stack.floats(1.0f, 0.5f));
+			}
+			else
+			{
+				qInfo = VkDeviceQueueCreateInfo.calloc(1, stack);
+			}
+			qInfo.get(0).sType$Default()
+				.queueFamilyIndex(graphicsQueueFamily);
+			if (!(wantEncodeQueue && encodeSharesGraphicsFamily))
+			{
+				qInfo.get(0).pQueuePriorities(stack.floats(1.0f));
+			}
+
+			int videoExtCount = wantEncodeQueue
+				? 2 + (supportsVideoEncodeH264 ? 1 : 0)
+					+ (supportsVideoEncodeH265 ? 1 : 0)
+					+ (supportsVideoEncodeAv1 ? 1 : 0)
+				: 0;
 			int extCount = 1
 				+ (hasPortabilitySubset ? 1 : 0)
-				+ (hasMetalObjects ? 1 : 0);
+				+ (hasMetalObjects ? 1 : 0)
+				+ videoExtCount;
 			PointerBuffer devExtensions = stack.mallocPointer(extCount);
 			devExtensions.put(stack.UTF8(KHRSwapchain.VK_KHR_SWAPCHAIN_EXTENSION_NAME));
 			if (hasPortabilitySubset)
@@ -181,6 +254,23 @@ final class VulkanDevice implements AutoCloseable
 			{
 				devExtensions.put(stack.UTF8("VK_EXT_metal_objects"));
 				log.info("Enabling VK_EXT_metal_objects (custom-present path)");
+			}
+			if (wantEncodeQueue)
+			{
+				devExtensions.put(stack.UTF8(KHRVideoQueue.VK_KHR_VIDEO_QUEUE_EXTENSION_NAME));
+				devExtensions.put(stack.UTF8(KHRVideoEncodeQueue.VK_KHR_VIDEO_ENCODE_QUEUE_EXTENSION_NAME));
+				if (supportsVideoEncodeH264)
+				{
+					devExtensions.put(stack.UTF8(VK_KHR_VIDEO_ENCODE_H264_EXTENSION_NAME));
+				}
+				if (supportsVideoEncodeH265)
+				{
+					devExtensions.put(stack.UTF8(VK_KHR_VIDEO_ENCODE_H265_EXTENSION_NAME));
+				}
+				if (supportsVideoEncodeAv1)
+				{
+					devExtensions.put(stack.UTF8(VK_KHR_VIDEO_ENCODE_AV1_EXTENSION_NAME));
+				}
 			}
 			devExtensions.flip();
 
@@ -197,6 +287,15 @@ final class VulkanDevice implements AutoCloseable
 				.ppEnabledExtensionNames(devExtensions)
 				.pEnabledFeatures(features);
 
+			if (wantEncodeQueue)
+			{
+				VkPhysicalDeviceSynchronization2Features sync2 =
+					VkPhysicalDeviceSynchronization2Features.calloc(stack)
+						.sType$Default()
+						.synchronization2(true);
+				info.pNext(sync2.address());
+			}
+
 			PointerBuffer pDev = stack.mallocPointer(1);
 			Vk.check("vkCreateDevice", vkCreateDevice(physicalDevice, info, null, pDev));
 			this.handle = new VkDevice(pDev.get(0), physicalDevice, info);
@@ -204,7 +303,20 @@ final class VulkanDevice implements AutoCloseable
 			PointerBuffer pQueue = stack.mallocPointer(1);
 			vkGetDeviceQueue(handle, graphicsQueueFamily, 0, pQueue);
 			this.graphicsQueue = new VkQueue(pQueue.get(0), handle);
-			this.videoEncodeQueue = null;
+			if (wantEncodeQueue)
+			{
+				PointerBuffer pEncodeQueue = stack.mallocPointer(1);
+				vkGetDeviceQueue(handle, videoEncodeQueueFamily, encodeQueueIndex, pEncodeQueue);
+				this.videoEncodeQueue = new VkQueue(pEncodeQueue.get(0), handle);
+				log.info("Created video encode queue (family {}, index {}; H.264={}, H.265={}, AV1={})",
+					videoEncodeQueueFamily, encodeQueueIndex,
+					supportsVideoEncodeH264, supportsVideoEncodeH265, supportsVideoEncodeAv1);
+			}
+			else
+			{
+				this.videoEncodeQueue = null;
+			}
+			this.videoEncodeUnavailableDetail = encodeDetail;
 
 			if (supportsMetalObjects)
 			{
@@ -277,6 +389,13 @@ final class VulkanDevice implements AutoCloseable
 		return supportsVideoQueue
 			&& supportsVideoEncodeQueue
 			&& videoEncodeQueueFamily >= 0;
+	}
+
+	/** Why the encode queue wasn't created despite extension-level capability;
+	 *  null when it was, or when the device lacks capability entirely. */
+	String videoEncodeUnavailableDetail()
+	{
+		return videoEncodeUnavailableDetail;
 	}
 
 	boolean supportsVideoEncodeH264()
@@ -440,6 +559,15 @@ final class VulkanDevice implements AutoCloseable
 			}
 		}
 		return -1;
+	}
+
+	private static int queueFamilyQueueCount(VkPhysicalDevice pd, int family, MemoryStack stack)
+	{
+		IntBuffer count = stack.mallocInt(1);
+		vkGetPhysicalDeviceQueueFamilyProperties(pd, count, null);
+		VkQueueFamilyProperties.Buffer fams = VkQueueFamilyProperties.calloc(count.get(0), stack);
+		vkGetPhysicalDeviceQueueFamilyProperties(pd, count, fams);
+		return family >= 0 && family < fams.capacity() ? fams.get(family).queueCount() : 0;
 	}
 
 	private static int findVideoEncodeQueueFamily(VkPhysicalDevice pd, MemoryStack stack)

@@ -654,6 +654,7 @@ final class VulkanRenderer implements AutoCloseable
 				stats.screenshotReadbackBytes.addAndGet((long) targetWidth * targetHeight * Integer.BYTES);
 				screenshotReadback.recordCopy(cmd, targetImage, targetWidth, targetHeight, sync.currentFrame());
 			}
+			recordAfterComposite(cmd, targetImage, targetWidth, targetHeight);
 			Vk.check("vkEndCommandBuffer", vkEndCommandBuffer(cmd));
 			return;
 		}
@@ -775,8 +776,20 @@ final class VulkanRenderer implements AutoCloseable
 			stats.screenshotReadbackBytes.addAndGet((long) targetWidth * targetHeight * Integer.BYTES);
 			screenshotReadback.recordCopy(cmd, targetImage, targetWidth, targetHeight, sync.currentFrame());
 		}
+		recordAfterComposite(cmd, targetImage, targetWidth, targetHeight);
 
 		Vk.check("vkEndCommandBuffer", vkEndCommandBuffer(cmd));
+	}
+
+	private void recordAfterComposite(VkCommandBuffer cmd, long targetImage, int targetWidth, int targetHeight)
+	{
+		// Same layout the screenshot readback assumes: the render pass's
+		// finalLayout, which differs between the two present paths.
+		int imageLayout = device.supportsMetalObjects()
+			? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+			: KHRSwapchain.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+		renderExtensions.recordAfterComposite(new DefaultVulkanPostFrameContext(
+			cmd, targetImage, targetWidth, targetHeight, imageLayout, sync.currentFrame()));
 	}
 
 	private void recordRedirectedPass(MemoryStack stack, VkCommandBuffer cmd, ScenePassRedirect redirect,
