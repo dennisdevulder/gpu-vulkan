@@ -98,6 +98,13 @@ public interface VulkanRenderExtension extends AutoCloseable
 	 */
 	default void recordBeforeRenderPass(VkCommandBuffer commandBuffer) {}
 
+	/**
+	 * Non-null to redirect the scene pass into an extension-owned target
+	 * this frame (upscaling, full-scene post-processing). The first
+	 * registered extension returning non-null wins.
+	 */
+	default ScenePassRedirect scenePassRedirect() { return null; }
+
 	default void recordScenePass(VulkanFrameContext frame) {}
 
 	default void recordUiPass(VulkanFrameContext frame) {}

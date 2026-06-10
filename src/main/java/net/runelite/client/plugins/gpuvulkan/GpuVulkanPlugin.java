@@ -345,7 +345,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			!device.supportsMetalObjects());
 		disposables.add(renderPass);
 
-		gfx = Gfx.wrap(device, sync, renderPass);
+		gfx = Gfx.wrap(device, sync, renderPass, swapchain.imageFormat());
 		disposables.add(gfx);
 
 		textureArray = new TextureArray(device, textureProvider,
@@ -357,6 +357,10 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		renderExtensions = new RenderExtensions(
 			new DefaultVulkanRenderContext(client, config, gfx, device, sync, renderPass, textureArray, stats));
 		renderExtensions.register(new BaseRenderer());
+		if (config.upscalingMode() == GpuVulkanPluginConfig.UpscalingMode.FSR1)
+		{
+			renderExtensions.register(new FsrUpscalerExtension());
+		}
 		extensionQueue.attachQueued(renderExtensions);
 		disposables.add(renderExtensions);
 

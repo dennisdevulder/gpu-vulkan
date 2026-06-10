@@ -78,11 +78,6 @@ final class VulkanRenderer implements AutoCloseable
 	private final MsaaColorBuffer msaaColor; // null when MSAA is disabled
 	private final Framebuffers framebuffers;
 	private final ScreenshotReadback screenshotReadback;
-	private final RenderPass offscreenRenderPass;
-	private final RenderPass fsrIntermediateRenderPass;
-	private final FsrUpscaler fsrUpscaler;
-	private OffscreenSceneTarget offscreenScene;
-	private OffscreenSceneTarget fsrIntermediate;
 	private OffscreenSceneTarget customPresentTarget;
 	private DrawManager drawManager;
 	private Field drawManagerNextFrameField;
@@ -143,21 +138,6 @@ final class VulkanRenderer implements AutoCloseable
 		this.config = config;
 		this.gfx = gfx;
 		this.screenshotReadback = new ScreenshotReadback(device);
-		if (config.upscalingMode() == GpuVulkanPluginConfig.UpscalingMode.FSR1
-			&& config.renderScale() < 100)
-		{
-			this.offscreenRenderPass = new RenderPass(device, swapchain.imageFormat(), renderPass.samples(), false);
-			this.fsrIntermediateRenderPass = new RenderPass(device, swapchain.imageFormat(), VK_SAMPLE_COUNT_1_BIT, false);
-			this.fsrUpscaler = new FsrUpscaler(
-				Gfx.wrap(device, sync, fsrIntermediateRenderPass),
-				gfx);
-		}
-		else
-		{
-			this.offscreenRenderPass = null;
-			this.fsrIntermediateRenderPass = null;
-			this.fsrUpscaler = null;
-		}
 		// On macOS the swapchain is still created (we need its surface
 		// capabilities for format selection and its initial extent), but
 		// vkAcquireNextImageKHR / vkQueuePresentKHR are bypassed — we
@@ -621,28 +601,6 @@ final class VulkanRenderer implements AutoCloseable
 			customPresentTarget.close();
 			customPresentTarget = null;
 		}
-		if (fsrUpscaler != null)
-		{
-			fsrUpscaler.close();
-		}
-		if (fsrIntermediate != null)
-		{
-			fsrIntermediate.close();
-			fsrIntermediate = null;
-		}
-		if (offscreenScene != null)
-		{
-			offscreenScene.close();
-			offscreenScene = null;
-		}
-		if (fsrIntermediateRenderPass != null)
-		{
-			fsrIntermediateRenderPass.close();
-		}
-		if (offscreenRenderPass != null)
-		{
-			offscreenRenderPass.close();
-		}
 		screenshotReadback.close();
 		// vkDestroyCommandPool implicitly frees all command buffers allocated
 		// from it (per spec). Don't pre-reset them: that was added as a
@@ -687,9 +645,10 @@ final class VulkanRenderer implements AutoCloseable
 		renderExtensions.recordBeforeRenderPass(cmd);
 		stats.addNanos(stats.beforeRenderPassNanos, start);
 
-		if (fsrUpscaler != null)
+		ScenePassRedirect redirect = renderExtensions.scenePassRedirect();
+		if (redirect != null)
 		{
-			recordFsrUpscaledPass(stack, cmd, framebuffer, targetWidth, targetHeight);
+			recordRedirectedPass(stack, cmd, redirect, framebuffer, targetWidth, targetHeight);
 			if (screenshotReadbackRequested)
 			{
 				stats.screenshotReadbackBytes.addAndGet((long) targetWidth * targetHeight * Integer.BYTES);
@@ -820,33 +779,10 @@ final class VulkanRenderer implements AutoCloseable
 		Vk.check("vkEndCommandBuffer", vkEndCommandBuffer(cmd));
 	}
 
-	private void recordFsrUpscaledPass(MemoryStack stack, VkCommandBuffer cmd,
-									   long framebuffer, int targetWidth, int targetHeight)
+	private void recordRedirectedPass(MemoryStack stack, VkCommandBuffer cmd, ScenePassRedirect redirect,
+									  long framebuffer, int targetWidth, int targetHeight)
 	{
-		int scalePct = Math.max(50, Math.min(100, config.renderScale()));
-		int lowWidth = Math.max(1, (targetWidth * scalePct) / 100);
-		int lowHeight = Math.max(1, (targetHeight * scalePct) / 100);
-		if (offscreenScene == null || fsrIntermediate == null)
-		{
-			if (offscreenScene == null)
-			{
-				offscreenScene = new OffscreenSceneTarget(device, offscreenRenderPass,
-					lowWidth, lowHeight, swapchain.imageFormat(), renderPass.samples());
-			}
-			if (fsrIntermediate == null)
-			{
-				fsrIntermediate = new OffscreenSceneTarget(device, fsrIntermediateRenderPass,
-					targetWidth, targetHeight, swapchain.imageFormat(), VK_SAMPLE_COUNT_1_BIT);
-			}
-		}
-		if (offscreenScene.width() != lowWidth || offscreenScene.height() != lowHeight
-			|| fsrIntermediate.width() != targetWidth || fsrIntermediate.height() != targetHeight)
-		{
-			Vk.check("vkDeviceWaitIdle", vkDeviceWaitIdle(device.handle()));
-			fsrUpscaler.clearBindings();
-			offscreenScene.recreate(lowWidth, lowHeight);
-			fsrIntermediate.recreate(targetWidth, targetHeight);
-		}
+		GfxRenderTarget sceneTarget = (GfxRenderTarget) redirect.sceneTarget(targetWidth, targetHeight);
 
 		float skyR = ((skyboxColor >> 16) & 0xFF) / 255f;
 		float skyG = ((skyboxColor >>  8) & 0xFF) / 255f;
@@ -857,44 +793,17 @@ final class VulkanRenderer implements AutoCloseable
 
 		VkRenderPassBeginInfo sceneRp = VkRenderPassBeginInfo.calloc(stack)
 			.sType$Default()
-			.renderPass(offscreenRenderPass.handle())
-			.framebuffer(offscreenScene.framebuffer())
-			.renderArea(r -> r.offset(o -> o.set(0, 0)).extent(e -> e.set(lowWidth, lowHeight)))
+			.renderPass(sceneTarget.renderPassHandle())
+			.framebuffer(sceneTarget.framebuffer())
+			.renderArea(r -> r.offset(o -> o.set(0, 0)).extent(e -> e.set(sceneTarget.width(), sceneTarget.height())))
 			.pClearValues(clears);
 		vkCmdBeginRenderPass(cmd, sceneRp, VK_SUBPASS_CONTENTS_INLINE);
 
-		VulkanFrameContext sceneFrame = setupSceneViewportAndFrame(stack, cmd, lowWidth, lowHeight);
+		VulkanFrameContext sceneFrame = setupSceneViewportAndFrame(stack, cmd, sceneTarget.width(), sceneTarget.height());
 		renderExtensions.recordScenePass(sceneFrame);
 		vkCmdEndRenderPass(cmd);
 
-		transitionImage(stack, cmd, offscreenScene.colorImage(),
-			VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-			VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-			VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-			VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-			VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-			VK_ACCESS_SHADER_READ_BIT);
-
-		VkRenderPassBeginInfo easuRp = VkRenderPassBeginInfo.calloc(stack)
-			.sType$Default()
-			.renderPass(fsrIntermediateRenderPass.handle())
-			.framebuffer(fsrIntermediate.framebuffer())
-			.renderArea(r -> r.offset(o -> o.set(0, 0)).extent(e -> e.set(targetWidth, targetHeight)))
-			.pClearValues(clears);
-		vkCmdBeginRenderPass(cmd, easuRp, VK_SUBPASS_CONTENTS_INLINE);
-
-		fsrUpscaler.bindEasuSource(offscreenScene.colorView(), offscreenScene.sampler());
-		fsrUpscaler.recordEasu(cmd, targetWidth, targetHeight,
-			offscreenScene.width(), offscreenScene.height());
-		vkCmdEndRenderPass(cmd);
-
-		transitionImage(stack, cmd, fsrIntermediate.colorImage(),
-			VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-			VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-			VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-			VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-			VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-			VK_ACCESS_SHADER_READ_BIT);
+		redirect.recordAfterScene(cmd);
 
 		VkRenderPassBeginInfo mainRp = VkRenderPassBeginInfo.calloc(stack)
 			.sType$Default()
@@ -904,12 +813,9 @@ final class VulkanRenderer implements AutoCloseable
 			.pClearValues(clears);
 		vkCmdBeginRenderPass(cmd, mainRp, VK_SUBPASS_CONTENTS_INLINE);
 
-		fsrUpscaler.bindRcasSource(fsrIntermediate.colorView(), fsrIntermediate.sampler());
-		fsrUpscaler.recordRcas(cmd, targetWidth, targetHeight,
-			Math.max(0, Math.min(100, config.fsrSharpness())) / 100f);
-
-		VulkanFrameContext uiFrame = setupUiViewportAndFrame(stack, cmd, targetWidth, targetHeight);
-		renderExtensions.recordUiPass(uiFrame);
+		VulkanFrameContext resolveFrame = setupUiViewportAndFrame(stack, cmd, targetWidth, targetHeight);
+		redirect.recordResolve(resolveFrame);
+		renderExtensions.recordUiPass(resolveFrame);
 		vkCmdEndRenderPass(cmd);
 	}
 

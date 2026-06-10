@@ -244,6 +244,29 @@ final class RenderExtensions implements AutoCloseable
 		}
 	}
 
+	synchronized ScenePassRedirect scenePassRedirect()
+	{
+		for (int i = 0; i < extensions.size(); )
+		{
+			VulkanRenderExtension extension = extensions.get(i);
+			try
+			{
+				ScenePassRedirect redirect = extension.scenePassRedirect();
+				if (redirect != null)
+				{
+					return redirect;
+				}
+				i++;
+			}
+			catch (RuntimeException e)
+			{
+				extensions.remove(i);
+				closeFailedExtension(extension, "scenePassRedirect", e);
+			}
+		}
+		return null;
+	}
+
 	synchronized void recordBeforeRenderPass(VkCommandBuffer commandBuffer)
 	{
 		for (int i = 0; i < extensions.size(); )
