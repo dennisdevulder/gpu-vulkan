@@ -48,6 +48,20 @@ not a renderer improvement unless it preserves these rules in normal gameplay.
   command counts, vertices, upload bytes, readback bytes, CPU timing, or model
   emission timing.
 
+## Extension-Owned Passes
+
+- A `ScenePassRedirect` extension owns the scene's color output for the
+  frame: it must end every pass it begins, leave no pass open on entry to or
+  exit from `recordAfterScene`, and draw a full-viewport resolve in
+  `recordResolve` (the UI composites on top in the same pass).
+- Pipelines used inside an extension-owned `RenderTarget` pass must be
+  created from that target's `device()`; pipelines from the main device are
+  only valid in the final on-screen pass.
+- Targets are not transitioned for sampling automatically — call
+  `prepareForSampling` after the pass that wrote them, outside any pass.
+- When `RenderTarget.resize` returns true, every bind group referencing that
+  target is stale and must be recreated before the next draw using it.
+
 ## Offload Gate
 
 GPU offload may only replace CPU emission after a per-class parity record proves

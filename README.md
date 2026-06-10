@@ -153,10 +153,36 @@ device has a video encode queue and H.264/H.265/AV1 encode extensions. The
 current backend does not create an encode queue yet, so consumers must check
 `VulkanEncodeContext.isAvailable()` before using queue handles.
 
-The API is intentionally narrow right now. It is meant to establish the
-backend boundary for future RuneLite Vulkan work, not to guarantee that HD
-plugins can already swap in advanced materials, lighting, shadows, or
-post-processing without additional API design.
+### What the gfx layer covers
+
+`RenderDevice` (via `VulkanRenderContext.renderer()`) creates SPIR-V shader
+modules, bind group layouts/groups, render pipelines (with optional vertex
+input), GPU buffers (vertex/index/uniform/storage), compute pipelines,
+streaming images, and offscreen `RenderTarget`s. `RenderEncoder` records
+draws, indexed draws, compute dispatches, and extension-owned render passes
+(`beginPass`/`endPass`/`prepareForSampling`). Anything not covered drops to
+the raw handles on `VulkanRenderContext` plus the raw `VkCommandBuffer`
+hooks — see `docs/RENDERER_CONTRACT.md` for the invariants you must keep.
+
+### Worked example: the FSR upscaler
+
+The bundled FSR 1.0 upscaler (`FsrUpscalerExtension`) is implemented
+entirely against this public API and is the reference for full-scene
+post-processing via `ScenePassRedirect`:
+
+1. `scenePassRedirect()` returns non-null when upscaling is active; the
+   backend then renders the 3D scene into the extension's low-resolution
+   `RenderTarget` instead of the screen.
+2. `recordAfterScene(cmd)` runs between passes: it transitions the scene
+   target for sampling and records an EASU pass into a full-resolution
+   intermediate target it owns.
+3. `recordResolve(frame)` runs inside the final on-screen pass, drawing the
+   RCAS-sharpened result just before the UI composite.
+
+Resize handling, bind-group lifetime on target recreation, pipeline
+compatibility (pipelines come from `RenderTarget.device()` for offscreen
+passes), and pass bracketing are all visible in that one file — start there
+before writing your own extension.
 
 ## Repo layout
 
