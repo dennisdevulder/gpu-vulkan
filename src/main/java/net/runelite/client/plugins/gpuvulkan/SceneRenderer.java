@@ -171,6 +171,12 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	/** Vertex buffer currently bound in the pass being recorded; statics draw
 	 *  from the VRAM mirror, frame arenas from the host buffer. */
 	private long boundVertexBuffer;
+	/** Per-zone frustum visibility, recomputed from each pass's MVP. The
+	 *  engine only invokes ~20 zones for stock GPU; without this we drew the
+	 *  whole radius square (~360 zones) and vertex-shaded everything behind
+	 *  the camera. -Dvkgpu.disableFrustumCull=true reverts. */
+	private final boolean[] zoneFrustumVisible = new boolean[ZONE_COUNT];
+	private static final boolean DISABLE_FRUSTUM_CULL = Boolean.getBoolean("vkgpu.disableFrustumCull");
 	private final DirtyZoneTracker dirtyZones = new DirtyZoneTracker(ZONE_COUNT);
 
 	private int vertexCount;
@@ -350,6 +356,69 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		writeVertexLimit = writeBaseVertex + maxFrameVertices;
 		writeBasePtr = MemoryUtil.memAddress(mapped) + staticBufferBytes() + (long) slot * slotBytes;
 		setWriteCursor(logicalVertex);
+	}
+
+	/**
+	 * Marks zones whose AABB intersects the view frustum of {@code m}
+	 * (Gribb-Hartmann plane extraction from the same column-major MVP the
+	 * vertices are transformed by, so it is exact for any projection,
+	 * including sub-worldview composed matrices). Y bounds are conservative
+	 * — OSRS heights are negative-up and bounded well inside this range.
+	 */
+	private boolean[] computeZoneFrustum(float[] m)
+	{
+		if (DISABLE_FRUSTUM_CULL)
+		{
+			java.util.Arrays.fill(zoneFrustumVisible, true);
+			return zoneFrustumVisible;
+		}
+		// Row i of the matrix: (m[i], m[i+4], m[i+8], m[i+12]).
+		// Vulkan clip volume: -w<=x<=w, -w<=y<=w, 0<=z<=w.
+		float[][] planes = new float[6][];
+		planes[0] = planeRowSum(m, 0, +1); // left:   w + x >= 0
+		planes[1] = planeRowSum(m, 0, -1); // right:  w - x >= 0
+		planes[2] = planeRowSum(m, 1, +1); // bottom: w + y >= 0
+		planes[3] = planeRowSum(m, 1, -1); // top:    w - y >= 0
+		planes[4] = new float[]{m[2], m[6], m[10], m[14]};   // near: z >= 0
+		planes[5] = planeRowSum(m, 2, -1); // far: w - z >= 0
+
+		final float yMin = -12000f;
+		final float yMax = 4000f;
+		for (int zx = 0; zx < ZONES_PER_SIDE; zx++)
+		{
+			float x0 = (capturedSceneOrigin + zx * ZONE_SIZE) * 128f;
+			float x1 = x0 + ZONE_SIZE * 128f;
+			for (int zz = 0; zz < ZONES_PER_SIDE; zz++)
+			{
+				float z0 = (capturedSceneOrigin + zz * ZONE_SIZE) * 128f;
+				float z1 = z0 + ZONE_SIZE * 128f;
+				boolean visible = true;
+				for (float[] pl : planes)
+				{
+					// p-vertex: the AABB corner most positive along the
+					// plane normal. If even that is outside, the box is out.
+					float px = pl[0] > 0 ? x1 : x0;
+					float py = pl[1] > 0 ? yMax : yMin;
+					float pz = pl[2] > 0 ? z1 : z0;
+					if (pl[0] * px + pl[1] * py + pl[2] * pz + pl[3] < 0)
+					{
+						visible = false;
+						break;
+					}
+				}
+				zoneFrustumVisible[zx * ZONES_PER_SIDE + zz] = visible;
+			}
+		}
+		return zoneFrustumVisible;
+	}
+
+	private static float[] planeRowSum(float[] m, int row, int sign)
+	{
+		return new float[]{
+			m[3] + sign * m[row],
+			m[7] + sign * m[row + 4],
+			m[11] + sign * m[row + 8],
+			m[15] + sign * m[row + 12]};
 	}
 
 	private void bindArena(VkCommandBuffer cmd, long bufferHandle)
@@ -1239,6 +1308,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		final int staticFirstVertex = 0;
 		boundVertexBuffer = VK_NULL_HANDLE;
 		bindArena(cmd, vbuf.staticDrawHandle());
+		zoneDrawScheduler.setZoneVisibility(computeZoneFrustum(mvp));
 		try (MemoryStack stack = stackPush())
 		{
 
@@ -1431,6 +1501,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		final int staticFirstVertex = 0;
 		boundVertexBuffer = VK_NULL_HANDLE;
 		bindArena(cmd, vbuf.staticDrawHandle());
+		zoneDrawScheduler.setZoneVisibility(computeZoneFrustum(mvp));
 		try (MemoryStack stack = stackPush())
 		{
 

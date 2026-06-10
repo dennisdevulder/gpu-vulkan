@@ -22,6 +22,19 @@ final class SceneZoneDrawScheduler
 
 	private int[] overlaySkipScratch = new int[256];
 	private int[] combinedSkipScratch = new int[256];
+	/** Per-zone frustum visibility for the pass being recorded; null = all
+	 *  visible. Set by SceneRenderer from the pass's MVP before drawing. */
+	private boolean[] zoneVisible;
+
+	void setZoneVisibility(boolean[] mask)
+	{
+		zoneVisible = mask;
+	}
+
+	private boolean zoneCulled(int zoneIdx)
+	{
+		return zoneVisible != null && !zoneVisible[zoneIdx];
+	}
 
 	SceneZoneDrawScheduler(SceneDrawEmitter drawEmitter,
 		int zonesPerSide, int zoneCount,
@@ -84,7 +97,7 @@ final class SceneZoneDrawScheduler
 			for (int zz = minZoneZ; zz <= maxZoneZ; zz++)
 			{
 				int zoneIdx = zx * zonesPerSide + zz;
-				if (!hasOverlayRange(slot, layer, plane, zoneIdx))
+				if (zoneCulled(zoneIdx) || !hasOverlayRange(slot, layer, plane, zoneIdx))
 				{
 					continue;
 				}
@@ -161,6 +174,10 @@ final class SceneZoneDrawScheduler
 			for (int zz = minZoneZ; zz <= maxZoneZ; zz++)
 			{
 				int zoneIdx = zx * zonesPerSide + zz;
+				if (zoneCulled(zoneIdx))
+				{
+					continue;
+				}
 				// A rebuilt zone replaces its static counterpart even when
 				// the rebuild emitted zero vertices (object removed).
 				if (overlayZoneValid[slot][zoneIdx])
