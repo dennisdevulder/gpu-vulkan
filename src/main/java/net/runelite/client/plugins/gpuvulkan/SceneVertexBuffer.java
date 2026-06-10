@@ -55,8 +55,13 @@ final class SceneVertexBuffer implements AutoCloseable
 {
 	private final VulkanDevice device;
 	private final Buffer vertexBuffer;
+	/** Device-local mirror of the static region, uploaded after capture.
+	 *  Null when the host buffer already landed in device-local memory
+	 *  (UMA, ReBAR) — there a mirror would just duplicate VRAM. */
+	private final Buffer staticMirror;
 	private final ByteBuffer mapped;
 	private final long slotBytes;
+	private final long staticBytes;
 	private final long descriptorPool;
 	private final long descriptorSet;
 
@@ -65,15 +70,38 @@ final class SceneVertexBuffer implements AutoCloseable
 	{
 		this.device = device;
 		this.slotBytes = slotBytes;
+		this.staticBytes = totalBytes - slotBytes * FrameSync.FRAMES_IN_FLIGHT;
 		// Prefer BAR/ReBAR memory — on discrete cards plain host memory puts
 		// every per-frame vertex fetch across PCIe.
 		this.vertexBuffer = new Buffer(device, totalBytes,
-			VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+			VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
 			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
 			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
 				| VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 		vertexBuffer.mapPersistent();
 		this.mapped = vertexBuffer.mappedByteBuffer().order(ByteOrder.nativeOrder());
+
+		// Without ReBAR the big allocation falls back to plain host memory and
+		// the GPU would fetch every static vertex across PCIe each frame —
+		// mirror the static region into VRAM and draw statics from there.
+		boolean hostIsDeviceLocal =
+			(vertexBuffer.memoryPropertyFlags() & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
+		Buffer mirror = null;
+		if (!hostIsDeviceLocal)
+		{
+			try
+			{
+				mirror = new Buffer(device, staticBytes,
+					VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+					VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+			}
+			catch (RuntimeException e)
+			{
+				// VRAM too small for the mirror — statics draw from host
+				// memory like before, slower but functional.
+			}
+		}
+		this.staticMirror = mirror;
 
 		try (MemoryStack stack = stackPush())
 		{
@@ -137,11 +165,37 @@ final class SceneVertexBuffer implements AutoCloseable
 	long slotBytes() { return slotBytes; }
 	long descriptorSet() { return descriptorSet; }
 
+	/** Buffer static-region draws should bind: the VRAM mirror when one
+	 *  exists, otherwise the host buffer (same offsets either way). */
+	long staticDrawHandle()
+	{
+		return staticMirror != null ? staticMirror.handle() : vertexBuffer.handle();
+	}
+
+	boolean hasStaticMirror()
+	{
+		return staticMirror != null;
+	}
+
+	long staticMirrorHandle()
+	{
+		return staticMirror != null ? staticMirror.handle() : VK_NULL_HANDLE;
+	}
+
+	long staticBytes()
+	{
+		return staticBytes;
+	}
+
 	@Override
 	public void close()
 	{
 		// vkDestroyDescriptorPool implicitly frees all sets allocated from it.
 		vkDestroyDescriptorPool(device.handle(), descriptorPool, null);
+		if (staticMirror != null)
+		{
+			staticMirror.close();
+		}
 		vertexBuffer.close();
 	}
 }

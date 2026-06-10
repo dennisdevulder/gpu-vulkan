@@ -19,9 +19,17 @@ import net.runelite.api.SceneTilePaint;
 import net.runelite.api.Tile;
 import net.runelite.api.WallObject;
 import net.runelite.api.hooks.DrawCallbacks;
+import java.nio.LongBuffer;
+import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
+import org.lwjgl.vulkan.VkBufferCopy;
 import org.lwjgl.vulkan.VkCommandBuffer;
+import org.lwjgl.vulkan.VkCommandBufferAllocateInfo;
+import org.lwjgl.vulkan.VkCommandBufferBeginInfo;
+import org.lwjgl.vulkan.VkCommandPoolCreateInfo;
+import org.lwjgl.vulkan.VkFenceCreateInfo;
+import org.lwjgl.vulkan.VkSubmitInfo;
 
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK13.*;
@@ -156,6 +164,13 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	private boolean rebuildingOverlayZone;
 	/** Sorted [start, end) pairs of vertex sub-ranges to skip this frame. */
 	private int[] skipScratch = new int[256];
+	/** One-shot upload of the static region into the VRAM mirror (lazy). */
+	private long uploadCommandPool = VK_NULL_HANDLE;
+	private VkCommandBuffer uploadCommandBuffer;
+	private long uploadFence = VK_NULL_HANDLE;
+	/** Vertex buffer currently bound in the pass being recorded; statics draw
+	 *  from the VRAM mirror, frame arenas from the host buffer. */
+	private long boundVertexBuffer;
 	private final DirtyZoneTracker dirtyZones = new DirtyZoneTracker(ZONE_COUNT);
 
 	private int vertexCount;
@@ -337,6 +352,19 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		setWriteCursor(logicalVertex);
 	}
 
+	private void bindArena(VkCommandBuffer cmd, long bufferHandle)
+	{
+		if (boundVertexBuffer == bufferHandle)
+		{
+			return;
+		}
+		boundVertexBuffer = bufferHandle;
+		try (MemoryStack stack = stackPush())
+		{
+			vkCmdBindVertexBuffers(cmd, 0, stack.longs(bufferHandle), stack.longs(0L));
+		}
+	}
+
 	private void setWriteCursor(int logicalVertex)
 	{
 		writePtr = writeBasePtr + (long) (logicalVertex - writeBaseVertex) * ScenePipeline.VERTEX_STRIDE;
@@ -488,6 +516,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 					log.warn("Scene demand {} verts exceeds static arena cap {}; geometry truncated",
 						demand, maxStaticVertices);
 				}
+				uploadStaticMirror();
 				return;
 			}
 			int target = Math.min(MAX_STATIC_VERTICES_HARD_CAP,
@@ -495,6 +524,71 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			log.info("Static scene arena overflow (demand {} verts, capacity {}), growing to {} and recapturing",
 				demand, maxStaticVertices, target);
 			growStaticArena(target);
+		}
+	}
+
+	/**
+	 * Copies the used static region from the host buffer into the VRAM
+	 * mirror (no-op on UMA/ReBAR systems where the host buffer is already
+	 * device-local). Runs on the client thread with the device idle —
+	 * captureScene drained before rewriting, and nothing has been submitted
+	 * since.
+	 */
+	private void uploadStaticMirror()
+	{
+		if (!vbuf.hasStaticMirror() || staticVertexCount() == 0)
+		{
+			return;
+		}
+		long bytes = (long) staticVertexCount() * ScenePipeline.VERTEX_STRIDE;
+		try (MemoryStack stack = stackPush())
+		{
+			if (uploadCommandPool == VK_NULL_HANDLE)
+			{
+				VkCommandPoolCreateInfo poolInfo = VkCommandPoolCreateInfo.calloc(stack)
+					.sType$Default()
+					.flags(VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT)
+					.queueFamilyIndex(device.graphicsQueueFamily());
+				LongBuffer pPool = stack.mallocLong(1);
+				Vk.check("vkCreateCommandPool (static upload)",
+					vkCreateCommandPool(device.handle(), poolInfo, null, pPool));
+				uploadCommandPool = pPool.get(0);
+
+				VkCommandBufferAllocateInfo alloc = VkCommandBufferAllocateInfo.calloc(stack)
+					.sType$Default()
+					.commandPool(uploadCommandPool)
+					.level(VK_COMMAND_BUFFER_LEVEL_PRIMARY)
+					.commandBufferCount(1);
+				PointerBuffer pCmd = stack.mallocPointer(1);
+				Vk.check("vkAllocateCommandBuffers (static upload)",
+					vkAllocateCommandBuffers(device.handle(), alloc, pCmd));
+				uploadCommandBuffer = new VkCommandBuffer(pCmd.get(0), device.handle());
+
+				VkFenceCreateInfo fenceInfo = VkFenceCreateInfo.calloc(stack).sType$Default();
+				LongBuffer pFence = stack.mallocLong(1);
+				Vk.check("vkCreateFence (static upload)",
+					vkCreateFence(device.handle(), fenceInfo, null, pFence));
+				uploadFence = pFence.get(0);
+			}
+
+			Vk.check("vkResetCommandBuffer (static upload)", vkResetCommandBuffer(uploadCommandBuffer, 0));
+			VkCommandBufferBeginInfo begin = VkCommandBufferBeginInfo.calloc(stack)
+				.sType$Default()
+				.flags(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+			Vk.check("vkBeginCommandBuffer (static upload)", vkBeginCommandBuffer(uploadCommandBuffer, begin));
+			VkBufferCopy.Buffer region = VkBufferCopy.calloc(1, stack);
+			region.get(0).srcOffset(0).dstOffset(0).size(bytes);
+			vkCmdCopyBuffer(uploadCommandBuffer, vbuf.handle(), vbuf.staticMirrorHandle(), region);
+			Vk.check("vkEndCommandBuffer (static upload)", vkEndCommandBuffer(uploadCommandBuffer));
+
+			VkSubmitInfo submit = VkSubmitInfo.calloc(stack)
+				.sType$Default()
+				.pCommandBuffers(stack.pointers(uploadCommandBuffer));
+			Vk.check("vkQueueSubmit (static upload)",
+				vkQueueSubmit(device.graphicsQueue(), submit, uploadFence));
+			Vk.check("vkWaitForFences (static upload)",
+				vkWaitForFences(device.handle(), stack.longs(uploadFence), true, 10_000_000_000L));
+			Vk.check("vkResetFences (static upload)", vkResetFences(device.handle(), stack.longs(uploadFence)));
 		}
 	}
 
@@ -1143,11 +1237,10 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		final int slot = sync.currentFrame();
 		final int slotFirstVertex = maxStaticVertices + slot * maxFrameVertices - staticVertexCount();
 		final int staticFirstVertex = 0;
+		boundVertexBuffer = VK_NULL_HANDLE;
+		bindArena(cmd, vbuf.staticDrawHandle());
 		try (MemoryStack stack = stackPush())
 		{
-			vkCmdBindVertexBuffers(cmd, 0,
-				stack.longs(vbuf.handle()),
-				stack.longs(0L));
 
 			// Vertex push (96 bytes): mat4 mvp + vec4 fogVtx + ivec4 (tick, entity placement).
 			ByteBuffer vertPush = stack.malloc(96);
@@ -1264,6 +1357,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 				{
 					int dynamicStart = overlayNextVertex[slot];
 					int dynamicEnd = dynamicOpaqueEnd >= dynamicStart ? Math.min(dynamicOpaqueEnd, regionEnd) : regionEnd;
+					bindArena(cmd, vbuf.handle());
 					drawEmitter.drawRange(cmd, dynamicStart, dynamicEnd, priorityRanges.skipPairs(), priorityRanges.count(), priorityRanges.count() > 0, slotFirstVertex,
 						want.layout(), vertPush, fragPush);
 				}
@@ -1275,10 +1369,12 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 					// chopped when their roof id is hidden.
 					for (int p = loMin; p <= loMax; p++)
 					{
+						bindArena(cmd, vbuf.staticDrawHandle());
 						zoneDrawScheduler.drawStaticPlane(cmd, i, p, layerStart,
 							fullZoneRange, minZoneX, maxZoneX, minZoneZ, maxZoneZ,
 							skipScratch, skipPairs, p > loCur,
 							slot, staticFirstVertex, want.layout(), vertPush, fragPush);
+						bindArena(cmd, vbuf.handle());
 						zoneDrawScheduler.drawOverlayPlane(cmd, i, p, minZoneX, maxZoneX, minZoneZ, maxZoneZ,
 							skipScratch, skipPairs, p > loCur,
 							slot, slotFirstVertex, want.layout(), vertPush, fragPush);
@@ -1289,6 +1385,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 
 			if (priorityRanges.count() > 0)
 			{
+				bindArena(cmd, vbuf.handle());
 				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, priorityColorPipeline.handle());
 				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
 					priorityColorPipeline.layout(), 0, stack.longs(descriptorSet), null);
@@ -1328,11 +1425,10 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		final int slot = sync.currentFrame();
 		final int slotFirstVertex = maxStaticVertices + slot * maxFrameVertices - staticVertexCount();
 		final int staticFirstVertex = 0;
+		boundVertexBuffer = VK_NULL_HANDLE;
+		bindArena(cmd, vbuf.staticDrawHandle());
 		try (MemoryStack stack = stackPush())
 		{
-			vkCmdBindVertexBuffers(cmd, 0,
-				stack.longs(vbuf.handle()),
-				stack.longs(0L));
 
 			ByteBuffer vertPush = stack.malloc(96);
 			Mat4Ops.writeTo(vertPush, mvp);
@@ -1417,6 +1513,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			{
 				int dynamicStart = overlayNextVertex[slot];
 				int dynamicEnd = dynamicOpaqueEnd >= dynamicStart ? Math.min(dynamicOpaqueEnd, regionEnd) : regionEnd;
+				bindArena(cmd, vbuf.handle());
 				drawEmitter.drawRange(cmd, dynamicStart, dynamicEnd, priorityRanges.skipPairs(), priorityRanges.count(),
 					false, slotFirstVertex, pipelineLayout, vertPush, fragPush);
 			}
@@ -1428,10 +1525,12 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 				}
 				for (int p = loMin; p <= loMax; p++)
 				{
+					bindArena(cmd, vbuf.staticDrawHandle());
 					zoneDrawScheduler.drawStaticPlane(cmd, i, p, layerStart,
 						fullZoneRange, minZoneX, maxZoneX, minZoneZ, maxZoneZ,
 						skips, skipPairs, p > currentPlane,
 						slot, staticFirstVertex, pipelineLayout, vertPush, fragPush);
+					bindArena(cmd, vbuf.handle());
 					zoneDrawScheduler.drawOverlayPlane(cmd, i, p, minZoneX, maxZoneX, minZoneZ, maxZoneZ,
 						skips, skipPairs, p > currentPlane,
 						slot, slotFirstVertex, pipelineLayout, vertPush, fragPush);
@@ -1616,6 +1715,16 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	public void close()
 	{
 		vkDeviceWaitIdle(device.handle());
+		if (uploadCommandPool != VK_NULL_HANDLE)
+		{
+			vkDestroyCommandPool(device.handle(), uploadCommandPool, null);
+			uploadCommandPool = VK_NULL_HANDLE;
+		}
+		if (uploadFence != VK_NULL_HANDLE)
+		{
+			vkDestroyFence(device.handle(), uploadFence, null);
+			uploadFence = VK_NULL_HANDLE;
+		}
 		vbuf.close();
 		fillPipeline.close();
 		alphaPipeline.close();
