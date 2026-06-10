@@ -287,8 +287,16 @@ final class GfxStreamingImage implements StreamingImage
 		vkDeviceWaitIdle(device.handle());
 		for (int i = 0; i < FrameSync.FRAMES_IN_FLIGHT; i++)
 		{
-			if (textures[i] != null) textures[i].close();
-			if (stagings[i] != null) stagings[i].close();
+			if (textures[i] != null)
+			{
+				textures[i].close();
+				textures[i] = null;
+			}
+			if (stagings[i] != null)
+			{
+				stagings[i].close();
+				stagings[i] = null;
+			}
 		}
 	}
 }

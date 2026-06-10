@@ -132,7 +132,7 @@ final class OffscreenSceneTarget implements AutoCloseable
 			LongBuffer pMem = stack.mallocLong(1);
 			Vk.check("vkAllocateMemory (offscreen scene)", vkAllocateMemory(device.handle(), alloc, null, pMem));
 			colorMemory = pMem.get(0);
-			vkBindImageMemory(device.handle(), colorImage, colorMemory, 0);
+			Vk.check("vkBindImageMemory (offscreen scene)", vkBindImageMemory(device.handle(), colorImage, colorMemory, 0));
 
 			VkImageViewCreateInfo viewInfo = VkImageViewCreateInfo.calloc(stack)
 				.sType$Default()

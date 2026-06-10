@@ -382,22 +382,40 @@ final class VulkanDevice implements AutoCloseable
 	private static Picked pickDeviceAndQueueFamily(VulkanInstance instance, VulkanSurface surface, MemoryStack stack)
 	{
 		IntBuffer count = stack.mallocInt(1);
-		vkEnumeratePhysicalDevices(instance.handle(), count, null);
+		Vk.check("vkEnumeratePhysicalDevices (count)",
+			vkEnumeratePhysicalDevices(instance.handle(), count, null));
 		if (count.get(0) == 0)
 		{
 			throw new RuntimeException("No Vulkan-capable GPU found");
 		}
 		PointerBuffer devs = stack.mallocPointer(count.get(0));
-		vkEnumeratePhysicalDevices(instance.handle(), count, devs);
+		Vk.check("vkEnumeratePhysicalDevices",
+			vkEnumeratePhysicalDevices(instance.handle(), count, devs));
 
+		// Hybrid laptops often enumerate the integrated GPU first.
+		Picked fallback = null;
 		for (int i = 0; i < devs.capacity(); i++)
 		{
 			VkPhysicalDevice pd = new VkPhysicalDevice(devs.get(i), instance.handle());
 			int qf = findGraphicsAndPresentQueueFamily(pd, surface, stack);
-			if (qf >= 0)
+			if (qf < 0)
+			{
+				continue;
+			}
+			VkPhysicalDeviceProperties props = VkPhysicalDeviceProperties.calloc(stack);
+			vkGetPhysicalDeviceProperties(pd, props);
+			if (props.deviceType() == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU)
 			{
 				return new Picked(pd, qf);
 			}
+			if (fallback == null)
+			{
+				fallback = new Picked(pd, qf);
+			}
+		}
+		if (fallback != null)
+		{
+			return fallback;
 		}
 		throw new RuntimeException("No Vulkan device with combined graphics+present queue on this surface");
 	}
@@ -413,7 +431,8 @@ final class VulkanDevice implements AutoCloseable
 		for (int i = 0; i < fams.capacity(); i++)
 		{
 			boolean graphics = (fams.get(i).queueFlags() & VK_QUEUE_GRAPHICS_BIT) != 0;
-			vkGetPhysicalDeviceSurfaceSupportKHR(pd, i, surface.handle(), pSupport);
+			Vk.check("vkGetPhysicalDeviceSurfaceSupportKHR",
+				vkGetPhysicalDeviceSurfaceSupportKHR(pd, i, surface.handle(), pSupport));
 			boolean present = pSupport.get(0) == VK_TRUE;
 			if (graphics && present)
 			{
@@ -443,11 +462,13 @@ final class VulkanDevice implements AutoCloseable
 	private static Set<String> enumerateDeviceExtensions(MemoryStack stack, VkPhysicalDevice pd)
 	{
 		IntBuffer count = stack.mallocInt(1);
-		vkEnumerateDeviceExtensionProperties(pd, (CharSequence) null, count, null);
+		Vk.check("vkEnumerateDeviceExtensionProperties (count)",
+			vkEnumerateDeviceExtensionProperties(pd, (CharSequence) null, count, null));
 		Set<String> extensions = new HashSet<>();
 		if (count.get(0) == 0) return extensions;
 		VkExtensionProperties.Buffer props = VkExtensionProperties.calloc(count.get(0), stack);
-		vkEnumerateDeviceExtensionProperties(pd, (CharSequence) null, count, props);
+		Vk.check("vkEnumerateDeviceExtensionProperties",
+			vkEnumerateDeviceExtensionProperties(pd, (CharSequence) null, count, props));
 		for (int i = 0; i < props.capacity(); i++)
 		{
 			extensions.add(props.get(i).extensionNameString());

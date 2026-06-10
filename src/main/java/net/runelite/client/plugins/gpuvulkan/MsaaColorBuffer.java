@@ -120,7 +120,7 @@ final class MsaaColorBuffer implements AutoCloseable
 				throw new RuntimeException("vkAllocateMemory (msaa color) failed");
 			}
 			memory = pMem.get(0);
-			vkBindImageMemory(device.handle(), image, memory, 0);
+			Vk.check("vkBindImageMemory (msaa color)", vkBindImageMemory(device.handle(), image, memory, 0));
 
 			VkImageViewCreateInfo viewInfo = VkImageViewCreateInfo.calloc(stack)
 				.sType$Default()

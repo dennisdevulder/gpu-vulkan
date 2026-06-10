@@ -128,8 +128,8 @@ final class InterfaceRenderer implements AutoCloseable
 	@Override
 	public void close()
 	{
-		if (bindGroup != null) { bindGroup.close(); bindGroup = null; }
 		if (uiImage != null) { uiImage.close(); uiImage = null; }
+		if (bindGroup != null) { bindGroup.close(); bindGroup = null; }
 		pipeline.close();
 		vertex.close();
 		fragment.close();
@@ -143,16 +143,17 @@ final class InterfaceRenderer implements AutoCloseable
 			return;
 		}
 		// Bind group has the texture handles baked in, so it can't survive
-		// streaming-image teardown — recreate both on resize.
-		if (bindGroup != null)
-		{
-			bindGroup.close();
-			bindGroup = null;
-		}
+		// streaming-image teardown — recreate both on resize. Image closes
+		// first: its waitIdle must precede the descriptor pool destroy.
 		if (uiImage != null)
 		{
 			uiImage.close();
 			uiImage = null;
+		}
+		if (bindGroup != null)
+		{
+			bindGroup.close();
+			bindGroup = null;
 		}
 
 		this.width = w;

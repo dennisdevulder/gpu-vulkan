@@ -54,7 +54,7 @@ import static org.lwjgl.vulkan.VK13.*;
 final class RenderPass implements AutoCloseable
 {
 	private final VulkanDevice device;
-	private final long handle;
+	private long handle;
 	private final int samples;
 
 	RenderPass(VulkanDevice device, int colorFormat, int samples, boolean swapchainPresent)
@@ -142,12 +142,21 @@ final class RenderPass implements AutoCloseable
 			// regardless of whether the swapchain image happens to be the
 			// same one we used a few frames ago (UNDEFINED handles the
 			// content-discard half; this handles the write-ordering half).
+			// Offscreen targets are shared across frames in flight and read
+			// after the pass by blits/FSR sampling — the next frame's
+			// clear/draw must wait for those reads (WAR, execution-only).
+			int srcStages = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+				| VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+			if (!swapchainPresent)
+			{
+				srcStages |= VK_PIPELINE_STAGE_TRANSFER_BIT
+					| VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+			}
 			VkSubpassDependency.Buffer dep = VkSubpassDependency.calloc(1, stack);
 			dep.get(0)
 				.srcSubpass(VK_SUBPASS_EXTERNAL)
 				.dstSubpass(0)
-				.srcStageMask(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-					| VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT)
+				.srcStageMask(srcStages)
 				.srcAccessMask(VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
 					| VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT)
 				.dstStageMask(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
@@ -180,6 +189,10 @@ final class RenderPass implements AutoCloseable
 	@Override
 	public void close()
 	{
-		vkDestroyRenderPass(device.handle(), handle, null);
+		if (handle != VK_NULL_HANDLE)
+		{
+			vkDestroyRenderPass(device.handle(), handle, null);
+			handle = VK_NULL_HANDLE;
+		}
 	}
 }

@@ -47,8 +47,8 @@ import static org.lwjgl.vulkan.VK13.*;
 final class Buffer implements AutoCloseable
 {
 	private final VulkanDevice device;
-	private final long handle;
-	private final long memory;
+	private long handle;
+	private long memory;
 	private final long size;
 	private final int memoryPropertyFlags;
 	private long mappedAddress;
@@ -85,20 +85,30 @@ final class Buffer implements AutoCloseable
 
 			int memType = findMemoryType(device, memReq.memoryTypeBits(), requiredMemoryProperties,
 				preferredMemoryProperties, stack);
-			memoryPropertyFlags = memoryTypeFlags(device, memType, stack);
+			int fallbackType = findMemoryType(device, memReq.memoryTypeBits(),
+				requiredMemoryProperties, stack);
 			VkMemoryAllocateInfo alloc = VkMemoryAllocateInfo.calloc(stack)
 				.sType$Default()
 				.allocationSize(memReq.size())
 				.memoryTypeIndex(memType);
 
 			LongBuffer pMem = stack.mallocLong(1);
-			if (vkAllocateMemory(device.handle(), alloc, null, pMem) != VK_SUCCESS)
+			int result = vkAllocateMemory(device.handle(), alloc, null, pMem);
+			if (result != VK_SUCCESS && fallbackType != memType)
+			{
+				// Preferred heap can be too small (e.g. 256 MB BAR window).
+				memType = fallbackType;
+				alloc.memoryTypeIndex(fallbackType);
+				result = vkAllocateMemory(device.handle(), alloc, null, pMem);
+			}
+			if (result != VK_SUCCESS)
 			{
 				vkDestroyBuffer(device.handle(), handle, null);
-				throw new RuntimeException("vkAllocateMemory failed");
+				throw new RuntimeException("vkAllocateMemory failed: " + result);
 			}
+			memoryPropertyFlags = memoryTypeFlags(device, memType, stack);
 			memory = pMem.get(0);
-			vkBindBufferMemory(device.handle(), handle, memory, 0);
+			Vk.check("vkBindBufferMemory", vkBindBufferMemory(device.handle(), handle, memory, 0));
 		}
 	}
 
@@ -229,8 +239,16 @@ final class Buffer implements AutoCloseable
 			mappedIntView = null;
 			mappedView = null;
 		}
-		vkDestroyBuffer(device.handle(), handle, null);
-		vkFreeMemory(device.handle(), memory, null);
+		if (handle != VK_NULL_HANDLE)
+		{
+			vkDestroyBuffer(device.handle(), handle, null);
+			handle = VK_NULL_HANDLE;
+		}
+		if (memory != VK_NULL_HANDLE)
+		{
+			vkFreeMemory(device.handle(), memory, null);
+			memory = VK_NULL_HANDLE;
+		}
 	}
 
 	static int findMemoryType(VulkanDevice device, int typeBits, int properties, MemoryStack stack)

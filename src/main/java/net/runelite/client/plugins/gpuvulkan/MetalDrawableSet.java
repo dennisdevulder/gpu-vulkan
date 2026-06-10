@@ -231,14 +231,17 @@ final class MetalDrawableSet implements AutoCloseable
 		if (e.framebuffer != VK_NULL_HANDLE)
 		{
 			vkDestroyFramebuffer(device.handle(), e.framebuffer, null);
+			e.framebuffer = VK_NULL_HANDLE;
 		}
 		if (e.view != VK_NULL_HANDLE)
 		{
 			vkDestroyImageView(device.handle(), e.view, null);
+			e.view = VK_NULL_HANDLE;
 		}
 		if (e.image != VK_NULL_HANDLE)
 		{
 			vkDestroyImage(device.handle(), e.image, null);
+			e.image = VK_NULL_HANDLE;
 		}
 		if (e.textureHandle != VK_NULL_HANDLE)
 		{

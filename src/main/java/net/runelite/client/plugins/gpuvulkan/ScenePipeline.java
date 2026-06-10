@@ -76,9 +76,9 @@ final class ScenePipeline implements AutoCloseable
 	static final int OFFSET_TEX_UV   = 16;
 
 	private final VulkanDevice device;
-	private final long descriptorSetLayout;
-	private final long pipelineLayout;
-	private final long pipeline;
+	private long descriptorSetLayout;
+	private long pipelineLayout;
+	private long pipeline;
 
 	ScenePipeline(VulkanDevice device, RenderPass renderPass, int polygonMode, boolean depthTest,
 				  int samples, boolean alphaToCoverage)
@@ -279,9 +279,21 @@ final class ScenePipeline implements AutoCloseable
 	@Override
 	public void close()
 	{
-		vkDestroyPipeline(device.handle(), pipeline, null);
-		vkDestroyPipelineLayout(device.handle(), pipelineLayout, null);
-		vkDestroyDescriptorSetLayout(device.handle(), descriptorSetLayout, null);
+		if (pipeline != VK_NULL_HANDLE)
+		{
+			vkDestroyPipeline(device.handle(), pipeline, null);
+			pipeline = VK_NULL_HANDLE;
+		}
+		if (pipelineLayout != VK_NULL_HANDLE)
+		{
+			vkDestroyPipelineLayout(device.handle(), pipelineLayout, null);
+			pipelineLayout = VK_NULL_HANDLE;
+		}
+		if (descriptorSetLayout != VK_NULL_HANDLE)
+		{
+			vkDestroyDescriptorSetLayout(device.handle(), descriptorSetLayout, null);
+			descriptorSetLayout = VK_NULL_HANDLE;
+		}
 	}
 
 	private long createShaderModule(ByteBuffer code)

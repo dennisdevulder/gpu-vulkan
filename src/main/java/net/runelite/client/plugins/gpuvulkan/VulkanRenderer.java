@@ -280,7 +280,8 @@ final class VulkanRenderer implements AutoCloseable
 			long start = stats.startNanos();
 			if (vkGetFenceStatus(device.handle(), sync.inFlightFence()) == VK_NOT_READY)
 			{
-				vkWaitForFences(device.handle(), sync.inFlightFence(), true, Long.MAX_VALUE);
+				Vk.check("vkWaitForFences",
+					vkWaitForFences(device.handle(), sync.inFlightFence(), true, Long.MAX_VALUE));
 				stats.addNanos(stats.fenceWaitNanos, start);
 			}
 
@@ -335,15 +336,16 @@ final class VulkanRenderer implements AutoCloseable
 		}
 		int imageIdx = pImageIdx.get(0);
 
-		vkResetFences(device.handle(), sync.inFlightFence());
-
 		VkCommandBuffer cmd = commandBuffers[sync.currentFrame()];
-		vkResetCommandBuffer(cmd, 0);
+		Vk.check("vkResetCommandBuffer", vkResetCommandBuffer(cmd, 0));
 		start = stats.startNanos();
 		recordClearPass(stack, cmd, framebuffers.get(imageIdx),
 			swapchain.width(), swapchain.height(), swapchain.image(imageIdx));
 		stats.addNanos(stats.commandRecordNanos, start);
 
+		// Reset only once recording succeeded — an unsignaled fence with no
+		// pending submit deadlocks this slot's next wait.
+		Vk.check("vkResetFences", vkResetFences(device.handle(), sync.inFlightFence()));
 		start = stats.startNanos();
 		submit(stack, cmd, imageIdx);
 		stats.addNanos(stats.submitNanos, start);
@@ -377,14 +379,19 @@ final class VulkanRenderer implements AutoCloseable
 	 */
 	private void drawFrameCustomPresent(MemoryStack stack, int desiredWidth, int desiredHeight)
 	{
+		long now = System.nanoTime();
+		if (now < nextCustomPresentNanos)
+		{
+			// Paced out — nothing will be presented, skip the render.
+			return;
+		}
+
 		ensureCustomPresentTarget(desiredWidth, desiredHeight);
 
 		long drawable = 0L;
 		MetalDrawableSet.Entry drawableEntry = null;
 		int drawableWidth = 0;
 		int drawableHeight = 0;
-		long now = System.nanoTime();
-		if (now >= nextCustomPresentNanos)
 		{
 			long start = stats.startNanos();
 			long[] d = MacOSMetalHelper.nextDrawable();
@@ -404,10 +411,8 @@ final class VulkanRenderer implements AutoCloseable
 
 		try
 		{
-			vkResetFences(device.handle(), sync.inFlightFence());
-
 			VkCommandBuffer cmd = commandBuffers[sync.currentFrame()];
-			vkResetCommandBuffer(cmd, 0);
+			Vk.check("vkResetCommandBuffer", vkResetCommandBuffer(cmd, 0));
 			long start = stats.startNanos();
 			int renderWidth = customPresentTarget.width();
 			int renderHeight = customPresentTarget.height();
@@ -417,12 +422,13 @@ final class VulkanRenderer implements AutoCloseable
 			if (drawableEntry != null)
 			{
 				presentCmd = presentCommandBuffers[sync.currentFrame()];
-				vkResetCommandBuffer(presentCmd, 0);
+				Vk.check("vkResetCommandBuffer (present)", vkResetCommandBuffer(presentCmd, 0));
 				recordCopyToDrawable(stack, presentCmd, customPresentTarget.colorImage(),
 					renderWidth, renderHeight, drawableEntry, drawableWidth, drawableHeight);
 			}
 			stats.addNanos(stats.commandRecordNanos, start);
 
+			Vk.check("vkResetFences", vkResetFences(device.handle(), sync.inFlightFence()));
 			start = stats.startNanos();
 			submitNoSemaphores(stack, cmd, presentCmd);
 			stats.addNanos(stats.submitNanos, start);
@@ -478,11 +484,18 @@ final class VulkanRenderer implements AutoCloseable
 			return;
 		}
 
-		// Keep the owned render target stable during window resizing. The
-		// present copy blits it to the live drawable size, so recreating here
-		// is a quality optimization, not a correctness requirement. Avoiding
-		// vkDeviceWaitIdle on the client thread keeps release-after-drag from
-		// stalling presentation.
+		// Resize settled: recreate the target. Fence wait (not deviceWaitIdle)
+		// drains frames referencing the old target and its drawable framebuffers.
+		sync.waitAllInFlight();
+		if (metalDrawables != null)
+		{
+			metalDrawables.flush();
+		}
+		customPresentTarget.close();
+		customPresentTarget = new OffscreenSceneTarget(device, renderPass,
+			width, height, swapchain.imageFormat(), renderPass.samples());
+		customPresentWidth = width;
+		customPresentHeight = height;
 	}
 
 	private void recordCopyToDrawable(MemoryStack stack, VkCommandBuffer cmd, long sourceImage,
@@ -562,7 +575,8 @@ final class VulkanRenderer implements AutoCloseable
 		}
 		if (vkGetFenceStatus(device.handle(), sync.inFlightFence()) == VK_NOT_READY)
 		{
-			vkWaitForFences(device.handle(), sync.inFlightFence(), true, Long.MAX_VALUE);
+			Vk.check("vkWaitForFences (screenshot)",
+				vkWaitForFences(device.handle(), sync.inFlightFence(), true, Long.MAX_VALUE));
 		}
 		return screenshotReadback.toImage();
 	}
@@ -644,7 +658,7 @@ final class VulkanRenderer implements AutoCloseable
 
 	private void rebuildSwapchain(int desiredWidth, int desiredHeight)
 	{
-		vkDeviceWaitIdle(device.handle());
+		Vk.check("vkDeviceWaitIdle", vkDeviceWaitIdle(device.handle()));
 		framebuffers.destroyAll();
 		swapchain.recreate(desiredWidth, desiredHeight);
 		depthBuffer.recreate(swapchain.width(), swapchain.height());
@@ -828,7 +842,7 @@ final class VulkanRenderer implements AutoCloseable
 		if (offscreenScene.width() != lowWidth || offscreenScene.height() != lowHeight
 			|| fsrIntermediate.width() != targetWidth || fsrIntermediate.height() != targetHeight)
 		{
-			vkDeviceWaitIdle(device.handle());
+			Vk.check("vkDeviceWaitIdle", vkDeviceWaitIdle(device.handle()));
 			fsrUpscaler.clearBindings();
 			offscreenScene.recreate(lowWidth, lowHeight);
 			fsrIntermediate.recreate(targetWidth, targetHeight);

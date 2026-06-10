@@ -48,10 +48,10 @@ import static org.lwjgl.vulkan.VK13.*;
 final class Texture implements AutoCloseable
 {
 	private final VulkanDevice device;
-	private final long image;
-	private final long memory;
-	private final long view;
-	private final long sampler;
+	private long image;
+	private long memory;
+	private long view;
+	private long sampler;
 	private final int width;
 	private final int height;
 	private int currentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -100,7 +100,7 @@ final class Texture implements AutoCloseable
 				throw new RuntimeException("vkAllocateMemory failed (texture)");
 			}
 			memory = pMem.get(0);
-			vkBindImageMemory(device.handle(), image, memory, 0);
+			Vk.check("vkBindImageMemory", vkBindImageMemory(device.handle(), image, memory, 0));
 
 			VkImageViewCreateInfo viewInfo = VkImageViewCreateInfo.calloc(stack)
 				.sType$Default()
@@ -267,9 +267,25 @@ final class Texture implements AutoCloseable
 	@Override
 	public void close()
 	{
-		vkDestroySampler(device.handle(), sampler, null);
-		vkDestroyImageView(device.handle(), view, null);
-		vkDestroyImage(device.handle(), image, null);
-		vkFreeMemory(device.handle(), memory, null);
+		if (sampler != VK_NULL_HANDLE)
+		{
+			vkDestroySampler(device.handle(), sampler, null);
+			sampler = VK_NULL_HANDLE;
+		}
+		if (view != VK_NULL_HANDLE)
+		{
+			vkDestroyImageView(device.handle(), view, null);
+			view = VK_NULL_HANDLE;
+		}
+		if (image != VK_NULL_HANDLE)
+		{
+			vkDestroyImage(device.handle(), image, null);
+			image = VK_NULL_HANDLE;
+		}
+		if (memory != VK_NULL_HANDLE)
+		{
+			vkFreeMemory(device.handle(), memory, null);
+			memory = VK_NULL_HANDLE;
+		}
 	}
 }

@@ -65,9 +65,13 @@ final class SceneVertexBuffer implements AutoCloseable
 	{
 		this.device = device;
 		this.slotBytes = slotBytes;
+		// Prefer BAR/ReBAR memory — on discrete cards plain host memory puts
+		// every per-frame vertex fetch across PCIe.
 		this.vertexBuffer = new Buffer(device, totalBytes,
 			VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+				| VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 		vertexBuffer.mapPersistent();
 		this.mapped = vertexBuffer.mappedByteBuffer().order(ByteOrder.nativeOrder());
 

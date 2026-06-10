@@ -111,7 +111,7 @@ final class Swapchain implements AutoCloseable
 		// vkDeviceWaitIdle drains queue submits but NOT the WSI present
 		// engine — so we pass the old VkSwapchainKHR via oldSwapchain
 		// (spec-clean handover, driver retires + releases WSI refs).
-		vkDeviceWaitIdle(device.handle());
+		Vk.check("vkDeviceWaitIdle", vkDeviceWaitIdle(device.handle()));
 		long retiringHandle = handle;
 		long[] retiringViews = imageViews;
 		handle = VK_NULL_HANDLE;
@@ -128,7 +128,7 @@ final class Swapchain implements AutoCloseable
 			// retired handle. Without it Apple Silicon shows artifacts when
 			// the new swapchain still touches the old chain's Metal
 			// resources at destroy time.
-			vkDeviceWaitIdle(device.handle());
+			Vk.check("vkDeviceWaitIdle", vkDeviceWaitIdle(device.handle()));
 			KHRSwapchain.vkDestroySwapchainKHR(device.handle(), retiringHandle, null);
 		}
 	}
@@ -166,7 +166,8 @@ final class Swapchain implements AutoCloseable
 		try (MemoryStack stack = stackPush())
 		{
 			VkSurfaceCapabilitiesKHR caps = VkSurfaceCapabilitiesKHR.calloc(stack);
-			KHRSurface.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device.physicalDevice(), surface.handle(), caps);
+			Vk.check("vkGetPhysicalDeviceSurfaceCapabilitiesKHR",
+				KHRSurface.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device.physicalDevice(), surface.handle(), caps));
 
 			// currentExtent == (0xFFFFFFFF, 0xFFFFFFFF) means "we don't care, you pick".
 			// Otherwise we must match it. Java reads those as -1.
@@ -281,9 +282,11 @@ final class Swapchain implements AutoCloseable
 	private VkSurfaceFormatKHR pickFormat(MemoryStack stack)
 	{
 		IntBuffer count = stack.mallocInt(1);
-		KHRSurface.vkGetPhysicalDeviceSurfaceFormatsKHR(device.physicalDevice(), surface.handle(), count, null);
+		Vk.check("vkGetPhysicalDeviceSurfaceFormatsKHR (count)",
+			KHRSurface.vkGetPhysicalDeviceSurfaceFormatsKHR(device.physicalDevice(), surface.handle(), count, null));
 		VkSurfaceFormatKHR.Buffer formats = VkSurfaceFormatKHR.calloc(count.get(0), stack);
-		KHRSurface.vkGetPhysicalDeviceSurfaceFormatsKHR(device.physicalDevice(), surface.handle(), count, formats);
+		Vk.check("vkGetPhysicalDeviceSurfaceFormatsKHR (formats)",
+			KHRSurface.vkGetPhysicalDeviceSurfaceFormatsKHR(device.physicalDevice(), surface.handle(), count, formats));
 
 		// LANDMINE: prefer UNORM. OSRS art is already in display-sRGB; an
 		// SRGB framebuffer would re-encode it as linear→sRGB and

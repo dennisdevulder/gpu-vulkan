@@ -115,7 +115,7 @@ final class DepthBuffer implements AutoCloseable
 				throw new RuntimeException("vkAllocateMemory (depth) failed");
 			}
 			memory = pMem.get(0);
-			vkBindImageMemory(device.handle(), image, memory, 0);
+			Vk.check("vkBindImageMemory (depth)", vkBindImageMemory(device.handle(), image, memory, 0));
 
 			VkImageViewCreateInfo viewInfo = VkImageViewCreateInfo.calloc(stack)
 				.sType$Default()

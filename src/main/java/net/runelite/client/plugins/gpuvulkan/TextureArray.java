@@ -62,10 +62,10 @@ final class TextureArray implements AutoCloseable
 	private static final int MIP_LEVELS = 8;
 
 	private final VulkanDevice device;
-	private final long image;
-	private final long memory;
-	private final long view;
-	private final long sampler;
+	private long image;
+	private long memory;
+	private long view;
+	private long sampler;
 	private final int layerCount;
 	/** Per-layer UV-scroll vector (texels-per-tick), std140-padded to
 	 *  vec4. Bound as set 0 binding 1 by SceneRenderer. */
@@ -108,7 +108,7 @@ final class TextureArray implements AutoCloseable
 			LongBuffer pMem = stack.mallocLong(1);
 			Vk.check("vkAllocateMemory (textureArray)", vkAllocateMemory(device.handle(), alloc, null, pMem));
 			memory = pMem.get(0);
-			vkBindImageMemory(device.handle(), image, memory, 0);
+			Vk.check("vkBindImageMemory (textureArray)", vkBindImageMemory(device.handle(), image, memory, 0));
 
 			VkImageViewCreateInfo viewInfo = VkImageViewCreateInfo.calloc(stack)
 				.sType$Default()
@@ -141,7 +141,7 @@ final class TextureArray implements AutoCloseable
 				.anisotropyEnable(anisoOn)
 				.maxAnisotropy(anisoOn ? aniso : 1.0f)
 				.minLod(0f)
-				.maxLod((float) MIP_LEVELS)
+				.maxLod((float) (MIP_LEVELS - 1))
 				.unnormalizedCoordinates(false);
 			LongBuffer pSamp = stack.mallocLong(1);
 			Vk.check("vkCreateSampler (textureArray)", vkCreateSampler(device.handle(), sampInfo, null, pSamp));
@@ -392,7 +392,7 @@ final class TextureArray implements AutoCloseable
 					VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
 					VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
 
-				vkEndCommandBuffer(cmd);
+				Vk.check("vkEndCommandBuffer (textureArray upload)", vkEndCommandBuffer(cmd));
 
 				VkSubmitInfo submit = VkSubmitInfo.calloc(stack)
 					.sType$Default()
@@ -441,9 +441,25 @@ final class TextureArray implements AutoCloseable
 		// it a reorder can crash on destroy-while-in-use.
 		vkDeviceWaitIdle(device.handle());
 		if (animationUbo != null) animationUbo.close();
-		vkDestroySampler(device.handle(), sampler, null);
-		vkDestroyImageView(device.handle(), view, null);
-		vkDestroyImage(device.handle(), image, null);
-		vkFreeMemory(device.handle(), memory, null);
+		if (sampler != VK_NULL_HANDLE)
+		{
+			vkDestroySampler(device.handle(), sampler, null);
+			sampler = VK_NULL_HANDLE;
+		}
+		if (view != VK_NULL_HANDLE)
+		{
+			vkDestroyImageView(device.handle(), view, null);
+			view = VK_NULL_HANDLE;
+		}
+		if (image != VK_NULL_HANDLE)
+		{
+			vkDestroyImage(device.handle(), image, null);
+			image = VK_NULL_HANDLE;
+		}
+		if (memory != VK_NULL_HANDLE)
+		{
+			vkFreeMemory(device.handle(), memory, null);
+			memory = VK_NULL_HANDLE;
+		}
 	}
 }

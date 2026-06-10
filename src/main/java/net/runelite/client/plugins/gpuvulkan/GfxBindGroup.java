@@ -49,7 +49,7 @@ import static org.lwjgl.vulkan.VK13.*;
 final class GfxBindGroup implements BindGroup
 {
 	private final VulkanDevice device;
-	private final long pool;
+	private long pool;
 	private final long[] sets = new long[FrameSync.FRAMES_IN_FLIGHT];
 	private final FrameSync frameSync;
 
@@ -200,6 +200,7 @@ final class GfxBindGroup implements BindGroup
 		if (pool != VK_NULL_HANDLE)
 		{
 			vkDestroyDescriptorPool(device.handle(), pool, null);
+			pool = VK_NULL_HANDLE;
 		}
 	}
 }

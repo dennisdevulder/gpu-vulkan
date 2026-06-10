@@ -87,7 +87,7 @@ final class FrameSync implements AutoCloseable
 		{
 			if (renderFinished != null)
 			{
-				vkDeviceWaitIdle(device.handle());
+				Vk.check("vkDeviceWaitIdle", vkDeviceWaitIdle(device.handle()));
 				for (long s : renderFinished)
 				{
 					vkDestroySemaphore(device.handle(), s, null);
@@ -117,6 +117,15 @@ final class FrameSync implements AutoCloseable
 		return inFlight[currentFrame];
 	}
 
+	void waitAllInFlight()
+	{
+		try (MemoryStack stack = stackPush())
+		{
+			Vk.check("vkWaitForFences (all in-flight)",
+				vkWaitForFences(device.handle(), stack.longs(inFlight), true, Long.MAX_VALUE));
+		}
+	}
+
 	int currentFrame()
 	{
 		return currentFrame;
@@ -132,8 +141,16 @@ final class FrameSync implements AutoCloseable
 	{
 		for (int i = 0; i < FRAMES_IN_FLIGHT; i++)
 		{
-			if (imageAvailable[i] != VK_NULL_HANDLE) vkDestroySemaphore(device.handle(), imageAvailable[i], null);
-			if (inFlight[i] != VK_NULL_HANDLE) vkDestroyFence(device.handle(), inFlight[i], null);
+			if (imageAvailable[i] != VK_NULL_HANDLE)
+			{
+				vkDestroySemaphore(device.handle(), imageAvailable[i], null);
+				imageAvailable[i] = VK_NULL_HANDLE;
+			}
+			if (inFlight[i] != VK_NULL_HANDLE)
+			{
+				vkDestroyFence(device.handle(), inFlight[i], null);
+				inFlight[i] = VK_NULL_HANDLE;
+			}
 		}
 		if (renderFinished != null)
 		{
