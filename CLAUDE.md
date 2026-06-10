@@ -1,6 +1,6 @@
 # gpu-vulkan — working agreement for Claude
 
-Project context: Vulkan-based RuneLite GPU plugin. Works on Linux. The active problem is **macOS-only rendering bugs via MoltenVK** (Apple Silicon M2 Pro). Validation layer has been run; it is silent under the failure conditions.
+Project context: Vulkan-based RuneLite GPU plugin. Works on Linux. The macOS MoltenVK flicker is **no longer an active issue** (user, 2026-06-10). The active problem is the **Windows/NVIDIA Olm stale-renderables bug** (see section below).
 
 ## How to work here — non-negotiable rules
 
@@ -64,6 +64,18 @@ Maintained across sessions. Append, don't rewrite.
 - Layer-level flicker: "one layer covering/uncovering" tied to zoom level, not pixel tearing
 - Persistent across all the fixes above
 - Linux path with the same source: no flicker
+
+**New suspect (2026-06 review, untested)**: MoltenVK async queue submits (`MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0` is the modern default) mean `vkQueueSubmit` can return before the render MTLCommandBuffer is committed; `MacOSMetalHelper.presentDrawable()` then commits its own present command buffer to the same MTLCommandQueue, which can land *before* the render commit — drawable presents stale content. Falsification test: set `MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=1` (or CPU-wait the in-flight fence before `nPresentDrawable`); if flicker stops, this is it. No `MVK_CONFIG*` is currently set anywhere in the repo.
+
+## Windows/NVIDIA Olm stale-renderables bug (2026-06 review findings)
+
+**Status 2026-06-10: all four suspects fixed in working tree, plus a fifth found during the fix** — mid-frame `captureScene` left the write cursor in the static arena; if no zones were dirty, that frame's dynamic capture wrote the static arena while `recordDraw` read never-written frame-arena bytes (uninitialized on NVIDIA, zeroed on Mesa). `rebuildDirtyZones` now restores the frame arena unconditionally. Awaiting user Olm retest.
+
+Symptom: projectiles/ground items persist in Olm arena on Windows/NVIDIA, not on Linux/Mesa. Ranked code-cited suspects:
+1. `draw()` without `drawScene` replays stale dynamic ranges from rotated frame slots (`GpuVulkanPlugin.java:859` sole `beginFrame` site; `SceneRenderer.java:1052-1057`). Fix existed in 8c01644, reverted wholesale by 8220142 (revert coupled it to the broken 6085067 zone change — they were independent). NVIDIA visibility: unlocked FPS + IMMEDIATE/MAILBOX emits many stale presents; Mesa FIFO blocks, hides it. Confirm via existing `DrawCallbackStats`: `frames > drawScene`.
+2. `SceneZoneDrawScheduler.hasOverlayRange` (:295-299) requires per-layer `count > 0` — zone rebuilt to *empty* layer never masks static range → despawned objects draw forever. Platform-independent, deterministic.
+3. Overlay arena (`overlayNextVertex[slot]`) grows monotonically; on overflow rebuilds silently dropped but `markSlotRebuilt` still called (`SceneRenderer.java:298-306,387`).
+4. `sceneIdentityChanged` (`GpuVulkanPlugin.java:982-992`) ignores Scene reference / instance template chunks — same-base instance rebuild skips recapture (upstream compares templates, `GpuPlugin.java:1656-1701`).
 
 ## Constraints (already established by the user, do not re-litigate)
 

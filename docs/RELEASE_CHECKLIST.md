@@ -34,4 +34,7 @@ optimization work.
   Windows surface code present but needs external validation.
 - State that validation layers are a developer-only option and should remain off
   for normal use.
-- RuneLite dependency version for this release: `1.12.27`.
+- RuneLite dependency version for this release: match `runeLiteVersion` in
+  `build.gradle` (currently `1.12.28`). Bump it there when RuneLite releases,
+  rebuild, and smoke-test before cutting a release — the shadowJar bundles the
+  client, so a stale pin ships a stale client.

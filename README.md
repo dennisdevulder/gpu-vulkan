@@ -18,11 +18,12 @@ source tree.
 - **Linux/X11** — working (daily driver). Several open issues — see
   the issue tracker. The prior sidebar-collapse crash is mitigated by
   keeping an rlawt GLX context alive for AWT while Vulkan owns rendering.
-- **macOS** — working on Apple Silicon via MoltenVK; one outstanding
-  layer-flicker bug (see issues).
-- **Windows** — surface code implemented, never tested. See
-  [issue #4](https://github.com/dennisdevulder/gpu-vulkan/issues/4) if
-  you have a Windows box to validate it.
+- **macOS** — working on Apple Silicon via MoltenVK.
+- **Windows** — working, tested on NVIDIA.
+
+The plugin defers Vulkan startup until you are logged in — the login
+screen renders on the CPU, so "nothing happens" at the login screen is
+expected.
 
 ## Requirements
 
@@ -54,6 +55,14 @@ JAVA_HOME=/path/to/temurin-21 ./gradlew build
 
 If `java -version` already points at a Temurin JDK, the `JAVA_HOME=`
 prefix is unnecessary.
+
+**macOS native helper**: `librlmtl.dylib` (the CAMetalLayer/JAWT
+bridge) is compiled as a universal arm64+x86_64 binary and ad-hoc
+signed, but only when building **on a Mac** — jars built on Linux or
+Windows do not contain it and won't render on macOS. Release jars
+intended for Mac users must be cut on macOS. Gatekeeper may still
+quarantine the dylib when the jar was downloaded from a browser;
+`xattr -d com.apple.quarantine <jar>` clears it.
 
 ## Run
 
