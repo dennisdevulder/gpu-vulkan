@@ -24,12 +24,9 @@
  */
 package net.runelite.client.plugins.gpuvulkan;
 
-import java.io.BufferedOutputStream;
 import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.LongBuffer;
 import java.util.ArrayDeque;
@@ -117,6 +114,8 @@ final class VideoRecorderExtension implements VulkanRenderExtension
 	private final ArrayDeque<EncodedFrame> ring = new ArrayDeque<>();
 	private long ringBytes;
 	private byte[] ringHeader;
+	private int ringWidth;
+	private int ringHeight;
 
 	private static final class EncodedFrame
 	{
@@ -231,6 +230,8 @@ final class VideoRecorderExtension implements VulkanRenderExtension
 	{
 		byte[] header;
 		List<EncodedFrame> frames;
+		int width;
+		int height;
 		synchronized (ringLock)
 		{
 			if (ring.isEmpty() || ringHeader == null)
@@ -240,13 +241,15 @@ final class VideoRecorderExtension implements VulkanRenderExtension
 			}
 			header = ringHeader;
 			frames = new ArrayList<>(ring);
+			width = ringWidth;
+			height = ringHeight;
 		}
-		Thread writer = new Thread(() -> writeClip(header, frames), "Vulkan-Clip-Writer");
+		Thread writer = new Thread(() -> writeClip(header, frames, width, height), "Vulkan-Clip-Writer");
 		writer.setDaemon(true);
 		writer.start();
 	}
 
-	private void writeClip(byte[] header, List<EncodedFrame> frames)
+	private void writeClip(byte[] header, List<EncodedFrame> frames, int width, int height)
 	{
 		File dir = new File(net.runelite.client.RuneLite.RUNELITE_DIR, "vulkan-recordings");
 		if (!dir.exists() && !dir.mkdirs())
@@ -254,16 +257,15 @@ final class VideoRecorderExtension implements VulkanRenderExtension
 			log.warn("Cannot create {}", dir);
 			return;
 		}
-		File file = new File(dir, "clip-" + System.currentTimeMillis() + ".h264");
-		long bytes = 0;
-		try (OutputStream out = new BufferedOutputStream(new FileOutputStream(file), 1 << 20))
+		File file = new File(dir, "clip-" + System.currentTimeMillis() + ".mp4");
+		List<Mp4Writer.Sample> samples = new ArrayList<>(frames.size());
+		for (EncodedFrame frame : frames)
 		{
-			out.write(header);
-			for (EncodedFrame frame : frames)
-			{
-				out.write(frame.data);
-				bytes += frame.data.length;
-			}
+			samples.add(new Mp4Writer.Sample(frame.data, frame.captureNanos));
+		}
+		try
+		{
+			Mp4Writer.write(file, header, samples, width, height);
 		}
 		catch (IOException e)
 		{
@@ -273,7 +275,7 @@ final class VideoRecorderExtension implements VulkanRenderExtension
 		double seconds = frames.size() <= 1 ? 0
 			: (frames.get(frames.size() - 1).captureNanos - frames.get(0).captureNanos) / 1e9;
 		log.info("Clipped {} frames (~{}s, {} KiB) -> {}",
-			frames.size(), String.format("%.1f", seconds), bytes / 1024, file);
+			frames.size(), String.format("%.1f", seconds), file.length() / 1024, file);
 	}
 
 	// ---- lifecycle ---------------------------------------------------------
@@ -294,6 +296,8 @@ final class VideoRecorderExtension implements VulkanRenderExtension
 			ring.clear();
 			ringBytes = 0;
 			ringHeader = session.parameterHeader();
+			ringWidth = width;
+			ringHeight = height;
 		}
 
 		workerRunning = true;

@@ -183,12 +183,12 @@ Both pieces are exercised by the bundled experimental replay buffer
 (`VideoRecorderExtension` + `H264EncodeSession`): enable **Replay buffer**
 in the plugin settings and frames are converted to NV12 by a compute pass,
 encoded on the GPU's video engine, and kept in an in-memory ring covering
-the last N seconds (default 10). Hitting the clip hotkey writes the ring
-out as `~/.runelite/vulkan-recordings/clip-<time>.h264` — nothing touches
-disk until then. Every frame is an IDR picture, so the clip cuts cleanly at
-any frame (wrap it with `ffmpeg -i clip.h264 -c copy clip.mp4`). Requires
-hardware Vulkan video encode; macOS/MoltenVK has none, so the toggle is a
-no-op there.
+the last N seconds (default 10). Hitting the clip hotkey muxes the ring
+into `~/.runelite/vulkan-recordings/clip-<time>.mp4` in a single pass (a
+small built-in ISO BMFF writer — no re-encode, no temp files, real frame
+timestamps) — nothing touches disk until then. Every frame is an IDR
+picture, so the clip cuts cleanly at any frame. Requires hardware Vulkan
+video encode; macOS/MoltenVK has none, so the toggle is a no-op there.
 
 ### Worked example: the FSR upscaler
 
