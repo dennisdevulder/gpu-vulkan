@@ -82,6 +82,11 @@ final class OffscreenSceneTarget implements AutoCloseable
 		return colorImage;
 	}
 
+	int format()
+	{
+		return format;
+	}
+
 	long colorView()
 	{
 		return colorView;

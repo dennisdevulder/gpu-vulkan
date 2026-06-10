@@ -111,6 +111,14 @@ public interface VulkanRenderExtension extends AutoCloseable
 
 	default void recordRenderPass(VulkanFrameContext frame) {}
 
+	/**
+	 * Record commands against the final composited frame (scene + UI), after
+	 * the last render pass has ended and before present. Typical use: copying
+	 * the frame out for capture or video encode. See
+	 * {@link VulkanPostFrameContext} for the layout contract.
+	 */
+	default void recordAfterComposite(VulkanPostFrameContext frame) {}
+
 	@Override
 	default void close() {}
 }

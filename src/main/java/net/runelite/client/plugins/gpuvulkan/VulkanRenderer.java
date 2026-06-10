@@ -46,6 +46,7 @@ import org.lwjgl.vulkan.VkPresentInfoKHR;
 import org.lwjgl.vulkan.VkRect2D;
 import org.lwjgl.vulkan.VkRenderPassBeginInfo;
 import org.lwjgl.vulkan.VkSubmitInfo;
+import org.lwjgl.vulkan.VkTimelineSemaphoreSubmitInfo;
 import org.lwjgl.vulkan.VkViewport;
 
 import static org.lwjgl.system.MemoryStack.stackPush;
@@ -654,6 +655,7 @@ final class VulkanRenderer implements AutoCloseable
 				stats.screenshotReadbackBytes.addAndGet((long) targetWidth * targetHeight * Integer.BYTES);
 				screenshotReadback.recordCopy(cmd, targetImage, targetWidth, targetHeight, sync.currentFrame());
 			}
+			recordAfterComposite(cmd, targetImage, targetWidth, targetHeight);
 			Vk.check("vkEndCommandBuffer", vkEndCommandBuffer(cmd));
 			return;
 		}
@@ -775,8 +777,26 @@ final class VulkanRenderer implements AutoCloseable
 			stats.screenshotReadbackBytes.addAndGet((long) targetWidth * targetHeight * Integer.BYTES);
 			screenshotReadback.recordCopy(cmd, targetImage, targetWidth, targetHeight, sync.currentFrame());
 		}
+		recordAfterComposite(cmd, targetImage, targetWidth, targetHeight);
 
 		Vk.check("vkEndCommandBuffer", vkEndCommandBuffer(cmd));
+	}
+
+	private void recordAfterComposite(VkCommandBuffer cmd, long targetImage, int targetWidth, int targetHeight)
+	{
+		// Same layout the screenshot readback assumes: the render pass's
+		// finalLayout, which differs between the two present paths.
+		int imageLayout = device.supportsMetalObjects()
+			? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+			: KHRSwapchain.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+		int imageFormat = useCustomPresent && customPresentTarget != null
+			? customPresentTarget.format()
+			: swapchain.imageFormat();
+		long timeline = sync.frameTimeline();
+		renderExtensions.recordAfterComposite(new DefaultVulkanPostFrameContext(
+			cmd, targetImage, targetWidth, targetHeight, imageLayout, imageFormat,
+			sync.currentFrame(), timeline,
+			timeline != VK_NULL_HANDLE ? sync.peekNextTimelineValue() : 0L));
 	}
 
 	private void recordRedirectedPass(MemoryStack stack, VkCommandBuffer cmd, ScenePassRedirect redirect,
@@ -915,7 +935,10 @@ final class VulkanRenderer implements AutoCloseable
 	{
 		IntBuffer waitStages = stack.ints(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
 		LongBuffer wait = stack.longs(sync.imageAvailable());
-		LongBuffer signal = stack.longs(sync.renderFinishedFor(imageIdx));
+		boolean timeline = sync.frameTimeline() != VK_NULL_HANDLE;
+		LongBuffer signal = timeline
+			? stack.longs(sync.renderFinishedFor(imageIdx), sync.frameTimeline())
+			: stack.longs(sync.renderFinishedFor(imageIdx));
 		PointerBuffer cmdBuf = stack.pointers(cmd);
 
 		VkSubmitInfo submit = VkSubmitInfo.calloc(stack)
@@ -925,6 +948,17 @@ final class VulkanRenderer implements AutoCloseable
 			.pWaitDstStageMask(waitStages)
 			.pCommandBuffers(cmdBuf)
 			.pSignalSemaphores(signal);
+
+		if (timeline)
+		{
+			// Signal value must match what recordAfterComposite told the
+			// extensions this frame would signal (peek + advance here).
+			VkTimelineSemaphoreSubmitInfo timelineInfo = VkTimelineSemaphoreSubmitInfo.calloc(stack)
+				.sType$Default()
+				.signalSemaphoreValueCount(2)
+				.pSignalSemaphoreValues(stack.longs(0L, sync.advanceTimelineValue()));
+			submit.pNext(timelineInfo.address());
+		}
 
 		Vk.check("vkQueueSubmit", vkQueueSubmit(device.graphicsQueue(), submit, sync.inFlightFence()));
 	}

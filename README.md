@@ -166,12 +166,21 @@ raw handles on `VulkanRenderContext` plus the raw `VkCommandBuffer` hooks;
 see [docs/RENDERER_CONTRACT.md](docs/RENDERER_CONTRACT.md) for the
 invariants you must keep.
 
-`VulkanRenderContext.encode()` exposes Vulkan video encode capability data
-for plugins such as trackers/recorders. It reports whether the selected
-physical device has a video encode queue and H.264/H.265/AV1 encode
-extensions. The current backend does not create an encode queue yet, so
-consumers must check `VulkanEncodeContext.isAvailable()` before using queue
-handles.
+For recorder-style plugins there are two dedicated pieces. The
+`recordAfterComposite` hook hands extensions the final composited frame
+(scene + UI) on the graphics command buffer right before present, with a
+documented layout contract for copying it out. And
+`VulkanRenderContext.encode()` exposes the Vulkan video encode queue: when
+the device supports it, the backend enables the H.264/H.265/AV1 encode
+extensions and creates a dedicated encode queue at device creation, since
+queue families can't be added afterwards. Check
+`VulkanEncodeContext.isAvailable()`; `unavailableReason()` explains any
+refusal. The backend never submits to that queue itself, so a recorder
+plugin owns the entire encode session. `-Dvkgpu.disableVideoEncode=true`
+disables the path entirely.
+
+A worked recorder consumer of this surface (GPU replay buffer with hotkey
+MP4 clips) lives on the `feat/vulkan-video-recorder` branch.
 
 ### Worked example: the FSR upscaler
 

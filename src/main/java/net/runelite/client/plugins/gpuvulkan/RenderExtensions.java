@@ -339,6 +339,24 @@ final class RenderExtensions implements AutoCloseable
 		}
 	}
 
+	synchronized void recordAfterComposite(VulkanPostFrameContext frame)
+	{
+		for (int i = 0; i < extensions.size(); )
+		{
+			VulkanRenderExtension extension = extensions.get(i);
+			try
+			{
+				extension.recordAfterComposite(frame);
+				i++;
+			}
+			catch (RuntimeException e)
+			{
+				extensions.remove(i);
+				closeFailedExtension(extension, "recordAfterComposite", e);
+			}
+		}
+	}
+
 	@Override
 	public synchronized void close()
 	{

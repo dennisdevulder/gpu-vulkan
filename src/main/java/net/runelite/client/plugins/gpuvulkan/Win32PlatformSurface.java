@@ -93,7 +93,7 @@ final class Win32PlatformSurface implements PlatformSurface
 						JAWTWin32DrawingSurfaceInfo win = JAWTWin32DrawingSurfaceInfo.create(dsi.platformInfo());
 						long hwnd = win.hwnd();
 						// GetModuleHandle(NULL) → HMODULE of the process EXE. The
-						long hinstance = WinBase.nGetModuleHandle(org.lwjgl.system.MemoryUtil.NULL);
+						long hinstance = WinBase.GetModuleHandle(null, (java.nio.ByteBuffer) null);
 						try (MemoryStack stack = stackPush())
 						{
 							VkWin32SurfaceCreateInfoKHR info = VkWin32SurfaceCreateInfoKHR.calloc(stack)

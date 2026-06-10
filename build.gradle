@@ -35,8 +35,11 @@ java {
 
 def runeLiteVersion = '1.12.28'
 def pluginMainClass = 'net.runelite.client.plugins.gpuvulkan.GpuVulkanPluginTest'
-def lwjglVersion = '3.3.2'
-def lwjglVulkanVersion = '3.3.2'
+// Keep core and vulkan on the SAME version — a 3.3.6/3.3.2 mix broke Windows
+// once already (45f09ed). 3.3.4+ is required for the finalized
+// (non-provisional) Vulkan video encode bindings the recorder uses.
+def lwjglVersion = '3.3.6'
+def lwjglVulkanVersion = '3.3.6'
 def lombokVersion = '1.18.34'
 
 dependencies {

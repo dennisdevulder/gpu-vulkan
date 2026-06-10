@@ -58,7 +58,9 @@ final class DefaultVulkanEncodeContext implements VulkanEncodeContext
 		}
 		if (device.videoEncodeQueue() == null)
 		{
-			return "Backend has not enabled Vulkan video encode extensions/queue creation yet.";
+			String detail = device.videoEncodeUnavailableDetail();
+			return detail != null ? detail
+				: "Backend did not create the video encode queue.";
 		}
 		return "";
 	}
