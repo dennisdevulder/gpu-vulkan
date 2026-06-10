@@ -38,6 +38,7 @@ import org.lwjgl.vulkan.VkPhysicalDevice;
 import org.lwjgl.vulkan.VkPhysicalDeviceFeatures;
 import org.lwjgl.vulkan.VkPhysicalDeviceProperties;
 import org.lwjgl.vulkan.VkPhysicalDeviceSynchronization2Features;
+import org.lwjgl.vulkan.VkPhysicalDeviceTimelineSemaphoreFeatures;
 import org.lwjgl.vulkan.VkQueue;
 import org.lwjgl.vulkan.VkQueueFamilyProperties;
 
@@ -289,10 +290,19 @@ final class VulkanDevice implements AutoCloseable
 
 			if (wantEncodeQueue)
 			{
+				// Both features are mandatory in Vulkan 1.3 (which the encode
+				// path is gated on): synchronization2 for the video extensions,
+				// timelineSemaphore for the frame timeline consumers order
+				// encode work against.
+				VkPhysicalDeviceTimelineSemaphoreFeatures timeline =
+					VkPhysicalDeviceTimelineSemaphoreFeatures.calloc(stack)
+						.sType$Default()
+						.timelineSemaphore(true);
 				VkPhysicalDeviceSynchronization2Features sync2 =
 					VkPhysicalDeviceSynchronization2Features.calloc(stack)
 						.sType$Default()
-						.synchronization2(true);
+						.synchronization2(true)
+						.pNext(timeline.address());
 				info.pNext(sync2.address());
 			}
 

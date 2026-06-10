@@ -144,6 +144,33 @@ public interface GpuVulkanPluginConfig extends Config
 	)
 	String UPSCALING_SECTION = "upscaling";
 
+	@ConfigSection(
+		name = "Recording",
+		description = "GPU video recording via the Vulkan video encode queue (experimental).",
+		position = 2,
+		closedByDefault = true
+	)
+	String RECORDING_SECTION = "recording";
+
+	@ConfigItem(
+		keyName = "recordVideo",
+		name = "Record gameplay",
+		description = "Encode every frame to an H.264 stream in ~/.runelite/vulkan-recordings/ using the GPU's video encode engine. Requires hardware Vulkan video encode support (not available on macOS).",
+		section = RECORDING_SECTION,
+		position = 0
+	)
+	default boolean recordVideo() { return false; }
+
+	@Range(min = 18, max = 40)
+	@ConfigItem(
+		keyName = "recordQp",
+		name = "Recording quality (QP)",
+		description = "H.264 quantization parameter. Lower = better quality and bigger files. Takes effect when recording restarts.",
+		section = RECORDING_SECTION,
+		position = 1
+	)
+	default int recordQp() { return 26; }
+
 	enum UpscalingMode
 	{
 		OFF,

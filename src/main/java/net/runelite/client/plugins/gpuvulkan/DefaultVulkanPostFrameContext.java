@@ -33,17 +33,24 @@ final class DefaultVulkanPostFrameContext implements VulkanPostFrameContext
 	private final int width;
 	private final int height;
 	private final int imageLayout;
+	private final int imageFormat;
 	private final int frameIndex;
+	private final long frameTimelineSemaphore;
+	private final long frameTimelineValue;
 
 	DefaultVulkanPostFrameContext(VkCommandBuffer commandBuffer, long colorImage,
-		int width, int height, int imageLayout, int frameIndex)
+		int width, int height, int imageLayout, int imageFormat, int frameIndex,
+		long frameTimelineSemaphore, long frameTimelineValue)
 	{
 		this.commandBuffer = commandBuffer;
 		this.colorImage = colorImage;
 		this.width = width;
 		this.height = height;
 		this.imageLayout = imageLayout;
+		this.imageFormat = imageFormat;
 		this.frameIndex = frameIndex;
+		this.frameTimelineSemaphore = frameTimelineSemaphore;
+		this.frameTimelineValue = frameTimelineValue;
 	}
 
 	@Override
@@ -77,8 +84,26 @@ final class DefaultVulkanPostFrameContext implements VulkanPostFrameContext
 	}
 
 	@Override
+	public int imageFormat()
+	{
+		return imageFormat;
+	}
+
+	@Override
 	public int frameIndex()
 	{
 		return frameIndex;
+	}
+
+	@Override
+	public long frameTimelineSemaphore()
+	{
+		return frameTimelineSemaphore;
+	}
+
+	@Override
+	public long frameTimelineValue()
+	{
+		return frameTimelineValue;
 	}
 }

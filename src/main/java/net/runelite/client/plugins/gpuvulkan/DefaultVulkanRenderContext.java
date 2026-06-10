@@ -56,6 +56,13 @@ final class DefaultVulkanRenderContext implements VulkanRenderContext
 		this.stats = stats;
 	}
 
+	/** Backend-internal escape hatch for in-repo extensions (recorder). External
+	 *  consumers get raw handles through the public interface instead. */
+	VulkanDevice device()
+	{
+		return device;
+	}
+
 	@Override
 	public Client client()
 	{

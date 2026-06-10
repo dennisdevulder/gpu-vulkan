@@ -1,0 +1,93 @@
+#version 450
+
+// RGBA/BGRA -> NV12 (BT.709 limited range) for the video recorder.
+// One invocation converts a 4x2 pixel block: eight luma bytes (two words)
+// and two interleaved CbCr pairs (one word), so every SSBO store is a
+// whole 32-bit word and no 8-bit storage feature is needed.
+//
+// Plane buffers are laid out with paddedWidth as the row pitch; the copy
+// into the NV12 image uses the same pitch via bufferRowLength. Pixels
+// outside width/height replicate the edge; the encoder crops them away.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(push_constant) uniform Push
+{
+	uint width;        // visible pixels
+	uint height;
+	uint paddedWidth;  // row pitch, multiple of 16
+	uint paddedHeight; // multiple of 16
+	uint bgra;         // 1 when the source image is BGRA-ordered
+} pc;
+
+layout(std430, binding = 0) readonly buffer Src
+{
+	uint pixels[]; // one RGBA8/BGRA8 texel per word, row pitch = width
+};
+
+layout(std430, binding = 1) writeonly buffer LumaPlane
+{
+	uint yWords[]; // 4 luma bytes per word, row pitch = paddedWidth
+};
+
+layout(std430, binding = 2) writeonly buffer ChromaPlane
+{
+	uint uvWords[]; // 2 CbCr pairs per word, row pitch = paddedWidth, half height
+};
+
+vec3 fetchRgb(uint x, uint y)
+{
+	x = min(x, pc.width - 1u);
+	y = min(y, pc.height - 1u);
+	uint texel = pixels[y * pc.width + x];
+	vec3 rgb = vec3(
+		float((texel       ) & 0xFFu),
+		float((texel >>  8u) & 0xFFu),
+		float((texel >> 16u) & 0xFFu)) / 255.0;
+	return pc.bgra != 0u ? rgb.bgr : rgb;
+}
+
+uint lumaByte(vec3 rgb)
+{
+	float y = dot(rgb, vec3(0.2126, 0.7152, 0.0722));
+	return uint(clamp(16.0 + 219.0 * y, 0.0, 255.0));
+}
+
+void main()
+{
+	uint bx = gl_GlobalInvocationID.x * 4u; // block origin in pixels
+	uint by = gl_GlobalInvocationID.y * 2u;
+	if (bx >= pc.paddedWidth || by >= pc.paddedHeight)
+	{
+		return;
+	}
+
+	vec3 rgb[8];
+	uint yTop = 0u;
+	uint yBot = 0u;
+	for (uint i = 0u; i < 4u; i++)
+	{
+		rgb[i]      = fetchRgb(bx + i, by);
+		rgb[i + 4u] = fetchRgb(bx + i, by + 1u);
+		yTop |= lumaByte(rgb[i])      << (8u * i);
+		yBot |= lumaByte(rgb[i + 4u]) << (8u * i);
+	}
+	uint yIndex = (by * pc.paddedWidth + bx) / 4u;
+	yWords[yIndex] = yTop;
+	yWords[yIndex + pc.paddedWidth / 4u] = yBot;
+
+	// Two chroma samples per block, each averaged over its 2x2 quad.
+	uint uvWord = 0u;
+	for (uint s = 0u; s < 2u; s++)
+	{
+		vec3 avg = 0.25 * (rgb[s * 2u] + rgb[s * 2u + 1u]
+			+ rgb[s * 2u + 4u] + rgb[s * 2u + 5u]);
+		float yv = dot(avg, vec3(0.2126, 0.7152, 0.0722));
+		float cb = (avg.b - yv) / 1.8556;
+		float cr = (avg.r - yv) / 1.5748;
+		uint cbB = uint(clamp(128.0 + 224.0 * cb, 0.0, 255.0));
+		uint crB = uint(clamp(128.0 + 224.0 * cr, 0.0, 255.0));
+		uvWord |= (cbB << (16u * s)) | (crB << (16u * s + 8u));
+	}
+	uvWords[((by / 2u) * pc.paddedWidth + bx) / 4u] = uvWord;
+}

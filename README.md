@@ -179,6 +179,14 @@ refusal. The backend never submits to that queue itself, so a recorder
 plugin owns the entire encode session. `-Dvkgpu.disableVideoEncode=true`
 disables the path entirely.
 
+Both pieces are exercised by the bundled experimental recorder
+(`VideoRecorderExtension` + `H264EncodeSession`): enable **Recording →
+Record gameplay** in the plugin settings and every frame is converted to
+NV12 by a compute pass and encoded on the GPU's video engine to an Annex-B
+`.h264` stream in `~/.runelite/vulkan-recordings/` (IDR-only, constant QP —
+wrap it with `ffmpeg -i in.h264 -c copy out.mp4`). Requires hardware Vulkan
+video encode; macOS/MoltenVK has none, so the toggle is a no-op there.
+
 ### Worked example: the FSR upscaler
 
 The bundled FSR 1.0 upscaler (`FsrUpscalerExtension`) is implemented

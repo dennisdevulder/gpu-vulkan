@@ -51,6 +51,21 @@ public interface VulkanPostFrameContext
 	/** {@code VkImageLayout} of {@link #colorImage()} at hook entry and required at exit. */
 	int imageLayout();
 
+	/** {@code VkFormat} of {@link #colorImage()} — the swapchain/surface format,
+	 *  typically BGRA-ordered. Do not assume RGBA. */
+	int imageFormat();
+
 	/** Frame-in-flight slot, {@code [0, framesInFlight)}. */
 	int frameIndex();
+
+	/**
+	 * Timeline semaphore signalled on every graphics submit, or
+	 * {@code VK_NULL_HANDLE} when the device has no video encode queue.
+	 * {@link #frameTimelineValue()} is the value the submit carrying this
+	 * frame's commands will signal — wait on it (host or device) before
+	 * consuming resources the hook wrote, from another queue or thread.
+	 */
+	long frameTimelineSemaphore();
+
+	long frameTimelineValue();
 }

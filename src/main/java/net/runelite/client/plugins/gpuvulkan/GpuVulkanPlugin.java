@@ -361,6 +361,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		{
 			renderExtensions.register(new FsrUpscalerExtension());
 		}
+		// Always registered; it no-ops until the recordVideo config toggles on
+		// and the device actually has an encode queue.
+		renderExtensions.register(new VideoRecorderExtension());
 		extensionQueue.attachQueued(renderExtensions);
 		disposables.add(renderExtensions);
 
