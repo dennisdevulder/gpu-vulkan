@@ -66,6 +66,9 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	/** Vertices the capture wanted but the static arena couldn't hold —
 	 *  the demand signal for growing the arena. */
 	private int droppedVertices;
+	/** Escape hatch back to drawing the whole captured static scene every
+	 *  frame instead of the draw-distance zone radius. */
+	private static final boolean FULL_SCENE_DRAW = Boolean.getBoolean("vkgpu.fullSceneDraw");
 	private static final int SCENE_OFFSET = (Constants.EXTENDED_SCENE_SIZE - Constants.SCENE_SIZE) / 2;
 	/** False for sub-worldview renderers — only the top-level scene owns a skybox dome. */
 	private final boolean emitSkybox;
@@ -1107,12 +1110,13 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			final int loMax = maxPlane;
 			int radiusTiles = (int) Math.ceil(drawDistanceTiles + fogDepthTiles + 2f);
 			int radiusZones = Math.max(1, (radiusTiles + ZONE_SIZE - 1) / ZONE_SIZE);
-			// Conservative draw path. Stock GPU lets the engine call visible
-			// zones; our cached renderer derives visibility from camera-local
-			// math. The bad-tile black-scene failure has a full capture but an
-			// empty-looking frame, so draw the captured static scene until the
-			// zone scheduler is proven against extended-scene coordinates.
-			boolean fullZoneRange = true;
+			// Zone-radius culling, matching stock (the engine only invokes
+			// zones inside the draw distance). A fully streamed extended
+			// scene captures ~8.6M verts in dense regions — drawing all of
+			// it every frame halves FPS vs the radius. The old "bad-tile
+			// black-scene" caution gets an escape hatch instead of a
+			// permanent full draw: -Dvkgpu.fullSceneDraw=true reverts.
+			boolean fullZoneRange = FULL_SCENE_DRAW;
 			int sceneEnd = capturedSceneOrigin + capturedSceneSize;
 			int camTileX = clamp((int) Math.floor(cameraX / 128f), capturedSceneOrigin, sceneEnd - 1);
 			int camTileZ = clamp((int) Math.floor(cameraZ / 128f), capturedSceneOrigin, sceneEnd - 1);
@@ -1272,12 +1276,19 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			final int loMin = minPlane;
 			final int loCur = currentPlane;
 			final int loMax = maxPlane;
-			// Mirrors recordOpaque's conservative full zone range.
-			boolean fullZoneRange = true;
-			int minZoneX = 0;
-			int maxZoneX = ZONES_PER_SIDE - 1;
-			int minZoneZ = 0;
-			int maxZoneZ = ZONES_PER_SIDE - 1;
+			// Mirrors recordOpaque's zone-radius culling.
+			int radiusTiles = (int) Math.ceil(drawDistanceTiles + fogDepthTiles + 2f);
+			int radiusZones = Math.max(1, (radiusTiles + ZONE_SIZE - 1) / ZONE_SIZE);
+			boolean fullZoneRange = FULL_SCENE_DRAW;
+			int sceneEnd = capturedSceneOrigin + capturedSceneSize;
+			int camTileX = clamp((int) Math.floor(cameraX / 128f), capturedSceneOrigin, sceneEnd - 1);
+			int camTileZ = clamp((int) Math.floor(cameraZ / 128f), capturedSceneOrigin, sceneEnd - 1);
+			int camZoneX = (camTileX - capturedSceneOrigin) / ZONE_SIZE;
+			int camZoneZ = (camTileZ - capturedSceneOrigin) / ZONE_SIZE;
+			int minZoneX = fullZoneRange ? 0 : Math.max(0, camZoneX - radiusZones);
+			int maxZoneX = fullZoneRange ? ZONES_PER_SIDE - 1 : Math.min(ZONES_PER_SIDE - 1, camZoneX + radiusZones);
+			int minZoneZ = fullZoneRange ? 0 : Math.max(0, camZoneZ - radiusZones);
+			int maxZoneZ = fullZoneRange ? ZONES_PER_SIDE - 1 : Math.min(ZONES_PER_SIDE - 1, camZoneZ + radiusZones);
 
 			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, alphaPipeline.handle());
 			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
