@@ -2,22 +2,38 @@
 
 Living document. Lists what stock OpenGL `GPU` does that we don't, with status.
 
-Last updated: 2026-05-14.
+Last updated: 2026-06-10 (full re-audit against stock zone-based GpuPlugin;
+rows 4/5/8 corrected, rows 11-16 added).
 
 ## Status
 
 | # | Gap                                             | Status        |
 |---|-------------------------------------------------|---------------|
-| 1 | Per-dynamic-model face sort (CPU)               | **Done (modulo priority interleave)** — all three dynamic paths (`drawDynamic`, `drawTemp`, `captureActors`) routed through `captureModelSorted`. Actor walk reuses the previous frame's cached `worldProjection`. Priority-bucket interleave not ported (only hits `RENDERMODE_SORTED_NO_DEPTH`). |
+| 1 | Per-dynamic-model face sort (CPU)               | **Done** — all three dynamic paths routed through `captureModelSorted`. Priority-bucket interleave IS now ported (`ModelSorter.writePriorityOrder`, triggered by `RENDERMODE_SORTED_NO_DEPTH`, drawn via no-depth color pass + depth-only pass mirroring stock's `vaoPO`). Actors flow through `drawDynamic` with the engine-supplied projection — the cached-projection caveat is obsolete. |
 | 2 | Brightness gamma on untextured faces            | **Done** — `pow(rgb, brightness)` now applied to both HSL and textured paths in `scene.frag` before fog mix |
 | 3 | `textureLightMode` (texture × HSL light blend)  | **Done** — new `brightTextures` config (matches stock's option name); `scene.frag` blends `mix(vec3(light), fullColor, textureLightMode)`; threaded via 32-byte fragment push (was 16). Reserved 12 bytes in `fragExtras` for future scene-frag uniforms |
-| 4 | Entity vs scene dual-MVP                        | Open          |
-| 5 | Smooth-banding mode                             | Open          |
-| 6 | Colorblind filter                               | **Done** — new `ColorBlindMode` enum, `colorBlindMode` + `colorBlindIntensity` config keys; `colorblind.glsl` ported inline into `scene.frag` (runtime branch instead of `#if`); applied post-fog matching stock's order. Reuses `fragExtras.y` (mode) and `fragExtras.z` (intensity 0..1) push-constant slots |
+| 4 | Entity vs scene dual-MVP                        | **Reframed → see #11.** Confirmed still single `pc.mvp`, but for top-level scenes stock sets `entityProj = identity`, so the user-visible consequence is sub-worldview rendering (#11), not actor jitter. |
+| 5 | Smooth-banding mode                             | **Done** — `smoothBanding` config threaded via `fragExtras.w` to `scene.frag`; semantics verified equivalent to stock `frag.glsl:85-88` |
+| 6 | Colorblind filter                               | **Done** — new `ColorBlindMode` enum, `colorBlindMode` + `colorBlindIntensity` config keys; `colorblind.glsl` ported inline into `scene.frag` (runtime branch instead of `#if`); applied post-fog matching stock's order. Also applied to UI in `ui.frag`. |
 | 7 | Near-plane geometry cull                        | **Mostly done** — dynamic sorted capture uses `ModelSorter`'s `p[2] < 50` reject (matches `FacePrioritySorter.java:145`), but falls back to unsorted emission when sorting rejects a transient model so projectiles / spotanims stay visible. Static side has no near-cull in stock either; the earlier `geom.glsl:~56-60` claim was a research-agent hallucination (no such file exists in stock's resources). |
-| 8 | In-place scene mutation (farming/doors/trees)   | Open — needs per-zone re-upload; whole-scene re-capture on every `invalidateZone` tanks FPS in combat |
+| 8 | In-place scene mutation (farming/doors/trees)   | **Done** — `invalidateZone` → `DirtyZoneTracker`; `rebuildDirtyZones` re-emits only dirty zones into per-frame-slot overlay arenas; `SceneZoneDrawScheduler` masks superseded static ranges; full recapture only past a high-water mark. |
 | 9 | Frame-to-frame depth-stencil sync hazard        | **Done** — `RenderPass` subpass dependency now declares prior color/depth writes; silences `WRITE_AFTER_WRITE` validation spam and the hit-X validation-layer SIGSEGV |
 | 10| Exit-time Vulkan teardown                       | **Done** — JVM shutdown hook (`vkgpu-shutdown-watch`) now runs `vkDeviceWaitIdle` + `disposables.close()` against a static `activeInstance` reference. `draw()` gates on a `shuttingDown` flag to stop new frame submissions while the hook runs. Silences validation's "dispatch handle not found" at X-press. |
+| 11| Sub-worldview (WorldEntity) rendering           | **Open — biggest gap, and a deliberate quarantine.** The `isTopLevelScene` gates (`GpuVulkanPlugin.java:1250-1253`) are the fix from fbf75b8 "world view clobber": sub-worldview Scenes coming through the shared capture path overwrote static ranges for whole planes (user symptom: Slayer Tower floors vanishing across 3 levels when climbing stairs). DO NOT just remove the gates — that bug returns. Proper support = per-worldview capture state (own arenas / worldview-keyed ranges) + per-zone `entityProj`/`entityTint` like stock (`GpuPlugin.java:1905-2000`), then lift the gate. Until then sailing-style ships / moving world entities will not render. Subsumes #4 and scene-level entity tint. |
+| 12| UI scaling filters                              | **Open.** Stock: NEAREST/LINEAR/MITCHELL/CATROM/XBR/HYBRID (`fragui.glsl`, `scale/*.glsl`). We always sample UI with LINEAR (`Texture.java:121-122`). Visible under stretched mode / HiDPI. |
+| 13| `hideUnrelatedMaps` is a dead toggle            | **Open.** Config item exists, `RegionManager` constructed but never invoked (`prepareScene` no-op, `GpuVulkanPlugin.java:1033-1039`). Wire it or hide the config item. |
+| 14| Draw distance doesn't cull geometry             | **Open (perf + visual delta).** `fullZoneRange = true` hardcoded (`SceneRenderer.java:1016`); drawDistance only drives fog + clickboxes. Stock never draws zones outside the radius. |
+| 15| Fog edge ignores expanded map chunks            | **Open (minor).** Stock scales `FOG_SCENE_EDGE_MIN/MAX` with `expandedMapLoadingChunks` (`vert.glsl:39-40`); we hardcode 1..103 (`scene.vert:51-52`), so expanded terrain past the core 104 tiles is fully fogged when fog is on. |
+| 16| Static alpha not depth-sorted per frame         | **Open (minor/accepted).** Stock re-sorts zone alpha geometry every frame (`Zone.java:520`); we replay static layers in capture order and lean on alpha-to-coverage. Can mis-order overlapping transparent statics. |
+
+Minor shader deviations (footnote, not gaps): textured-face brightness applies
+`pow` to the lightness term too (`scene.frag:151-154` vs stock
+`pow(tex,b)*light`); stock's `fHsl` is `noperspective centroid`, ours is
+default-smooth; texture alpha-test threshold 0.5 (NEAREST mag) vs stock's 1.0
+at lod 0; stock freezes texture animation during loading, we always advance.
+UI overlay-fade math differs: stock src-over `alphaBlend(ui, overlay)`, ours
+`mix(ui.rgb, overlay.rgb, overlay.a)` — tints opaque UI instead of fading the
+scene only.
 
 ## What we already have that stock doesn't
 
