@@ -28,6 +28,7 @@ import net.runelite.client.config.Config;
 import net.runelite.client.config.ConfigGroup;
 import net.runelite.client.config.ConfigItem;
 import net.runelite.client.config.ConfigSection;
+import net.runelite.client.config.Keybind;
 import net.runelite.client.config.Range;
 
 @ConfigGroup(GpuVulkanPluginConfig.GROUP)
@@ -145,29 +146,58 @@ public interface GpuVulkanPluginConfig extends Config
 	String UPSCALING_SECTION = "upscaling";
 
 	@ConfigSection(
-		name = "Recording",
-		description = "GPU video recording via the Vulkan video encode queue (experimental).",
+		name = "Replay buffer",
+		description = "Keep the last seconds of gameplay GPU-encoded in memory and save them as a clip on a hotkey (experimental).",
 		position = 2,
 		closedByDefault = true
 	)
 	String RECORDING_SECTION = "recording";
 
 	@ConfigItem(
-		keyName = "recordVideo",
-		name = "Record gameplay",
-		description = "Encode every frame to an H.264 stream in ~/.runelite/vulkan-recordings/ using the GPU's video encode engine. Requires hardware Vulkan video encode support (not available on macOS).",
+		keyName = "replayBuffer",
+		name = "Replay buffer",
+		description = "Continuously encode frames into an in-memory ring using the GPU's video encode engine; nothing is written to disk until you clip. Requires hardware Vulkan video encode support (not available on macOS).",
 		section = RECORDING_SECTION,
 		position = 0
 	)
-	default boolean recordVideo() { return false; }
+	default boolean replayBuffer() { return false; }
+
+	@ConfigItem(
+		keyName = "clipHotkey",
+		name = "Clip hotkey",
+		description = "Saves the replay buffer to ~/.runelite/vulkan-recordings/clip-<time>.h264.",
+		section = RECORDING_SECTION,
+		position = 1
+	)
+	default Keybind clipHotkey() { return Keybind.NOT_SET; }
+
+	@Range(min = 5, max = 60)
+	@ConfigItem(
+		keyName = "clipSeconds",
+		name = "Clip length (seconds)",
+		description = "How many seconds of gameplay the replay buffer holds. Longer buffers use more memory — every frame is a standalone IDR picture.",
+		section = RECORDING_SECTION,
+		position = 2
+	)
+	default int clipSeconds() { return 10; }
+
+	@Range(min = 10, max = 60)
+	@ConfigItem(
+		keyName = "replayFps",
+		name = "Capture FPS",
+		description = "Upper bound on frames captured per second. Caps memory use and clip size; the game's render FPS is unaffected.",
+		section = RECORDING_SECTION,
+		position = 3
+	)
+	default int replayFps() { return 30; }
 
 	@Range(min = 18, max = 40)
 	@ConfigItem(
 		keyName = "recordQp",
-		name = "Recording quality (QP)",
-		description = "H.264 quantization parameter. Lower = better quality and bigger files. Takes effect when recording restarts.",
+		name = "Quality (QP)",
+		description = "H.264 quantization parameter. Lower = better quality and more memory per buffered frame. Takes effect when the buffer restarts.",
 		section = RECORDING_SECTION,
-		position = 1
+		position = 4
 	)
 	default int recordQp() { return 26; }
 

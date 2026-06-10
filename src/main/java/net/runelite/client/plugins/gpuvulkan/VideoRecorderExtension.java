@@ -31,14 +31,15 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
-import java.nio.IntBuffer;
 import java.nio.LongBuffer;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import lombok.extern.slf4j.Slf4j;
-import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VkBufferImageCopy;
 import org.lwjgl.vulkan.VkBufferMemoryBarrier;
@@ -61,12 +62,15 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK13.*;
 
 /**
- * End-to-end GPU recording: grabs the composited frame in
+ * Replay buffer on the GPU: grabs the composited frame in
  * {@link #recordAfterComposite}, converts it to NV12 with a compute pass on
- * the graphics queue, and hands it to an {@link H264EncodeSession} on the
- * video encode queue from a worker thread. Output is a raw Annex-B
- * {@code .h264} elementary stream (play with {@code ffplay} / VLC, or wrap
- * with {@code ffmpeg -i in.h264 -c copy out.mp4}).
+ * the graphics queue, encodes it on the video encode queue, and keeps the
+ * last {@code clipSeconds} of encoded frames in memory. {@link #requestClip()}
+ * (wired to a hotkey by the plugin) writes the buffered frames out as an
+ * Annex-B {@code .h264} clip — nothing touches disk until then.
+ *
+ * <p>Every frame is an IDR picture, so the ring can be cut at any frame
+ * boundary at the cost of memory; the capture FPS cap keeps that bounded.
  *
  * <p>This extension exists to validate the backend's encode plumbing
  * (encode queue, frame timeline, post-composite hook); a production
@@ -77,6 +81,8 @@ final class VideoRecorderExtension implements VulkanRenderExtension
 {
 	private static final int SLOTS = 3;
 	private static final int PUSH_SIZE = 20;
+	/** Hard cap on buffered encoded bytes, on top of the time window. */
+	private static final long MAX_BUFFER_BYTES = 256L << 20;
 
 	private VulkanRenderContext context;
 	private VulkanDevice device;
@@ -96,26 +102,47 @@ final class VideoRecorderExtension implements VulkanRenderExtension
 	private final AtomicBoolean[] slotBusy = new AtomicBoolean[SLOTS];
 	private int sessionWidth;
 	private int sessionHeight;
+	private long lastCaptureNanos;
 
 	private final BlockingQueue<EncodeJob> jobs = new ArrayBlockingQueue<>(SLOTS);
 	private Thread worker;
 	private volatile boolean workerRunning;
-	private OutputStream output;
-	private File outputFile;
-	private long framesWritten;
 	private boolean unavailableLogged;
+	private boolean memoryCapLogged;
+
+	/** Ring of encoded frames plus the SPS/PPS header that matches them.
+	 *  Guarded by {@code ringLock}; touched by the encode worker, the clip
+	 *  hotkey (AWT thread) and start/stop (client thread). */
+	private final Object ringLock = new Object();
+	private final ArrayDeque<EncodedFrame> ring = new ArrayDeque<>();
+	private long ringBytes;
+	private byte[] ringHeader;
+
+	private static final class EncodedFrame
+	{
+		final byte[] data;
+		final long captureNanos;
+
+		EncodedFrame(byte[] data, long captureNanos)
+		{
+			this.data = data;
+			this.captureNanos = captureNanos;
+		}
+	}
 
 	private static final class EncodeJob
 	{
 		final int slot;
 		final long timelineSemaphore;
 		final long timelineValue;
+		final long captureNanos;
 
-		EncodeJob(int slot, long timelineSemaphore, long timelineValue)
+		EncodeJob(int slot, long timelineSemaphore, long timelineValue, long captureNanos)
 		{
 			this.slot = slot;
 			this.timelineSemaphore = timelineSemaphore;
 			this.timelineValue = timelineValue;
+			this.captureNanos = captureNanos;
 		}
 	}
 
@@ -134,11 +161,11 @@ final class VideoRecorderExtension implements VulkanRenderExtension
 	@Override
 	public void recordAfterComposite(VulkanPostFrameContext frame)
 	{
-		if (!config.recordVideo())
+		if (!config.replayBuffer())
 		{
 			if (session != null)
 			{
-				stopRecording();
+				stopBuffer();
 			}
 			return;
 		}
@@ -147,28 +174,36 @@ final class VideoRecorderExtension implements VulkanRenderExtension
 			if (!unavailableLogged)
 			{
 				unavailableLogged = true;
-				log.warn("Video recording unavailable: {}", context.encode().unavailableReason());
+				log.warn("Replay buffer unavailable: {}", context.encode().unavailableReason());
 			}
 			return;
 		}
 		if (session != null && (frame.width() != sessionWidth || frame.height() != sessionHeight))
 		{
-			// Canvas resized mid-recording: finish this file, next frame
-			// starts a new session at the new size.
-			stopRecording();
+			// Canvas resized: buffered frames have the old SPS dimensions and
+			// can't share a stream with new ones. Start over.
+			log.info("Replay buffer reset by resize to {}x{}", frame.width(), frame.height());
+			stopBuffer();
 		}
 		if (session == null)
 		{
 			try
 			{
-				startRecording(frame.width(), frame.height());
+				startBuffer(frame.width(), frame.height());
 			}
-			catch (RuntimeException | IOException e)
+			catch (RuntimeException e)
 			{
-				log.warn("Failed to start GPU recording", e);
+				log.warn("Failed to start replay buffer", e);
 				unavailableLogged = true;
 				return;
 			}
+		}
+
+		long now = System.nanoTime();
+		long minInterval = 1_000_000_000L / Math.max(1, config.replayFps());
+		if (now - lastCaptureNanos < minInterval)
+		{
+			return;
 		}
 
 		int slot = acquireSlot();
@@ -177,15 +212,73 @@ final class VideoRecorderExtension implements VulkanRenderExtension
 			return; // encode queue behind; drop the frame
 		}
 		recordConversion(frame, slot);
-		if (!jobs.offer(new EncodeJob(slot, frame.frameTimelineSemaphore(), frame.frameTimelineValue())))
+		if (jobs.offer(new EncodeJob(slot, frame.frameTimelineSemaphore(), frame.frameTimelineValue(), now)))
+		{
+			lastCaptureNanos = now;
+		}
+		else
 		{
 			slotBusy[slot].set(false);
 		}
 	}
 
+	/**
+	 * Saves the current ring as {@code clip-<timestamp>.h264}. Safe to call
+	 * from any thread (the plugin calls it from the hotkey listener); the
+	 * file write happens on a one-shot background thread.
+	 */
+	void requestClip()
+	{
+		byte[] header;
+		List<EncodedFrame> frames;
+		synchronized (ringLock)
+		{
+			if (ring.isEmpty() || ringHeader == null)
+			{
+				log.info("Clip requested but the replay buffer is empty");
+				return;
+			}
+			header = ringHeader;
+			frames = new ArrayList<>(ring);
+		}
+		Thread writer = new Thread(() -> writeClip(header, frames), "Vulkan-Clip-Writer");
+		writer.setDaemon(true);
+		writer.start();
+	}
+
+	private void writeClip(byte[] header, List<EncodedFrame> frames)
+	{
+		File dir = new File(net.runelite.client.RuneLite.RUNELITE_DIR, "vulkan-recordings");
+		if (!dir.exists() && !dir.mkdirs())
+		{
+			log.warn("Cannot create {}", dir);
+			return;
+		}
+		File file = new File(dir, "clip-" + System.currentTimeMillis() + ".h264");
+		long bytes = 0;
+		try (OutputStream out = new BufferedOutputStream(new FileOutputStream(file), 1 << 20))
+		{
+			out.write(header);
+			for (EncodedFrame frame : frames)
+			{
+				out.write(frame.data);
+				bytes += frame.data.length;
+			}
+		}
+		catch (IOException e)
+		{
+			log.warn("Failed to write clip", e);
+			return;
+		}
+		double seconds = frames.size() <= 1 ? 0
+			: (frames.get(frames.size() - 1).captureNanos - frames.get(0).captureNanos) / 1e9;
+		log.info("Clipped {} frames (~{}s, {} KiB) -> {}",
+			frames.size(), String.format("%.1f", seconds), bytes / 1024, file);
+	}
+
 	// ---- lifecycle ---------------------------------------------------------
 
-	private void startRecording(int width, int height) throws IOException
+	private void startBuffer(int width, int height)
 	{
 		if (pipeline == VK_NULL_HANDLE)
 		{
@@ -194,26 +287,24 @@ final class VideoRecorderExtension implements VulkanRenderExtension
 		session = new H264EncodeSession(device, width, height, SLOTS, config.recordQp());
 		sessionWidth = width;
 		sessionHeight = height;
+		lastCaptureNanos = 0;
 		createConversionBuffers();
-
-		File dir = new File(net.runelite.client.RuneLite.RUNELITE_DIR, "vulkan-recordings");
-		if (!dir.exists() && !dir.mkdirs())
+		synchronized (ringLock)
 		{
-			throw new IOException("Cannot create " + dir);
+			ring.clear();
+			ringBytes = 0;
+			ringHeader = session.parameterHeader();
 		}
-		outputFile = new File(dir, "recording-" + System.currentTimeMillis() + ".h264");
-		output = new BufferedOutputStream(new FileOutputStream(outputFile), 1 << 20);
-		output.write(session.parameterHeader());
-		framesWritten = 0;
 
 		workerRunning = true;
 		worker = new Thread(this::encodeLoop, "Vulkan-Recorder");
 		worker.setDaemon(true);
 		worker.start();
-		log.info("GPU recording started: {} ({}x{})", outputFile, width, height);
+		log.info("Replay buffer started: {}x{}, {}s window, {} fps cap",
+			width, height, config.clipSeconds(), config.replayFps());
 	}
 
-	private void stopRecording()
+	private void stopBuffer()
 	{
 		workerRunning = false;
 		if (worker != null)
@@ -229,7 +320,12 @@ final class VideoRecorderExtension implements VulkanRenderExtension
 			worker = null;
 		}
 		jobs.clear();
-		closeOutput();
+		synchronized (ringLock)
+		{
+			ring.clear();
+			ringBytes = 0;
+			ringHeader = null;
+		}
 		if (session != null)
 		{
 			// In-flight graphics command buffers may still reference the
@@ -243,24 +339,6 @@ final class VideoRecorderExtension implements VulkanRenderExtension
 		for (AtomicBoolean busy : slotBusy)
 		{
 			busy.set(false);
-		}
-	}
-
-	private void closeOutput()
-	{
-		if (output != null)
-		{
-			try
-			{
-				output.close();
-				log.info("GPU recording stopped: {} frames -> {} ({} KiB)",
-					framesWritten, outputFile, outputFile.length() / 1024);
-			}
-			catch (IOException e)
-			{
-				log.warn("Failed to close recording file", e);
-			}
-			output = null;
 		}
 	}
 
@@ -289,24 +367,42 @@ final class VideoRecorderExtension implements VulkanRenderExtension
 					continue; // frame never submitted; drop
 				}
 				byte[] encoded = session.encode(job.slot);
-				synchronized (this)
-				{
-					if (output != null)
-					{
-						output.write(encoded);
-						framesWritten++;
-					}
-				}
+				appendToRing(new EncodedFrame(encoded, job.captureNanos));
 			}
-			catch (RuntimeException | IOException e)
+			catch (RuntimeException e)
 			{
-				log.warn("GPU encode failed; stopping recording", e);
+				log.warn("GPU encode failed; stopping replay buffer", e);
 				workerRunning = false;
-				closeOutput();
 			}
 			finally
 			{
 				slotBusy[job.slot].set(false);
+			}
+		}
+	}
+
+	private void appendToRing(EncodedFrame frame)
+	{
+		long windowNanos = config.clipSeconds() * 1_000_000_000L;
+		synchronized (ringLock)
+		{
+			ring.addLast(frame);
+			ringBytes += frame.data.length;
+			while (!ring.isEmpty()
+				&& frame.captureNanos - ring.peekFirst().captureNanos > windowNanos)
+			{
+				ringBytes -= ring.removeFirst().data.length;
+			}
+			while (ringBytes > MAX_BUFFER_BYTES && ring.size() > 1)
+			{
+				ringBytes -= ring.removeFirst().data.length;
+				if (!memoryCapLogged)
+				{
+					memoryCapLogged = true;
+					log.warn("Replay buffer hit the {} MiB memory cap before the {}s window; "
+							+ "raise QP or lower capture FPS for the full window",
+						MAX_BUFFER_BYTES >> 20, config.clipSeconds());
+				}
 			}
 		}
 	}
@@ -638,7 +734,7 @@ final class VideoRecorderExtension implements VulkanRenderExtension
 	@Override
 	public void close()
 	{
-		stopRecording();
+		stopBuffer();
 		if (descriptorPool != VK_NULL_HANDLE)
 		{
 			vkDestroyDescriptorPool(device.handle(), descriptorPool, null);

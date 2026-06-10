@@ -89,6 +89,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	@Inject
 	private DrawManager drawManager;
 
+	@Inject
+	private net.runelite.client.input.KeyManager keyManager;
+
 	private Disposables disposables;
 	private VulkanInstance instance;
 	private VulkanSurface surface;
@@ -125,6 +128,20 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	private boolean pendingSceneIdentityRecapture;
 	private static boolean shutdownHookRegistered;
 	private final VulkanExtensionQueue extensionQueue = new VulkanExtensionQueue();
+	private volatile VideoRecorderExtension videoRecorder;
+	private final net.runelite.client.util.HotkeyListener clipHotkeyListener =
+		new net.runelite.client.util.HotkeyListener(() -> config.clipHotkey())
+	{
+		@Override
+		public void hotkeyPressed()
+		{
+			VideoRecorderExtension recorder = videoRecorder;
+			if (recorder != null)
+			{
+				recorder.requestClip();
+			}
+		}
+	};
 
 	/** Read by the JVM shutdown hook to find the live instance — must be
 	 *  static because the hook outlives any single plugin instance. */
@@ -153,6 +170,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		}
 		debugOverlay = new GpuVulkanDebugOverlayController(this, config, overlayManager, stats);
 		updateDebugOverlayRegistration();
+		keyManager.registerKeyListener(clipHotkeyListener);
 		startRequested = true;
 		recordCapturedSceneIdentity(null);
 		boolean wantVsync = config.fpsMode() != GpuVulkanPluginConfig.FpsMode.UNCAPPED;
@@ -361,9 +379,10 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		{
 			renderExtensions.register(new FsrUpscalerExtension());
 		}
-		// Always registered; it no-ops until the recordVideo config toggles on
+		// Always registered; it no-ops until the replayBuffer config toggles on
 		// and the device actually has an encode queue.
-		renderExtensions.register(new VideoRecorderExtension());
+		videoRecorder = new VideoRecorderExtension();
+		renderExtensions.register(videoRecorder);
 		extensionQueue.attachQueued(renderExtensions);
 		disposables.add(renderExtensions);
 
@@ -494,6 +513,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		log.info("Stopping GPU (Vulkan)");
 		startRequested = false;
 		shuttingDown = true;
+		keyManager.unregisterKeyListener(clipHotkeyListener);
+		videoRecorder = null;
 		removeMacResizeWake();
 		removeDebugOverlay();
 		// Unpublish first so a concurrent shutdown hook sees null and bails,
