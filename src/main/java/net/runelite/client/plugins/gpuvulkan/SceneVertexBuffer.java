@@ -25,6 +25,7 @@
 package net.runelite.client.plugins.gpuvulkan;
 
 import java.nio.ByteBuffer;
+import lombok.extern.slf4j.Slf4j;
 import java.nio.ByteOrder;
 import java.nio.LongBuffer;
 import org.lwjgl.system.MemoryStack;
@@ -51,6 +52,7 @@ import static org.lwjgl.vulkan.VK13.*;
  * lifetime — animation parameters are written into the UBO each frame, but
  * the binding itself does not change.
  */
+@Slf4j
 final class SceneVertexBuffer implements AutoCloseable
 {
 	private final VulkanDevice device;
@@ -102,6 +104,11 @@ final class SceneVertexBuffer implements AutoCloseable
 			}
 		}
 		this.staticMirror = mirror;
+		log.info("Scene vertex buffer: {} MiB, memory flags 0x{} ({}), static mirror {}",
+			totalBytes >> 20,
+			Integer.toHexString(vertexBuffer.memoryPropertyFlags()),
+			hostIsDeviceLocal ? "device-local/ReBAR-UMA" : "host memory",
+			mirror != null ? (staticBytes >> 20) + " MiB VRAM" : (hostIsDeviceLocal ? "not needed" : "FAILED"));
 
 		try (MemoryStack stack = stackPush())
 		{
