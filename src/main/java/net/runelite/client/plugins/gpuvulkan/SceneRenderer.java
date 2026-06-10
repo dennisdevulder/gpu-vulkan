@@ -57,9 +57,15 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	static final int DEFAULT_STATIC_VERTICES = 5_000_000;
 	static final int DEFAULT_FRAME_VERTICES = 3_000_000;
 
-	private final int maxStaticVertices;
+	/** Grows on capture overflow (see {@link #captureScene}); hard-capped so a
+	 *  pathological scene can't eat the address space. */
+	private int maxStaticVertices;
+	private static final int MAX_STATIC_VERTICES_HARD_CAP = 12_000_000;
 	private final int maxFrameVertices;
 	private final int overlayHighWaterVertices;
+	/** Vertices the capture wanted but the static arena couldn't hold —
+	 *  the demand signal for growing the arena. */
+	private int droppedVertices;
 	private static final int SCENE_OFFSET = (Constants.EXTENDED_SCENE_SIZE - Constants.SCENE_SIZE) / 2;
 	/** False for sub-worldview renderers — only the top-level scene owns a skybox dome. */
 	private final boolean emitSkybox;
@@ -72,10 +78,11 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	private final ScenePipeline skyboxPipeline;
 	private final ScenePipeline priorityColorPipeline;
 	private final ScenePipeline priorityDepthPipeline;
-	private final SceneVertexBuffer vbuf;
-	private final ByteBuffer mapped;
-	private final long descriptorSet;
-	private final int slotBytes;
+	private final TextureArray textureArray;
+	private SceneVertexBuffer vbuf;
+	private ByteBuffer mapped;
+	private long descriptorSet;
+	private int slotBytes;
 	private final DrawCallbackStats stats;
 	private final boolean repushConstantsEveryDraw;
 	private final SceneDrawEmitter drawEmitter;
@@ -209,6 +216,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		this.writeVertexLimit = maxStaticVertices;
 		this.device = device;
 		this.sync = sync;
+		this.textureArray = textureArray;
 		this.stats = stats;
 		this.repushConstantsEveryDraw = device.supportsMetalObjects();
 		this.drawEmitter = new SceneDrawEmitter(stats, repushConstantsEveryDraw);
@@ -329,6 +337,10 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	{
 		if (vertices < 0 || vertexCount > writeVertexLimit - vertices)
 		{
+			if (vertices > 0)
+			{
+				droppedVertices += vertices;
+			}
 			overflow();
 			return false;
 		}
@@ -451,9 +463,53 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 
 	void captureScene(Scene scene)
 	{
+		// Dense regions can exceed the static arena (observed: ~5.5M verts at
+		// Lumbridge with full extended load vs the 5M default — overflow
+		// silently dropped the trailing layers, so whole staircases and wall
+		// runs vanished). On overflow, grow to measured demand and recapture.
+		for (int attempt = 0; ; attempt++)
+		{
+			captureSceneOnce(scene);
+			int demand = vertexCount + droppedVertices;
+			if (!overflowed || attempt >= 2 || maxStaticVertices >= MAX_STATIC_VERTICES_HARD_CAP)
+			{
+				if (overflowed)
+				{
+					log.warn("Scene demand {} verts exceeds static arena cap {}; geometry truncated",
+						demand, maxStaticVertices);
+				}
+				return;
+			}
+			int target = Math.min(MAX_STATIC_VERTICES_HARD_CAP,
+				Math.max(demand + demand / 5, maxStaticVertices + maxStaticVertices / 2));
+			log.info("Static scene arena overflow (demand {} verts, capacity {}), growing to {} and recapturing",
+				demand, maxStaticVertices, target);
+			growStaticArena(target);
+		}
+	}
+
+	/** Reallocates the vertex buffer with a larger static region. Caller
+	 *  guarantees the GPU is idle (captureSceneOnce drains first). */
+	private void growStaticArena(int newStaticVertices)
+	{
+		Vk.check("vkDeviceWaitIdle (arena grow)", vkDeviceWaitIdle(device.handle()));
+		vbuf.close();
+		maxStaticVertices = newStaticVertices;
+		vbuf = new SceneVertexBuffer(device,
+			staticBufferBytes() + frameBufferBytes() * FrameSync.FRAMES_IN_FLIGHT,
+			frameBufferBytes(),
+			fillPipeline.descriptorSetLayout(), textureArray);
+		mapped = vbuf.mapped();
+		descriptorSet = vbuf.descriptorSet();
+		slotBytes = (int) vbuf.slotBytes();
+	}
+
+	private void captureSceneOnce(Scene scene)
+	{
 		// Drain the GPU before rewriting the buffer; captureScene is rare
 		// (region change) and the buffer is shared across all in-flight frames.
 		Vk.check("vkDeviceWaitIdle", vkDeviceWaitIdle(device.handle()));
+		droppedVertices = 0;
 
 		for (int i = 0; i < LAYER_COUNT; i++)
 		{

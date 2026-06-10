@@ -355,9 +355,15 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 
 		regionManager = new RegionManager();
 
-		subWorldViews = new SubWorldViewManager(device, sync, renderPass, textureArray, stats,
-			!config.benchmarkDisableAlphaCoverage(), config.singlePassAlpha());
-		disposables.add(subWorldViews);
+		// Escape hatch while sub-worldview rendering is young: with the
+		// property set, BaseRenderer falls back to the single recordDraw
+		// path and all sub-scene callbacks drop like before.
+		if (!Boolean.getBoolean("vkgpu.disableSubWorldViews"))
+		{
+			subWorldViews = new SubWorldViewManager(device, sync, renderPass, textureArray, stats,
+				!config.benchmarkDisableAlphaCoverage(), config.singlePassAlpha());
+			disposables.add(subWorldViews);
+		}
 
 		renderExtensions = new RenderExtensions(
 			new DefaultVulkanRenderContext(client, config, gfx, device, sync, renderPass, textureArray, stats));
