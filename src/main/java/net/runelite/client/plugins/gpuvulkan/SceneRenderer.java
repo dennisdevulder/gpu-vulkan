@@ -1298,32 +1298,6 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			int maxZoneX = fullZoneRange ? ZONES_PER_SIDE - 1 : Math.min(ZONES_PER_SIDE - 1, camZoneX + radiusZones);
 			int minZoneZ = fullZoneRange ? 0 : Math.max(0, camZoneZ - radiusZones);
 			int maxZoneZ = fullZoneRange ? ZONES_PER_SIDE - 1 : Math.min(ZONES_PER_SIDE - 1, camZoneZ + radiusZones);
-			if (skyboxEnd > skyboxStart)
-			{
-				float[] skyboxMvp = mvp.clone();
-				Mat4Ops.mul(skyboxMvp, Mat4Ops.translate(cameraX, cameraY, cameraZ));
-
-				ByteBuffer skyboxVertPush = stack.malloc(96);
-				Mat4Ops.writeTo(skyboxVertPush, skyboxMvp);
-				skyboxVertPush.position(64);
-				skyboxVertPush.putFloat(cameraX);
-				skyboxVertPush.putFloat(cameraZ);
-				skyboxVertPush.putFloat(drawDistanceTiles * 128f);
-				skyboxVertPush.putFloat(0f);
-				skyboxVertPush.putInt(tick).putInt(0).putInt(0).putInt(0);
-				skyboxVertPush.flip();
-
-				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipeline.handle());
-				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-					skyboxPipeline.layout(), 0, stack.longs(descriptorSet), null);
-				if (!repushConstantsEveryDraw)
-				{
-					drawEmitter.pushConstants(cmd, skyboxPipeline.layout(), skyboxVertPush, fragPush);
-				}
-				drawEmitter.drawRange(cmd, skyboxStart, skyboxEnd, skipScratch, 0, false,
-					staticFirstVertex, skyboxPipeline.layout(), skyboxVertPush, fragPush);
-			}
-
 			int layerStart = skyboxEnd > skyboxStart ? skyboxEnd : 0;
 			for (int i = 0; i < LAYER_COUNT; i++)
 			{
@@ -1405,6 +1379,36 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 				drawPriorityRanges(cmd, slotFirstVertex, priorityDepthPipeline.layout(), vertPush, fragPush);
 			}
 
+			// Skybox LAST: the dome covers the whole screen, so drawing it
+			// after the scene lets the depth test (write-off, test-on
+			// pipeline) kill every fragment terrain already covered instead
+			// of shading the full screen and overdrawing it.
+			if (skyboxEnd > skyboxStart)
+			{
+				float[] skyboxMvp = mvp.clone();
+				Mat4Ops.mul(skyboxMvp, Mat4Ops.translate(cameraX, cameraY, cameraZ));
+
+				ByteBuffer skyboxVertPush = stack.malloc(96);
+				Mat4Ops.writeTo(skyboxVertPush, skyboxMvp);
+				skyboxVertPush.position(64);
+				skyboxVertPush.putFloat(cameraX);
+				skyboxVertPush.putFloat(cameraZ);
+				skyboxVertPush.putFloat(drawDistanceTiles * 128f);
+				skyboxVertPush.putFloat(0f);
+				skyboxVertPush.putInt(tick).putInt(0).putInt(0).putInt(0);
+				skyboxVertPush.flip();
+
+				bindArena(cmd, vbuf.staticDrawHandle());
+				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipeline.handle());
+				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+					skyboxPipeline.layout(), 0, stack.longs(descriptorSet), null);
+				if (!repushConstantsEveryDraw)
+				{
+					drawEmitter.pushConstants(cmd, skyboxPipeline.layout(), skyboxVertPush, fragPush);
+				}
+				drawEmitter.drawRange(cmd, skyboxStart, skyboxEnd, skipScratch, 0, false,
+					staticFirstVertex, skyboxPipeline.layout(), skyboxVertPush, fragPush);
+			}
 		}
 	}
 
