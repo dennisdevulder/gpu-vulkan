@@ -24,40 +24,21 @@
  */
 package net.runelite.client.plugins.gpuvulkan.gfx;
 
-import org.lwjgl.vulkan.VkCommandBuffer;
+import java.nio.ByteBuffer;
 
 /**
- * Non-owning rendering-device facade exposed to extensions.
- *
- * <p>Resources returned by {@code create*} are owned by the caller and must be
- * closed by the caller. The backend-owned device facade itself is borrowed and
- * intentionally has no {@code close()} method.
+ * Persistently mapped, host-coherent GPU buffer. CPU writes race GPU reads
+ * of in-flight frames — callers either write only data the GPU isn't
+ * reading, or sub-range per {@link RenderDevice#currentSlot()}.
  */
-public interface RenderDevice
+public interface GpuBuffer extends AutoCloseable
 {
-	ShaderModule createShaderModule(byte[] spirv);
+	long size();
 
-	BindGroupLayout createBindGroupLayout(BindGroupLayoutDesc desc);
+	ByteBuffer mapped();
 
-	BindGroup createBindGroup(BindGroupDesc desc);
+	void flush();
 
-	RenderPipeline createRenderPipeline(RenderPipelineDesc desc);
-
-	ComputePipeline createComputePipeline(ComputePipelineDesc desc);
-
-	GpuBuffer createBuffer(long size, BufferUsage usage);
-
-	StreamingImage createStreamingImage(int width, int height);
-
-	/**
-	 * Offscreen color+depth target. {@code samples} is a
-	 * {@code VK_SAMPLE_COUNT_*} value; pass
-	 * {@code VulkanRenderContext.renderPassSamples()} to match the main
-	 * scene pass, or 1 for post-process targets.
-	 */
-	RenderTarget createRenderTarget(int width, int height, int samples);
-
-	int currentSlot();
-
-	RenderEncoder encodeInto(VkCommandBuffer cmd);
+	@Override
+	void close();
 }

@@ -29,6 +29,7 @@ import net.runelite.client.plugins.gpuvulkan.gfx.BindGroup;
 import net.runelite.client.plugins.gpuvulkan.gfx.BindGroupDesc;
 import net.runelite.client.plugins.gpuvulkan.gfx.BindGroupLayoutDesc;
 import org.lwjgl.system.MemoryStack;
+import org.lwjgl.vulkan.VkDescriptorBufferInfo;
 import org.lwjgl.vulkan.VkDescriptorImageInfo;
 import org.lwjgl.vulkan.VkDescriptorPoolCreateInfo;
 import org.lwjgl.vulkan.VkDescriptorPoolSize;
@@ -65,6 +66,8 @@ final class GfxBindGroup implements BindGroup
 			allocateSets(stack, pool, layout.handle());
 			writeStreamingImages(stack, desc);
 			writeSampledImages(stack, desc);
+			writeRenderTargets(stack, desc);
+			writeBuffers(stack, desc, layout.desc());
 		}
 	}
 
@@ -183,12 +186,94 @@ final class GfxBindGroup implements BindGroup
 		vkUpdateDescriptorSets(device.handle(), writes, null);
 	}
 
+	private void writeRenderTargets(MemoryStack stack, BindGroupDesc desc)
+	{
+		if (desc.renderTargets().isEmpty()) return;
+
+		int total = desc.renderTargets().size() * FrameSync.FRAMES_IN_FLIGHT;
+		VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(total, stack);
+		int w = 0;
+		for (BindGroupDesc.RenderTargetEntry entry : desc.renderTargets())
+		{
+			GfxRenderTarget target = (GfxRenderTarget) entry.target;
+			for (int slot = 0; slot < FrameSync.FRAMES_IN_FLIGHT; slot++)
+			{
+				VkDescriptorImageInfo.Buffer imgInfo =
+					VkDescriptorImageInfo.calloc(1, stack);
+				imgInfo.get(0)
+					.sampler(target.sampler())
+					.imageView(target.colorView())
+					.imageLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+				writes.get(w++)
+					.sType$Default()
+					.dstSet(sets[slot])
+					.dstBinding(entry.binding)
+					.dstArrayElement(0)
+					.descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+					.descriptorCount(1)
+					.pImageInfo(imgInfo);
+			}
+		}
+		vkUpdateDescriptorSets(device.handle(), writes, null);
+	}
+
+	private void writeBuffers(MemoryStack stack, BindGroupDesc desc, BindGroupLayoutDesc layoutDesc)
+	{
+		if (desc.buffers().isEmpty()) return;
+
+		// Same buffer for every slot, mirroring writeSampledImages.
+		int total = desc.buffers().size() * FrameSync.FRAMES_IN_FLIGHT;
+		VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(total, stack);
+		int w = 0;
+		for (BindGroupDesc.BufferEntry entry : desc.buffers())
+		{
+			GfxGpuBuffer buffer = (GfxGpuBuffer) entry.buffer;
+			int dType = descriptorTypeForBinding(layoutDesc, entry.binding);
+			for (int slot = 0; slot < FrameSync.FRAMES_IN_FLIGHT; slot++)
+			{
+				VkDescriptorBufferInfo.Buffer bufInfo =
+					VkDescriptorBufferInfo.calloc(1, stack);
+				bufInfo.get(0)
+					.buffer(buffer.handle())
+					.offset(entry.offset)
+					.range(entry.range);
+
+				writes.get(w++)
+					.sType$Default()
+					.dstSet(sets[slot])
+					.dstBinding(entry.binding)
+					.dstArrayElement(0)
+					.descriptorType(dType)
+					.descriptorCount(1)
+					.pBufferInfo(bufInfo);
+			}
+		}
+		vkUpdateDescriptorSets(device.handle(), writes, null);
+	}
+
+	private static int descriptorTypeForBinding(BindGroupLayoutDesc layoutDesc, int binding)
+	{
+		for (BindGroupLayoutDesc.Entry e : layoutDesc.entries())
+		{
+			if (e.binding == binding)
+			{
+				return vulkanDescriptorType(e.kind);
+			}
+		}
+		throw new IllegalArgumentException("No layout entry for binding " + binding);
+	}
+
 	private static int vulkanDescriptorType(BindGroupLayoutDesc.BindingKind kind)
 	{
 		switch (kind)
 		{
 			case COMBINED_IMAGE_SAMPLER:
 				return VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+			case UNIFORM_BUFFER:
+				return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+			case STORAGE_BUFFER:
+				return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 			default:
 				throw new IllegalArgumentException("Unhandled binding kind: " + kind);
 		}

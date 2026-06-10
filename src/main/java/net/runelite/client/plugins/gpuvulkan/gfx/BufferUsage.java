@@ -24,40 +24,10 @@
  */
 package net.runelite.client.plugins.gpuvulkan.gfx;
 
-import org.lwjgl.vulkan.VkCommandBuffer;
-
-/**
- * Non-owning rendering-device facade exposed to extensions.
- *
- * <p>Resources returned by {@code create*} are owned by the caller and must be
- * closed by the caller. The backend-owned device facade itself is borrowed and
- * intentionally has no {@code close()} method.
- */
-public interface RenderDevice
+public enum BufferUsage
 {
-	ShaderModule createShaderModule(byte[] spirv);
-
-	BindGroupLayout createBindGroupLayout(BindGroupLayoutDesc desc);
-
-	BindGroup createBindGroup(BindGroupDesc desc);
-
-	RenderPipeline createRenderPipeline(RenderPipelineDesc desc);
-
-	ComputePipeline createComputePipeline(ComputePipelineDesc desc);
-
-	GpuBuffer createBuffer(long size, BufferUsage usage);
-
-	StreamingImage createStreamingImage(int width, int height);
-
-	/**
-	 * Offscreen color+depth target. {@code samples} is a
-	 * {@code VK_SAMPLE_COUNT_*} value; pass
-	 * {@code VulkanRenderContext.renderPassSamples()} to match the main
-	 * scene pass, or 1 for post-process targets.
-	 */
-	RenderTarget createRenderTarget(int width, int height, int samples);
-
-	int currentSlot();
-
-	RenderEncoder encodeInto(VkCommandBuffer cmd);
+	VERTEX,
+	INDEX,
+	UNIFORM,
+	STORAGE
 }

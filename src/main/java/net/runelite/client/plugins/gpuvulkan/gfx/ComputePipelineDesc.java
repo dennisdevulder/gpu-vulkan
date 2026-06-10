@@ -29,69 +29,47 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * Description used to build a {@link BindGroupLayout}.
+ * Description used to build a {@link ComputePipeline}.
  */
-public final class BindGroupLayoutDesc
+public final class ComputePipelineDesc
 {
-	public enum BindingKind
+	private final ShaderModule compute;
+	private final List<BindGroupLayout> bindGroupLayouts;
+	private final List<RenderPipelineDesc.PushConstantRange> pushConstants;
+
+	private ComputePipelineDesc(Builder b)
 	{
-		COMBINED_IMAGE_SAMPLER,
-		UNIFORM_BUFFER,
-		STORAGE_BUFFER
+		this.compute = b.compute;
+		this.bindGroupLayouts = Collections.unmodifiableList(new ArrayList<>(b.bindGroupLayouts));
+		this.pushConstants = Collections.unmodifiableList(new ArrayList<>(b.pushConstants));
 	}
 
-	public static final class Entry
-	{
-		public final int binding;
-		public final BindingKind kind;
-		public final int stages;
-
-		Entry(int binding, BindingKind kind, int stages)
-		{
-			this.binding = binding;
-			this.kind = kind;
-			this.stages = stages;
-		}
-	}
-
-	private final List<Entry> entries;
-
-	private BindGroupLayoutDesc(List<Entry> entries)
-	{
-		this.entries = Collections.unmodifiableList(entries);
-	}
-
-	public List<Entry> entries() { return entries; }
+	public ShaderModule compute() { return compute; }
+	public List<BindGroupLayout> bindGroupLayouts() { return bindGroupLayouts; }
+	public List<RenderPipelineDesc.PushConstantRange> pushConstants() { return pushConstants; }
 
 	public static Builder builder() { return new Builder(); }
 
 	public static final class Builder
 	{
-		private final List<Entry> entries = new ArrayList<>();
+		private ShaderModule compute;
+		private final List<BindGroupLayout> bindGroupLayouts = new ArrayList<>();
+		private final List<RenderPipelineDesc.PushConstantRange> pushConstants = new ArrayList<>();
 
-		/** Declares a combined image+sampler at {@code binding} visible to
-		 *  the given {@code stages} (use {@link ShaderStage} constants). */
-		public Builder combinedImageSampler(int binding, int stages)
+		public Builder compute(ShaderModule c) { this.compute = c; return this; }
+
+		public Builder addBindGroupLayout(BindGroupLayout l)
 		{
-			entries.add(new Entry(binding, BindingKind.COMBINED_IMAGE_SAMPLER, stages));
+			bindGroupLayouts.add(l);
 			return this;
 		}
 
-		public Builder uniformBuffer(int binding, int stages)
+		public Builder addPushConstantRange(int stages, int offset, int size)
 		{
-			entries.add(new Entry(binding, BindingKind.UNIFORM_BUFFER, stages));
+			pushConstants.add(new RenderPipelineDesc.PushConstantRange(stages, offset, size));
 			return this;
 		}
 
-		public Builder storageBuffer(int binding, int stages)
-		{
-			entries.add(new Entry(binding, BindingKind.STORAGE_BUFFER, stages));
-			return this;
-		}
-
-		public BindGroupLayoutDesc build()
-		{
-			return new BindGroupLayoutDesc(new ArrayList<>(entries));
-		}
+		public ComputePipelineDesc build() { return new ComputePipelineDesc(this); }
 	}
 }

@@ -42,14 +42,16 @@ import org.lwjgl.vulkan.VkPipelineShaderStageCreateInfo;
 import org.lwjgl.vulkan.VkPipelineVertexInputStateCreateInfo;
 import org.lwjgl.vulkan.VkPipelineViewportStateCreateInfo;
 import org.lwjgl.vulkan.VkPushConstantRange;
+import org.lwjgl.vulkan.VkVertexInputAttributeDescription;
+import org.lwjgl.vulkan.VkVertexInputBindingDescription;
 
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK13.*;
 
 /**
- * Constraints: no vertex attributes, single colour attachment, blend / depth
- * presets matching {@link RenderPipelineDesc.BlendMode} +
- * {@link RenderPipelineDesc.DepthTest}.
+ * Constraints: single colour attachment, blend / depth presets matching
+ * {@link RenderPipelineDesc.BlendMode} + {@link RenderPipelineDesc.DepthTest}.
+ * No vertex-buffer declarations = no vertex input (vertex-pulling).
  */
 final class GfxRenderPipeline implements RenderPipeline
 {
@@ -144,10 +146,35 @@ final class GfxRenderPipeline implements RenderPipeline
 			.module(((GfxShaderModule) desc.fragment()).handle())
 			.pName(stack.UTF8("main"));
 
-		// No vertex attributes: full-screen triangle pattern with
-		// gl_VertexIndex picking corners.
 		VkPipelineVertexInputStateCreateInfo vertexInput =
 			VkPipelineVertexInputStateCreateInfo.calloc(stack).sType$Default();
+		if (!desc.vertexBuffers().isEmpty())
+		{
+			VkVertexInputBindingDescription.Buffer bindings =
+				VkVertexInputBindingDescription.calloc(desc.vertexBuffers().size(), stack);
+			for (int i = 0; i < desc.vertexBuffers().size(); i++)
+			{
+				RenderPipelineDesc.VertexBufferBinding b = desc.vertexBuffers().get(i);
+				bindings.get(i)
+					.binding(b.binding)
+					.stride(b.stride)
+					.inputRate(VK_VERTEX_INPUT_RATE_VERTEX);
+			}
+			VkVertexInputAttributeDescription.Buffer attributes =
+				VkVertexInputAttributeDescription.calloc(desc.vertexAttributes().size(), stack);
+			for (int i = 0; i < desc.vertexAttributes().size(); i++)
+			{
+				RenderPipelineDesc.VertexAttribute a = desc.vertexAttributes().get(i);
+				attributes.get(i)
+					.location(a.location)
+					.binding(a.binding)
+					.format(vulkanFormat(a.format))
+					.offset(a.offset);
+			}
+			vertexInput
+				.pVertexBindingDescriptions(bindings)
+				.pVertexAttributeDescriptions(attributes);
+		}
 
 		int topology;
 		switch (desc.topology())
@@ -254,5 +281,28 @@ final class GfxRenderPipeline implements RenderPipeline
 		Vk.check("vkCreateGraphicsPipelines (gfx)",
 			vkCreateGraphicsPipelines(device.handle(), VK_NULL_HANDLE, info, null, p));
 		return p.get(0);
+	}
+
+	private static int vulkanFormat(RenderPipelineDesc.AttributeFormat format)
+	{
+		switch (format)
+		{
+			case FLOAT:
+				return VK_FORMAT_R32_SFLOAT;
+			case FLOAT2:
+				return VK_FORMAT_R32G32_SFLOAT;
+			case FLOAT3:
+				return VK_FORMAT_R32G32B32_SFLOAT;
+			case FLOAT4:
+				return VK_FORMAT_R32G32B32A32_SFLOAT;
+			case INT:
+				return VK_FORMAT_R32_SINT;
+			case UINT:
+				return VK_FORMAT_R32_UINT;
+			case UBYTE4_NORM:
+				return VK_FORMAT_R8G8B8A8_UNORM;
+			default:
+				throw new IllegalArgumentException("Unhandled attribute format: " + format);
+		}
 	}
 }

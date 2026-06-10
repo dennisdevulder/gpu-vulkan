@@ -51,6 +51,45 @@ public final class RenderPipelineDesc
 		REVERSE_Z
 	}
 
+	public enum AttributeFormat
+	{
+		FLOAT,
+		FLOAT2,
+		FLOAT3,
+		FLOAT4,
+		INT,
+		UINT,
+		UBYTE4_NORM
+	}
+
+	public static final class VertexBufferBinding
+	{
+		public final int binding;
+		public final int stride;
+
+		VertexBufferBinding(int binding, int stride)
+		{
+			this.binding = binding;
+			this.stride = stride;
+		}
+	}
+
+	public static final class VertexAttribute
+	{
+		public final int location;
+		public final int binding;
+		public final AttributeFormat format;
+		public final int offset;
+
+		VertexAttribute(int location, int binding, AttributeFormat format, int offset)
+		{
+			this.location = location;
+			this.binding = binding;
+			this.format = format;
+			this.offset = offset;
+		}
+	}
+
 	private final ShaderModule vertex;
 	private final ShaderModule fragment;
 	private final Topology topology;
@@ -58,6 +97,8 @@ public final class RenderPipelineDesc
 	private final DepthTest depthTest;
 	private final List<BindGroupLayout> bindGroupLayouts;
 	private final List<PushConstantRange> pushConstants;
+	private final List<VertexBufferBinding> vertexBuffers;
+	private final List<VertexAttribute> vertexAttributes;
 	private final boolean useSwapchainRenderPass;
 
 	private RenderPipelineDesc(Builder b)
@@ -69,6 +110,8 @@ public final class RenderPipelineDesc
 		this.depthTest = b.depthTest;
 		this.bindGroupLayouts = Collections.unmodifiableList(new ArrayList<>(b.bindGroupLayouts));
 		this.pushConstants = Collections.unmodifiableList(new ArrayList<>(b.pushConstants));
+		this.vertexBuffers = Collections.unmodifiableList(new ArrayList<>(b.vertexBuffers));
+		this.vertexAttributes = Collections.unmodifiableList(new ArrayList<>(b.vertexAttributes));
 		this.useSwapchainRenderPass = b.useSwapchainRenderPass;
 	}
 
@@ -79,6 +122,8 @@ public final class RenderPipelineDesc
 	public DepthTest depthTest() { return depthTest; }
 	public List<BindGroupLayout> bindGroupLayouts() { return bindGroupLayouts; }
 	public List<PushConstantRange> pushConstants() { return pushConstants; }
+	public List<VertexBufferBinding> vertexBuffers() { return vertexBuffers; }
+	public List<VertexAttribute> vertexAttributes() { return vertexAttributes; }
 	public boolean useSwapchainRenderPass() { return useSwapchainRenderPass; }
 
 	public static final class PushConstantRange
@@ -106,6 +151,8 @@ public final class RenderPipelineDesc
 		private DepthTest depthTest = DepthTest.OFF;
 		private final List<BindGroupLayout> bindGroupLayouts = new ArrayList<>();
 		private final List<PushConstantRange> pushConstants = new ArrayList<>();
+		private final List<VertexBufferBinding> vertexBuffers = new ArrayList<>();
+		private final List<VertexAttribute> vertexAttributes = new ArrayList<>();
 		private boolean useSwapchainRenderPass = true;
 
 		public Builder vertex(ShaderModule v) { this.vertex = v; return this; }
@@ -123,6 +170,20 @@ public final class RenderPipelineDesc
 		public Builder addPushConstantRange(int stages, int offset, int size)
 		{
 			pushConstants.add(new PushConstantRange(stages, offset, size));
+			return this;
+		}
+
+		/** Declares a per-vertex buffer binding. Empty = no vertex input
+		 *  (vertex-pulling), which remains the default. */
+		public Builder vertexBuffer(int binding, int stride)
+		{
+			vertexBuffers.add(new VertexBufferBinding(binding, stride));
+			return this;
+		}
+
+		public Builder vertexAttribute(int location, int binding, AttributeFormat format, int offset)
+		{
+			vertexAttributes.add(new VertexAttribute(location, binding, format, offset));
 			return this;
 		}
 

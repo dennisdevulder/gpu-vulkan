@@ -27,15 +27,39 @@ package net.runelite.client.plugins.gpuvulkan.gfx;
 import java.nio.ByteBuffer;
 
 /**
- * Records draw commands into the current frame's command stream. The layer
- * does not expose render-pass boundaries: consumers receive a
- * {@code RenderEncoder} that's already mid-pass and can issue draws.
+ * Records draw commands into the current frame's command stream. Inside the
+ * backend's own passes consumers receive a {@code RenderEncoder} that's
+ * already mid-pass and can issue draws; extension-owned passes against a
+ * {@link RenderTarget} are bracketed with {@link #beginPass} /
+ * {@link #endPass}.
  */
 public interface RenderEncoder
 {
+	/**
+	 * Begins a render pass on an offscreen target, clearing color to the
+	 * given values and depth to the reverse-Z far plane. Sets a full-target
+	 * viewport and scissor. Must not be called while another pass is open.
+	 */
+	RenderEncoder beginPass(RenderTarget target, float r, float g, float b, float a);
+
+	RenderEncoder endPass();
+
+	/**
+	 * Transitions the target's color image for sampling. Call between
+	 * {@link #endPass()} and the pass that samples it; outside any pass.
+	 */
+	RenderEncoder prepareForSampling(RenderTarget target);
+
 	RenderEncoder bindPipeline(RenderPipeline pipeline);
 
+	RenderEncoder bindComputePipeline(ComputePipeline pipeline);
+
 	RenderEncoder bindBindGroup(int set, BindGroup group);
+
+	RenderEncoder bindVertexBuffer(int binding, GpuBuffer buffer, long offset);
+
+	/** Binds a {@code VK_INDEX_TYPE_UINT32} index buffer. */
+	RenderEncoder bindIndexBuffer(GpuBuffer buffer, long offset);
 
 	/**
 	 * Updates a contiguous push-constant range. {@code stages} must be a
@@ -50,4 +74,9 @@ public interface RenderEncoder
 	RenderEncoder setScissor(int x, int y, int width, int height);
 
 	RenderEncoder draw(int vertexCount, int instanceCount, int firstVertex, int firstInstance);
+
+	RenderEncoder drawIndexed(int indexCount, int instanceCount, int firstIndex, int vertexOffset, int firstInstance);
+
+	/** Only valid strictly outside render passes. */
+	RenderEncoder dispatch(int x, int y, int z);
 }

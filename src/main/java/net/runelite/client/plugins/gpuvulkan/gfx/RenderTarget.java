@@ -24,40 +24,30 @@
  */
 package net.runelite.client.plugins.gpuvulkan.gfx;
 
-import org.lwjgl.vulkan.VkCommandBuffer;
-
 /**
- * Non-owning rendering-device facade exposed to extensions.
- *
- * <p>Resources returned by {@code create*} are owned by the caller and must be
- * closed by the caller. The backend-owned device facade itself is borrowed and
- * intentionally has no {@code close()} method.
+ * Offscreen color+depth render target. Render into it via
+ * {@link RenderEncoder#beginPass}, then sample its color image from a later
+ * pass after {@link RenderEncoder#prepareForSampling}. Pipelines that draw
+ * into this target must be created from {@link #device()} — the target owns
+ * its own render pass and pipelines are only compatible with the pass they
+ * were built against.
  */
-public interface RenderDevice
+public interface RenderTarget extends AutoCloseable
 {
-	ShaderModule createShaderModule(byte[] spirv);
+	int width();
 
-	BindGroupLayout createBindGroupLayout(BindGroupLayoutDesc desc);
-
-	BindGroup createBindGroup(BindGroupDesc desc);
-
-	RenderPipeline createRenderPipeline(RenderPipelineDesc desc);
-
-	ComputePipeline createComputePipeline(ComputePipelineDesc desc);
-
-	GpuBuffer createBuffer(long size, BufferUsage usage);
-
-	StreamingImage createStreamingImage(int width, int height);
+	int height();
 
 	/**
-	 * Offscreen color+depth target. {@code samples} is a
-	 * {@code VK_SAMPLE_COUNT_*} value; pass
-	 * {@code VulkanRenderContext.renderPassSamples()} to match the main
-	 * scene pass, or 1 for post-process targets.
+	 * Resizes the target, waiting for all in-flight frames first. Returns
+	 * true when the target was actually recreated — bind groups referencing
+	 * its color image must then be recreated by the caller.
 	 */
-	RenderTarget createRenderTarget(int width, int height, int samples);
+	boolean resize(int width, int height);
 
-	int currentSlot();
+	/** Device whose pipelines render into this target. */
+	RenderDevice device();
 
-	RenderEncoder encodeInto(VkCommandBuffer cmd);
+	@Override
+	void close();
 }

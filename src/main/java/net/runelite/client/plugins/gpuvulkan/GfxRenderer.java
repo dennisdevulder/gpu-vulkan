@@ -30,9 +30,14 @@ import net.runelite.client.plugins.gpuvulkan.gfx.BindGroup;
 import net.runelite.client.plugins.gpuvulkan.gfx.BindGroupDesc;
 import net.runelite.client.plugins.gpuvulkan.gfx.BindGroupLayout;
 import net.runelite.client.plugins.gpuvulkan.gfx.BindGroupLayoutDesc;
+import net.runelite.client.plugins.gpuvulkan.gfx.BufferUsage;
+import net.runelite.client.plugins.gpuvulkan.gfx.ComputePipeline;
+import net.runelite.client.plugins.gpuvulkan.gfx.ComputePipelineDesc;
+import net.runelite.client.plugins.gpuvulkan.gfx.GpuBuffer;
 import net.runelite.client.plugins.gpuvulkan.gfx.RenderEncoder;
 import net.runelite.client.plugins.gpuvulkan.gfx.RenderPipeline;
 import net.runelite.client.plugins.gpuvulkan.gfx.RenderPipelineDesc;
+import net.runelite.client.plugins.gpuvulkan.gfx.RenderTarget;
 import net.runelite.client.plugins.gpuvulkan.gfx.Renderer;
 import net.runelite.client.plugins.gpuvulkan.gfx.ShaderModule;
 import net.runelite.client.plugins.gpuvulkan.gfx.StreamingImage;
@@ -51,12 +56,14 @@ final class GfxRenderer implements Renderer
 	private final VulkanDevice device;
 	private final FrameSync frameSync;
 	private final RenderPass renderPass;
+	private final int colorFormat;
 
-	GfxRenderer(VulkanDevice device, FrameSync frameSync, RenderPass renderPass)
+	GfxRenderer(VulkanDevice device, FrameSync frameSync, RenderPass renderPass, int colorFormat)
 	{
 		this.device = device;
 		this.frameSync = frameSync;
 		this.renderPass = renderPass;
+		this.colorFormat = colorFormat;
 	}
 
 	VulkanDevice device() { return device; }
@@ -127,9 +134,27 @@ final class GfxRenderer implements Renderer
 	}
 
 	@Override
+	public ComputePipeline createComputePipeline(ComputePipelineDesc desc)
+	{
+		return new GfxComputePipeline(this, desc);
+	}
+
+	@Override
+	public GpuBuffer createBuffer(long size, BufferUsage usage)
+	{
+		return new GfxGpuBuffer(device, size, usage);
+	}
+
+	@Override
 	public StreamingImage createStreamingImage(int width, int height)
 	{
 		return new GfxStreamingImage(device, frameSync, width, height);
+	}
+
+	@Override
+	public RenderTarget createRenderTarget(int width, int height, int samples)
+	{
+		return new GfxRenderTarget(device, frameSync, colorFormat, width, height, samples);
 	}
 
 	@Override
@@ -157,6 +182,10 @@ final class GfxRenderer implements Renderer
 		{
 			case COMBINED_IMAGE_SAMPLER:
 				return VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+			case UNIFORM_BUFFER:
+				return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+			case STORAGE_BUFFER:
+				return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 			default:
 				throw new IllegalArgumentException("Unhandled binding kind: " + kind);
 		}
