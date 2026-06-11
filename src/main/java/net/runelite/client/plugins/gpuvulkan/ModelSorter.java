@@ -72,6 +72,18 @@ final class ModelSorter
 	private final int[] lt10 = new int[12];
 	private final int[][] orderedFaces = new int[12][MAX_FACES_PER_PRIORITY];
 
+	// Depth-bucket bounds written by bucketFacesByDepth.
+	private int bucketMinFz;
+	private int bucketMaxFz;
+
+	// Priority-10/11 interleave cursor used by writePriorityOrder's drains.
+	private int[] dynFaces;
+	private int[] dynFaceDistances;
+	private int dynDrawn;
+	private int dynCount;
+	private int dynDistance;
+	private int outCursor;
+
 	/**
 	 * Project the model, bucket its faces by camera depth, and write the
 	 * back-to-front face order into {@link #sortedFaces} (length
@@ -123,22 +135,53 @@ final class ModelSorter
 			return false;
 		}
 
-		final int[] faceColors3 = m.getFaceColors3();
-		final byte[] faceRenderPriorities = m.getFaceRenderPriorities();
+		final int diameter = m.getDiameter();
+		if (diameter <= 0 || diameter >= MAX_DIAMETER)
+		{
+			return false;
+		}
 
+		if (!transformAndProject(proj, vxs, vys, vzs, vertexCount, orientation, wx, wy, wz))
+		{
+			return false;
+		}
+
+		int stamp = ++currentStamp;
+		if (stamp == 0)
+		{
+			java.util.Arrays.fill(zsortStamp, 0);
+			stamp = ++currentStamp;
+		}
+		bucketFacesByDepth(faceCount, fa, fb, fc, m.getFaceColors3(), m.getRadius(), diameter, stamp);
+
+		final byte[] faceRenderPriorities = m.getFaceRenderPriorities();
+		if (faceRenderPriorities == null || !prioritySort)
+		{
+			writeBasicOrder(stamp, bucketMinFz, bucketMaxFz);
+		}
+		else if (!writePriorityOrder(faceRenderPriorities, stamp, bucketMinFz, bucketMaxFz))
+		{
+			writeBasicOrder(stamp, bucketMinFz, bucketMaxFz);
+		}
+		return true;
+	}
+
+	// Rotates each vertex by orientation, translates to world, fills local*/
+	// proj*/distances. False = a vertex projects to z < 50 and stock drops
+	// the whole model — mirror that (this is also the near-plane cull).
+	private boolean transformAndProject(Projection proj, float[] vxs, float[] vys, float[] vzs,
+		int vertexCount, int orientation, int wx, int wy, int wz)
+	{
 		float orientSine = 0f;
 		float orientCosine = 0f;
 		if (orientation != 0)
 		{
-			// Same lookup tables as stock — Perspective.SINE/COSINE are fixed-point
-			// (1<<16) over [0, 2048). Divide by 65536 to get a unit sine/cosine.
+			// Perspective.SINE/COSINE are fixed-point (1<<16) over [0, 2048).
 			orientSine = Perspective.SINE[orientation & 0x7FF] / 65536f;
 			orientCosine = Perspective.COSINE[orientation & 0x7FF] / 65536f;
 		}
 
-		// Anchor depth at the model's centre — `distances[v]` then holds the
-		// depth delta from centre, matching stock so the bucket index fits
-		// in [0, diameter).
+		// Depth anchored at the model centre so the bucket index fits [0, diameter).
 		float[] p = proj.project(wx, wy, wz, projectScratch);
 		int zero = (int) p[2];
 
@@ -166,7 +209,6 @@ final class ModelSorter
 			p = proj.project(vx, vy, vz, projectScratch);
 			if (p[2] < 50f)
 			{
-				// Near-plane reject. Stock drops the whole model — mirror that.
 				return false;
 			}
 
@@ -174,27 +216,19 @@ final class ModelSorter
 			projY[v] = p[1] / p[2];
 			distances[v] = (int) p[2] - zero;
 		}
+		return true;
+	}
 
-		final int diameter = m.getDiameter();
-		final int radius = m.getRadius();
-		if (diameter <= 0 || diameter >= MAX_DIAMETER)
-		{
-			return false;
-		}
-
-		int stamp = ++currentStamp;
-		if (stamp == 0)
-		{
-			java.util.Arrays.fill(zsortStamp, 0);
-			stamp = ++currentStamp;
-		}
-
+	// Drops skip-sentinel (-2) and back-facing faces, FIFO-chains the rest
+	// into per-depth buckets; writes bucketMinFz/bucketMaxFz.
+	private void bucketFacesByDepth(int faceCount, int[] fa, int[] fb, int[] fc,
+		int[] faceColors3, int radius, int diameter, int stamp)
+	{
 		int minFz = diameter;
 		int maxFz = 0;
 
 		for (char f = 0; f < faceCount; f++)
 		{
-			// Engine "skip this face" sentinel.
 			if (faceColors3 != null && faceColors3[f] == -2)
 			{
 				continue;
@@ -208,7 +242,6 @@ final class ModelSorter
 			final float bX = projX[v2], bY = projY[v2];
 			final float cX = projX[v3], cY = projY[v3];
 
-			// Screen-space cross product: positive = front-facing, drop the rest.
 			if ((aX - bX) * (cY - bY) - (cX - bX) * (aY - bY) <= 0)
 			{
 				continue;
@@ -241,15 +274,8 @@ final class ModelSorter
 			if (distance > maxFz) maxFz = distance;
 		}
 
-		if (faceRenderPriorities == null || !prioritySort)
-		{
-			writeBasicOrder(stamp, minFz, maxFz);
-		}
-		else if (!writePriorityOrder(faceRenderPriorities, stamp, minFz, maxFz))
-		{
-			writeBasicOrder(stamp, minFz, maxFz);
-		}
-		return true;
+		bucketMinFz = minFz;
+		bucketMaxFz = maxFz;
 	}
 
 	private void writeBasicOrder(int stamp, int minFz, int maxFz)
@@ -269,7 +295,58 @@ final class ModelSorter
 		sortedCount = out;
 	}
 
+	// Stock's 12-bucket priority interleave: priorities 0-9 emit in order
+	// with the priority-10/11 "dynamic" faces drained in front of buckets
+	// 0/3/5 based on the avg12/avg34/avg68 depth averages.
 	private boolean writePriorityOrder(byte[] faceRenderPriorities, int stamp, int minFz, int maxFz)
+	{
+		if (!binFacesByPriority(faceRenderPriorities, stamp, minFz, maxFz))
+		{
+			return false;
+		}
+
+		int avg12 = 0;
+		if (numOfPriority[1] > 0 || numOfPriority[2] > 0)
+		{
+			avg12 = (lt10[1] + lt10[2]) / (numOfPriority[1] + numOfPriority[2]);
+		}
+		int avg34 = 0;
+		if (numOfPriority[3] > 0 || numOfPriority[4] > 0)
+		{
+			avg34 = (lt10[3] + lt10[4]) / (numOfPriority[3] + numOfPriority[4]);
+		}
+		int avg68 = 0;
+		if (numOfPriority[6] > 0 || numOfPriority[8] > 0)
+		{
+			avg68 = (lt10[8] + lt10[6]) / (numOfPriority[8] + numOfPriority[6]);
+		}
+
+		resetDynamicCursor();
+		for (int pri = 0; pri < 10; pri++)
+		{
+			if (pri == 0) drainDynamicFacesAbove(avg12);
+			if (pri == 3) drainDynamicFacesAbove(avg34);
+			if (pri == 5) drainDynamicFacesAbove(avg68);
+
+			int priNum = numOfPriority[pri];
+			int[] priFaces = orderedFaces[pri];
+			for (int faceIdx = 0; faceIdx < priNum; faceIdx++)
+			{
+				sortedFaces[outCursor++] = priFaces[faceIdx];
+			}
+		}
+		while (dynDistance != -1000)
+		{
+			appendDynamicFace();
+		}
+
+		sortedCount = outCursor;
+		return true;
+	}
+
+	// False = a priority index is out of range or a bucket overflows; the
+	// caller falls back to plain depth order.
+	private boolean binFacesByPriority(byte[] faceRenderPriorities, int stamp, int minFz, int maxFz)
 	{
 		java.util.Arrays.fill(numOfPriority, 0);
 		java.util.Arrays.fill(lt10, 0);
@@ -314,205 +391,45 @@ final class ModelSorter
 				}
 			}
 		}
+		return true;
+	}
 
-		int avg12 = 0;
-		if (numOfPriority[1] > 0 || numOfPriority[2] > 0)
+	private void resetDynamicCursor()
+	{
+		outCursor = 0;
+		dynDrawn = 0;
+		dynCount = numOfPriority[10];
+		dynFaces = orderedFaces[10];
+		dynFaceDistances = eq10;
+		if (dynDrawn == dynCount)
 		{
-			avg12 = (lt10[1] + lt10[2]) / (numOfPriority[1] + numOfPriority[2]);
-		}
-
-		int avg34 = 0;
-		if (numOfPriority[3] > 0 || numOfPriority[4] > 0)
-		{
-			avg34 = (lt10[3] + lt10[4]) / (numOfPriority[3] + numOfPriority[4]);
-		}
-
-		int avg68 = 0;
-		if (numOfPriority[6] > 0 || numOfPriority[8] > 0)
-		{
-			avg68 = (lt10[8] + lt10[6]) / (numOfPriority[8] + numOfPriority[6]);
-		}
-
-		int out = 0;
-		int drawnFaces = 0;
-		int numDynFaces = numOfPriority[10];
-		int[] dynFaces = orderedFaces[10];
-		int[] dynFaceDistances = eq10;
-		if (drawnFaces == numDynFaces)
-		{
-			drawnFaces = 0;
-			numDynFaces = numOfPriority[11];
+			dynDrawn = 0;
+			dynCount = numOfPriority[11];
 			dynFaces = orderedFaces[11];
 			dynFaceDistances = eq11;
 		}
-
-		int currFaceDistance = drawnFaces < numDynFaces ? dynFaceDistances[drawnFaces] : -1000;
-
-		for (int pri = 0; pri < 10; pri++)
-		{
-			while (pri == 0 && currFaceDistance > avg12)
-			{
-				out = appendDynamicFace(out, dynFaces, drawnFaces++);
-				if (drawnFaces == numDynFaces && dynFaces != orderedFaces[11])
-				{
-					drawnFaces = 0;
-					numDynFaces = numOfPriority[11];
-					dynFaces = orderedFaces[11];
-					dynFaceDistances = eq11;
-				}
-				currFaceDistance = drawnFaces < numDynFaces ? dynFaceDistances[drawnFaces] : -1000;
-			}
-
-			while (pri == 3 && currFaceDistance > avg34)
-			{
-				out = appendDynamicFace(out, dynFaces, drawnFaces++);
-				if (drawnFaces == numDynFaces && dynFaces != orderedFaces[11])
-				{
-					drawnFaces = 0;
-					numDynFaces = numOfPriority[11];
-					dynFaces = orderedFaces[11];
-					dynFaceDistances = eq11;
-				}
-				currFaceDistance = drawnFaces < numDynFaces ? dynFaceDistances[drawnFaces] : -1000;
-			}
-
-			while (pri == 5 && currFaceDistance > avg68)
-			{
-				out = appendDynamicFace(out, dynFaces, drawnFaces++);
-				if (drawnFaces == numDynFaces && dynFaces != orderedFaces[11])
-				{
-					drawnFaces = 0;
-					numDynFaces = numOfPriority[11];
-					dynFaces = orderedFaces[11];
-					dynFaceDistances = eq11;
-				}
-				currFaceDistance = drawnFaces < numDynFaces ? dynFaceDistances[drawnFaces] : -1000;
-			}
-
-			int priNum = numOfPriority[pri];
-			int[] priFaces = orderedFaces[pri];
-			for (int faceIdx = 0; faceIdx < priNum; faceIdx++)
-			{
-				sortedFaces[out++] = priFaces[faceIdx];
-			}
-		}
-
-		while (currFaceDistance != -1000)
-		{
-			out = appendDynamicFace(out, dynFaces, drawnFaces++);
-			if (drawnFaces == numDynFaces && dynFaces != orderedFaces[11])
-			{
-				drawnFaces = 0;
-				dynFaces = orderedFaces[11];
-				numDynFaces = numOfPriority[11];
-				dynFaceDistances = eq11;
-			}
-			currFaceDistance = drawnFaces < numDynFaces ? dynFaceDistances[drawnFaces] : -1000;
-		}
-
-		sortedCount = out;
-		return true;
+		dynDistance = dynDrawn < dynCount ? dynFaceDistances[dynDrawn] : -1000;
 	}
 
-	private int appendDynamicFace(int out, int[] dynFaces, int faceIdx)
+	private void drainDynamicFacesAbove(int threshold)
 	{
-		sortedFaces[out++] = dynFaces[faceIdx];
-		return out;
+		while (dynDistance > threshold)
+		{
+			appendDynamicFace();
+		}
 	}
 
-	boolean cullOnly(Projection proj, Model m, int orientation, int wx, int wy, int wz)
+	private void appendDynamicFace()
 	{
-		sortedCount = 0;
-
-		final int vertexCount = m.getVerticesCount();
-		if (vertexCount > MAX_VERTEX_COUNT)
+		sortedFaces[outCursor++] = dynFaces[dynDrawn++];
+		if (dynDrawn == dynCount && dynFaces != orderedFaces[11])
 		{
-			return false;
+			dynDrawn = 0;
+			dynCount = numOfPriority[11];
+			dynFaces = orderedFaces[11];
+			dynFaceDistances = eq11;
 		}
-
-		final float[] vxs = m.getVerticesX();
-		final float[] vys = m.getVerticesY();
-		final float[] vzs = m.getVerticesZ();
-		if (vxs == null || vys == null || vzs == null)
-		{
-			return false;
-		}
-
-		final int faceCount = Math.min(m.getFaceCount(), MAX_FACE_COUNT);
-		final int[] fa = m.getFaceIndices1();
-		final int[] fb = m.getFaceIndices2();
-		final int[] fc = m.getFaceIndices3();
-		if (fa == null || fb == null || fc == null)
-		{
-			return false;
-		}
-
-		final int[] faceColors3 = m.getFaceColors3();
-
-		float orientSine = 0f;
-		float orientCosine = 0f;
-		if (orientation != 0)
-		{
-			orientSine = Perspective.SINE[orientation & 0x7FF] / 65536f;
-			orientCosine = Perspective.COSINE[orientation & 0x7FF] / 65536f;
-		}
-
-		for (int v = 0; v < vertexCount; v++)
-		{
-			float vx = vxs[v];
-			float vy = vys[v];
-			float vz = vzs[v];
-
-			if (orientation != 0)
-			{
-				float x0 = vx;
-				vx = vz * orientSine + x0 * orientCosine;
-				vz = vz * orientCosine - x0 * orientSine;
-			}
-
-			vx += wx;
-			vy += wy;
-			vz += wz;
-
-			localX[v] = vx;
-			localY[v] = vy;
-			localZ[v] = vz;
-
-			float[] p = proj.project(vx, vy, vz, projectScratch);
-			if (p[2] < 50f)
-			{
-				return false;
-			}
-
-			projX[v] = p[0] / p[2];
-			projY[v] = p[1] / p[2];
-		}
-
-		int out = 0;
-		for (int f = 0; f < faceCount; f++)
-		{
-			if (faceColors3 != null && faceColors3[f] == -2)
-			{
-				continue;
-			}
-
-			final int v1 = fa[f];
-			final int v2 = fb[f];
-			final int v3 = fc[f];
-
-			final float aX = projX[v1], aY = projY[v1];
-			final float bX = projX[v2], bY = projY[v2];
-			final float cX = projX[v3], cY = projY[v3];
-
-			if ((aX - bX) * (cY - bY) - (cX - bX) * (aY - bY) <= 0)
-			{
-				continue;
-			}
-
-			sortedFaces[out++] = f;
-		}
-
-		sortedCount = out;
-		return true;
+		dynDistance = dynDrawn < dynCount ? dynFaceDistances[dynDrawn] : -1000;
 	}
+
 }
