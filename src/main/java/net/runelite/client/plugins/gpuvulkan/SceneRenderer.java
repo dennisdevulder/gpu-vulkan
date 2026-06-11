@@ -515,14 +515,8 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		{
 			return;
 		}
-
-		if (vertexCount - staticVertexCount() > overlayHighWaterVertices)
+		if (recaptureIfOverlayHighWater(scene, slot))
 		{
-			log.info("Overlay arena past high-water mark ({} verts), recapturing scene",
-				vertexCount - staticVertexCount());
-			captureScene(scene);
-			vertexCount = overlayNextVertex[slot];
-			useFrameWriteArena(slot, vertexCount);
 			return;
 		}
 
@@ -532,6 +526,30 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			return;
 		}
 
+		rebuildZonesFromTiles(scene, tiles, slot);
+
+		overlayNextVertex[slot] = vertexCount;
+		setWriteCursor(vertexCount);
+	}
+
+	/** Overlay arenas grow monotonically as zones churn; past the high-water
+	 *  mark a full recapture is cheaper than dragging the overlay tail. */
+	private boolean recaptureIfOverlayHighWater(Scene scene, int slot)
+	{
+		if (vertexCount - staticVertexCount() <= overlayHighWaterVertices)
+		{
+			return false;
+		}
+		log.info("Overlay arena past high-water mark ({} verts), recapturing scene",
+			vertexCount - staticVertexCount());
+		captureScene(scene);
+		vertexCount = overlayNextVertex[slot];
+		useFrameWriteArena(slot, vertexCount);
+		return true;
+	}
+
+	private void rebuildZonesFromTiles(Scene scene, Tile[][][] tiles, int slot)
+	{
 		int slotBit = 1 << slot;
 		int allSlots = (1 << FrameSync.FRAMES_IN_FLIGHT) - 1;
 
@@ -575,9 +593,6 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			overlaySlotHasZones[slot] = true;
 			dirtyZones.markSlotRebuilt(zone, slotBit, allSlots);
 		}
-
-		overlayNextVertex[slot] = vertexCount;
-		setWriteCursor(vertexCount);
 	}
 
 	/** Visits one tile (including any bridge tile underneath) within a layer pass. */
@@ -701,8 +716,21 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		// Drain the GPU before rewriting the buffer; captureScene is rare
 		// (region change) and the buffer is shared across all in-flight frames.
 		Vk.check("vkDeviceWaitIdle", vkDeviceWaitIdle(device.handle()));
-		droppedVertices = 0;
+		resetCaptureState();
 
+		Tile[][][] tiles = captureTiles(scene);
+		if (tiles == null) return;
+		captureSkybox(scene);
+		final int planes = Math.min(tiles.length, MAX_PLANES);
+
+		captureStaticLayers(scene, tiles, planes);
+		padPlaneEnds(planes);
+		logCaptureSummary(scene, tiles);
+	}
+
+	private void resetCaptureState()
+	{
+		droppedVertices = 0;
 		for (int i = 0; i < LAYER_COUNT; i++)
 		{
 			regionEnds[i] = 0;
@@ -725,11 +753,18 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		dirtyZones.clear();
 		pendingRenderables.clear();
 		modelEmitter.clearCache();
+	}
 
-		Tile[][][] tiles = captureTiles(scene);
-		if (tiles == null) return;
-		captureSkybox(scene);
-		final int planes = Math.min(tiles.length, MAX_PLANES);
+	/**
+	 * Pass order: emit each layer plane-by-plane so vertices are sorted
+	 * (layer-major, plane-minor). recordDraw clips per layer at
+	 * planeEnds[layer][visiblePlane] to hide roofs above the player.
+	 * Static object sweeps keep only opaque faces; translucent faces are
+	 * captured afterwards into STATIC_ALPHA so the blended pass doesn't
+	 * replay the whole scene. Tiles are always opaque (no trans byte).
+	 */
+	private void captureStaticLayers(Scene scene, Tile[][][] tiles, int planes)
+	{
 		final int sceneOrigin = capturedSceneOrigin;
 		final int sceneSize = capturedSceneSize;
 
@@ -741,12 +776,6 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		final int roofOffset = scene.getWorldViewId() == net.runelite.api.WorldView.TOPLEVEL
 			? (Constants.EXTENDED_SCENE_SIZE - Constants.SCENE_SIZE) / 2 : 0;
 
-		// Pass order: emit each layer plane-by-plane so vertices are sorted
-		// (layer-major, plane-minor). recordDraw clips per layer at
-		// planeEnds[layer][visiblePlane] to hide roofs above the player.
-		// Static object sweeps keep only opaque faces; translucent faces are
-		// captured afterwards into STATIC_ALPHA so the blended pass doesn't
-		// replay the whole scene. Tiles are always opaque (no trans byte).
 		modelEmitter.setStaticFaceFilter(SceneModelEmitter.FILTER_OPAQUE);
 		captureLayer(Layer.TERRAIN, tiles, planes, sceneOrigin, sceneSize, roofs, tileSettings, roofOffset,
 			(cur, p, sx, sy) ->
@@ -791,9 +820,12 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		captureLayer(Layer.STATIC_ALPHA, tiles, planes, sceneOrigin, sceneSize, roofs, tileSettings, roofOffset,
 			this::captureStaticAlphaTile);
 		modelEmitter.setStaticFaceFilter(SceneModelEmitter.FILTER_ALL);
+	}
 
-		// Pad planeEnds past `planes` so max-plane lookups still draw
-		// everything if requested.
+	/** Pad planeEnds past {@code planes} so max-plane lookups still draw
+	 *  everything if requested; seed each frame slot's overlay cursor. */
+	private void padPlaneEnds(int planes)
+	{
 		for (int i = 0; i < LAYER_COUNT; i++)
 			for (int p = planes; p < MAX_PLANES; p++)
 				planeEnds[i][p] = regionEnds[i];
@@ -802,10 +834,13 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		{
 			overlayNextVertex[slot] = vertexCount;
 		}
+	}
 
+	private void logCaptureSummary(Scene scene, Tile[][][] tiles)
+	{
 		log.info("Vulkan scene capture: base=({}, {}) worldView={} instance={} tileOffset={} sceneOrigin={} sceneSize={} tileDims={} vertices total={} terrain={} walls={} decorative={} ground={} gameObjects={} staticAlpha={} roofTiles={}",
 			scene.getBaseX(), scene.getBaseY(), scene.getWorldViewId(), scene.isInstance(),
-			tileLookupOffset, sceneOrigin, sceneSize, tileDims(tiles), vertexCount,
+			tileLookupOffset, capturedSceneOrigin, capturedSceneSize, tileDims(tiles), vertexCount,
 			regionEnds[Layer.TERRAIN.ordinal()],
 			regionEnds[Layer.WALLS.ordinal()] - regionEnds[Layer.TERRAIN.ordinal()],
 			regionEnds[Layer.DECORATIVE.ordinal()] - regionEnds[Layer.WALLS.ordinal()],
