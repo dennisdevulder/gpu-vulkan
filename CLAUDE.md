@@ -115,7 +115,7 @@ invisible login screen — check config before suspecting commits.
 
 ## Sub-worldview rendering (branch feat/sub-worldview-rendering)
 
-First live validation 2026-06-10 (Linux, sailing hub plugin, Port Sarim): worldviews 11 and 2830 created/freed cleanly, ship sails visible on water. Unverified detail: whether hulls render fully (user said "saw some ship sails in the water"). Static arena growth fix (42a2c69) and zone culling (5fe860f) also on this branch and confirmed working in the same session.
+First live validation 2026-06-10 (Linux, sailing hub plugin, Port Sarim): worldviews 11 and 2830 created/freed cleanly, ship sails visible on water. Static arena growth fix (42a2c69) and zone culling (5fe860f) also on this branch and confirmed working in the same session. 2026-06-11: the "sails without hulls" detail was real — 5fe860f's radius cull centered the zone window on the toplevel camera inside sub renderers' local zone grids; fixed in 0ab7ed93 (sub renderers skip radius cull, frustum cull suffices). Hull retest pending.
 
 Symptom: projectiles/ground items persist in Olm arena on Windows/NVIDIA, not on Linux/Mesa. Ranked code-cited suspects:
 1. `draw()` without `drawScene` replays stale dynamic ranges from rotated frame slots (`GpuVulkanPlugin.java:859` sole `beginFrame` site; `SceneRenderer.java:1052-1057`). Fix existed in 8c01644, reverted wholesale by 8220142 (revert coupled it to the broken 6085067 zone change — they were independent). NVIDIA visibility: unlocked FPS + IMMEDIATE/MAILBOX emits many stale presents; Mesa FIFO blocks, hides it. Confirm via existing `DrawCallbackStats`: `frames > drawScene`.
