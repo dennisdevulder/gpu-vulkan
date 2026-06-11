@@ -121,8 +121,10 @@ final class Win32PlatformSurface implements PlatformSurface
 
 	private static long createWin32Surface(VulkanInstance instance, long hwnd)
 	{
-		// GetModuleHandle(NULL) → HMODULE of the process EXE. The
-		long hinstance = WinBase.GetModuleHandle(null, (java.nio.ByteBuffer) null);
+		// GetModuleHandle(NULL) → HMODULE of the process EXE. Single-arg
+		// overload only: the client provides lwjgl core 3.3.2 at runtime and
+		// the (debug, name) overload doesn't exist there.
+		long hinstance = WinBase.GetModuleHandle((java.nio.ByteBuffer) null);
 		try (MemoryStack stack = stackPush())
 		{
 			VkWin32SurfaceCreateInfoKHR info = VkWin32SurfaceCreateInfoKHR.calloc(stack)
