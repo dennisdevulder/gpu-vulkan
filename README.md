@@ -26,8 +26,10 @@ readback path. There's a plugin-by-plugin survey in
 - **Linux/X11**: working (daily driver). Several open issues, see the
   issue tracker. The prior sidebar-collapse crash is mitigated by keeping
   an rlawt GLX context alive for AWT while Vulkan owns rendering.
-- **macOS**: working on Apple Silicon via MoltenVK.
-- **Windows**: working, tested on NVIDIA.
+- **macOS**: working on Apple Silicon via MoltenVK (bundled). Intel Macs
+  are unsupported in v1 (no x64 MoltenVK in the plugin jar).
+- **Windows**: working on x64, tested on NVIDIA.
+- **Wayland**: via XWayland.
 
 The plugin defers Vulkan startup until you are logged in. The login screen
 renders on the CPU, so "nothing happens" at the login screen is expected.
@@ -51,13 +53,16 @@ source tree.
   `HeadlessException` even when you have a working display. Install
   Temurin 21 alongside it and point `JAVA_HOME` / `update-alternatives`
   at the Temurin path.
-- **`glslangValidator`** on `PATH` (or set
-  `GLSLANG=/path/to/glslangValidator`):
+- **`glslangValidator`** — optional, only needed when editing shaders. The
+  compiled SPIR-V is committed under `src/main/resources/com/gpuvulkan/`;
+  with the tool on `PATH` (or `GLSLANG=/path/to/glslangValidator`) the build
+  regenerates it in place, without it the committed binaries are used and a
+  freshness check fails the build if a shader source is newer.
   - macOS: `brew install glslang`
   - Debian/Ubuntu: `apt install glslang-tools`
   - Fedora: `dnf install glslang`
-- **Vulkan loader** on the host. MoltenVK on macOS is bundled inside the
-  shadowJar via `lwjgl-vulkan` natives, so no extra step there.
+- **Vulkan loader** on the host. MoltenVK on macOS is bundled via
+  `lwjgl-vulkan` natives, so no extra step there.
 
 ## Build
 
@@ -66,13 +71,12 @@ JAVA_HOME=/path/to/temurin-21 ./gradlew build
 ```
 
 If `java -version` already points at a Temurin JDK, the `JAVA_HOME=` prefix
-is unnecessary. GLSL shaders compile to SPIR-V at build time.
+is unnecessary.
 
 **macOS native helper**: `librlmtl.dylib` (the CAMetalLayer/JAWT bridge) is
-compiled as a universal arm64+x86_64 binary and ad-hoc signed, but only
-when building on a Mac. Jars built on Linux or Windows do not contain it
-and won't render on macOS, so release jars intended for Mac users must be
-cut on macOS. Gatekeeper may still quarantine the dylib when the jar was
+committed under `src/main/resources/com/gpuvulkan/` like the shaders;
+building on a Mac with `clang` regenerates it (universal arm64+x86_64,
+ad-hoc signed). Gatekeeper may quarantine the dylib when the jar was
 downloaded from a browser; `xattr -d com.apple.quarantine <jar>` clears it.
 
 ## Run
@@ -166,21 +170,12 @@ raw handles on `VulkanRenderContext` plus the raw `VkCommandBuffer` hooks;
 see [docs/RENDERER_CONTRACT.md](docs/RENDERER_CONTRACT.md) for the
 invariants you must keep.
 
-For recorder-style plugins there are two dedicated pieces. The
-`recordAfterComposite` hook hands extensions the final composited frame
-(scene + UI) on the graphics command buffer right before present, with a
-documented layout contract for copying it out. And
-`VulkanRenderContext.encode()` exposes the Vulkan video encode queue: when
-the device supports it, the backend enables the H.264/H.265/AV1 encode
-extensions and creates a dedicated encode queue at device creation, since
-queue families can't be added afterwards. Check
-`VulkanEncodeContext.isAvailable()`; `unavailableReason()` explains any
-refusal. The backend never submits to that queue itself, so a recorder
-plugin owns the entire encode session. `-Dvkgpu.disableVideoEncode=true`
-disables the path entirely.
-
-A worked recorder consumer of this surface (GPU replay buffer with hotkey
-MP4 clips) lives on the `feat/vulkan-video-recorder` branch.
+For recorder-style plugins, the `recordAfterComposite` hook hands
+extensions the final composited frame (scene + UI) on the graphics command
+buffer right before present, with a documented layout contract for copying
+it out. A worked consumer (GPU replay buffer with hotkey MP4 clips, plus
+the Vulkan video encode queue plumbing it needs) lives on the
+`feat/vulkan-video-recorder` branch.
 
 ### Worked example: the FSR upscaler
 
@@ -202,11 +197,28 @@ compatibility (pipelines come from `RenderTarget.device()` for offscreen
 passes), and pass bracketing are all visible in that one file. Start there
 before writing your own extension.
 
+## Escape hatches
+
+System properties for diagnosing problems in the field; all default off.
+Set them in RuneLite's JVM arguments (e.g. `-Dvkgpu.fullSceneDraw=true`).
+
+| Property | Effect |
+|---|---|
+| `vkgpu.validation` | Force Vulkan validation layers on (same as the Debug config toggle) |
+| `vkgpu.fullSceneDraw` | Disable draw-distance zone culling — try this first on missing-geometry reports |
+| `vkgpu.disableFrustumCull` | Disable frustum zone culling only |
+| `vkgpu.disableSubWorldViews` | Drop sub-worldview (ship) rendering, bisects sailing-content issues |
+| `vkgpu.disableCustomPresent` | macOS: fall back from the Metal present path to vkQueuePresentKHR |
+| `vkgpu.skipScreenshotReadback` | Disable the screenshot GPU readback |
+| `vkgpu.stats` | Log the per-second `recon` diagnostics line |
+| `vkgpu.modelStats` | Default-on for the detailed model stats config toggle |
+| `vkgpu.resizeTrace` | Log canvas/surface resize tracing |
+
 ## Repo layout
 
 ```
 src/main/java/...      plugin sources
-src/main/shaders/...   GLSL, compiled to SPIR-V at build time
+src/main/shaders/...   GLSL sources (compiled .spv is committed in resources)
 src/test/java/...      IDE-run main
 build.gradle           Gradle build (shader compile task, deps)
 runelite-plugin.properties   plugin-hub-style descriptor
