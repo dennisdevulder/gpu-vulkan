@@ -33,7 +33,7 @@ java {
 	targetCompatibility = JavaVersion.VERSION_11
 }
 
-def runeLiteVersion = '1.12.28'
+def runeLiteVersion = 'latest.release'
 def pluginMainClass = 'com.gpuvulkan.GpuVulkanPluginTest'
 // LWJGL core comes from runelite-client at runtime (3.3.2 classes AND
 // natives; RuneLite's plugin classloader is child-first, so bundling a
