@@ -130,66 +130,15 @@ final class GfxRenderPipeline implements RenderPipeline
 		return p.get(0);
 	}
 
+	// Helpers return stack-allocated structs; the caller's stack frame spans
+	// pipeline creation, so every pointer stays live until vkCreate returns.
 	private long createPipeline(MemoryStack stack, GfxRenderer renderer,
 								RenderPipelineDesc desc, long pipelineLayout)
 	{
-		VkPipelineShaderStageCreateInfo.Buffer stages =
-			VkPipelineShaderStageCreateInfo.calloc(2, stack);
-		stages.get(0)
-			.sType$Default()
-			.stage(VK_SHADER_STAGE_VERTEX_BIT)
-			.module(((GfxShaderModule) desc.vertex()).handle())
-			.pName(stack.UTF8("main"));
-		stages.get(1)
-			.sType$Default()
-			.stage(VK_SHADER_STAGE_FRAGMENT_BIT)
-			.module(((GfxShaderModule) desc.fragment()).handle())
-			.pName(stack.UTF8("main"));
-
-		VkPipelineVertexInputStateCreateInfo vertexInput =
-			VkPipelineVertexInputStateCreateInfo.calloc(stack).sType$Default();
-		if (!desc.vertexBuffers().isEmpty())
-		{
-			VkVertexInputBindingDescription.Buffer bindings =
-				VkVertexInputBindingDescription.calloc(desc.vertexBuffers().size(), stack);
-			for (int i = 0; i < desc.vertexBuffers().size(); i++)
-			{
-				RenderPipelineDesc.VertexBufferBinding b = desc.vertexBuffers().get(i);
-				bindings.get(i)
-					.binding(b.binding)
-					.stride(b.stride)
-					.inputRate(VK_VERTEX_INPUT_RATE_VERTEX);
-			}
-			VkVertexInputAttributeDescription.Buffer attributes =
-				VkVertexInputAttributeDescription.calloc(desc.vertexAttributes().size(), stack);
-			for (int i = 0; i < desc.vertexAttributes().size(); i++)
-			{
-				RenderPipelineDesc.VertexAttribute a = desc.vertexAttributes().get(i);
-				attributes.get(i)
-					.location(a.location)
-					.binding(a.binding)
-					.format(vulkanFormat(a.format))
-					.offset(a.offset);
-			}
-			vertexInput
-				.pVertexBindingDescriptions(bindings)
-				.pVertexAttributeDescriptions(attributes);
-		}
-
-		int topology;
-		switch (desc.topology())
-		{
-			case TRIANGLE_LIST:
-				topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-				break;
-			default:
-				throw new IllegalArgumentException("Unsupported topology: " + desc.topology());
-		}
-
 		VkPipelineInputAssemblyStateCreateInfo inputAssembly =
 			VkPipelineInputAssemblyStateCreateInfo.calloc(stack)
 				.sType$Default()
-				.topology(topology)
+				.topology(vulkanTopology(desc.topology()))
 				.primitiveRestartEnable(false);
 
 		VkPipelineViewportStateCreateInfo viewport =
@@ -215,26 +164,109 @@ final class GfxRenderPipeline implements RenderPipeline
 				.rasterizationSamples(renderer.renderPass().samples())
 				.sampleShadingEnable(false);
 
+		VkPipelineDynamicStateCreateInfo dynamic =
+			VkPipelineDynamicStateCreateInfo.calloc(stack)
+				.sType$Default()
+				.pDynamicStates(stack.ints(VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR));
+
+		VkGraphicsPipelineCreateInfo.Buffer info =
+			VkGraphicsPipelineCreateInfo.calloc(1, stack);
+		info.get(0)
+			.sType$Default()
+			.pStages(shaderStages(stack, desc))
+			.pVertexInputState(vertexInputState(stack, desc))
+			.pInputAssemblyState(inputAssembly)
+			.pViewportState(viewport)
+			.pRasterizationState(raster)
+			.pMultisampleState(multisample)
+			.pDepthStencilState(depthStencilState(stack, desc))
+			.pColorBlendState(colorBlendState(stack, desc))
+			.pDynamicState(dynamic)
+			.layout(pipelineLayout)
+			.renderPass(renderer.renderPass().handle())
+			.subpass(0);
+
+		LongBuffer p = stack.mallocLong(1);
+		Vk.check("vkCreateGraphicsPipelines (gfx)",
+			vkCreateGraphicsPipelines(device.handle(), VK_NULL_HANDLE, info, null, p));
+		return p.get(0);
+	}
+
+	private static VkPipelineShaderStageCreateInfo.Buffer shaderStages(MemoryStack stack, RenderPipelineDesc desc)
+	{
+		VkPipelineShaderStageCreateInfo.Buffer stages =
+			VkPipelineShaderStageCreateInfo.calloc(2, stack);
+		stages.get(0)
+			.sType$Default()
+			.stage(VK_SHADER_STAGE_VERTEX_BIT)
+			.module(((GfxShaderModule) desc.vertex()).handle())
+			.pName(stack.UTF8("main"));
+		stages.get(1)
+			.sType$Default()
+			.stage(VK_SHADER_STAGE_FRAGMENT_BIT)
+			.module(((GfxShaderModule) desc.fragment()).handle())
+			.pName(stack.UTF8("main"));
+		return stages;
+	}
+
+	private static VkPipelineVertexInputStateCreateInfo vertexInputState(MemoryStack stack, RenderPipelineDesc desc)
+	{
+		VkPipelineVertexInputStateCreateInfo vertexInput =
+			VkPipelineVertexInputStateCreateInfo.calloc(stack).sType$Default();
+		if (desc.vertexBuffers().isEmpty())
+		{
+			return vertexInput;
+		}
+		VkVertexInputBindingDescription.Buffer bindings =
+			VkVertexInputBindingDescription.calloc(desc.vertexBuffers().size(), stack);
+		for (int i = 0; i < desc.vertexBuffers().size(); i++)
+		{
+			RenderPipelineDesc.VertexBufferBinding b = desc.vertexBuffers().get(i);
+			bindings.get(i)
+				.binding(b.binding)
+				.stride(b.stride)
+				.inputRate(VK_VERTEX_INPUT_RATE_VERTEX);
+		}
+		VkVertexInputAttributeDescription.Buffer attributes =
+			VkVertexInputAttributeDescription.calloc(desc.vertexAttributes().size(), stack);
+		for (int i = 0; i < desc.vertexAttributes().size(); i++)
+		{
+			RenderPipelineDesc.VertexAttribute a = desc.vertexAttributes().get(i);
+			attributes.get(i)
+				.location(a.location)
+				.binding(a.binding)
+				.format(vulkanFormat(a.format))
+				.offset(a.offset);
+		}
+		return vertexInput
+			.pVertexBindingDescriptions(bindings)
+			.pVertexAttributeDescriptions(attributes);
+	}
+
+	private static VkPipelineColorBlendStateCreateInfo colorBlendState(MemoryStack stack, RenderPipelineDesc desc)
+	{
 		VkPipelineColorBlendAttachmentState.Buffer blendAttachments =
 			VkPipelineColorBlendAttachmentState.calloc(1, stack);
 		boolean premul = desc.blendMode() == RenderPipelineDesc.BlendMode.PREMUL_ALPHA;
 		blendAttachments.get(0)
 			.blendEnable(premul)
-			.srcColorBlendFactor(premul ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE)
+			.srcColorBlendFactor(VK_BLEND_FACTOR_ONE)
 			.dstColorBlendFactor(premul ? VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA : VK_BLEND_FACTOR_ZERO)
 			.colorBlendOp(VK_BLEND_OP_ADD)
-			.srcAlphaBlendFactor(premul ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE)
+			.srcAlphaBlendFactor(VK_BLEND_FACTOR_ONE)
 			.dstAlphaBlendFactor(premul ? VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA : VK_BLEND_FACTOR_ZERO)
 			.alphaBlendOp(VK_BLEND_OP_ADD)
 			.colorWriteMask(VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
 				| VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT);
 
-		VkPipelineColorBlendStateCreateInfo colorBlend =
-			VkPipelineColorBlendStateCreateInfo.calloc(stack)
-				.sType$Default()
-				.logicOpEnable(false)
-				.pAttachments(blendAttachments);
+		return VkPipelineColorBlendStateCreateInfo.calloc(stack)
+			.sType$Default()
+			.logicOpEnable(false)
+			.pAttachments(blendAttachments);
+	}
 
+	private static VkPipelineDepthStencilStateCreateInfo depthStencilState(MemoryStack stack, RenderPipelineDesc desc)
+	{
 		VkPipelineDepthStencilStateCreateInfo depthStencil =
 			VkPipelineDepthStencilStateCreateInfo.calloc(stack)
 				.sType$Default();
@@ -254,33 +286,18 @@ final class GfxRenderPipeline implements RenderPipeline
 				.depthWriteEnable(false)
 				.stencilTestEnable(false);
 		}
+		return depthStencil;
+	}
 
-		VkPipelineDynamicStateCreateInfo dynamic =
-			VkPipelineDynamicStateCreateInfo.calloc(stack)
-				.sType$Default()
-				.pDynamicStates(stack.ints(VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR));
-
-		VkGraphicsPipelineCreateInfo.Buffer info =
-			VkGraphicsPipelineCreateInfo.calloc(1, stack);
-		info.get(0)
-			.sType$Default()
-			.pStages(stages)
-			.pVertexInputState(vertexInput)
-			.pInputAssemblyState(inputAssembly)
-			.pViewportState(viewport)
-			.pRasterizationState(raster)
-			.pMultisampleState(multisample)
-			.pDepthStencilState(depthStencil)
-			.pColorBlendState(colorBlend)
-			.pDynamicState(dynamic)
-			.layout(pipelineLayout)
-			.renderPass(renderer.renderPass().handle())
-			.subpass(0);
-
-		LongBuffer p = stack.mallocLong(1);
-		Vk.check("vkCreateGraphicsPipelines (gfx)",
-			vkCreateGraphicsPipelines(device.handle(), VK_NULL_HANDLE, info, null, p));
-		return p.get(0);
+	private static int vulkanTopology(RenderPipelineDesc.Topology topology)
+	{
+		switch (topology)
+		{
+			case TRIANGLE_LIST:
+				return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+			default:
+				throw new IllegalArgumentException("Unsupported topology: " + topology);
+		}
 	}
 
 	private static int vulkanFormat(RenderPipelineDesc.AttributeFormat format)
