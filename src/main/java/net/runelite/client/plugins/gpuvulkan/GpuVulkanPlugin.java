@@ -172,7 +172,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 				{
 					return true;
 				}
-				return initializeRenderer(isMac);
+				return createRenderer(isMac);
 			}
 			catch (Throwable e)
 			{
@@ -254,7 +254,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		}, "vkgpu-shutdown-watch"));
 	}
 
-	private boolean initializeRenderer(boolean isMac)
+	private boolean createRenderer(boolean isMac)
 	{
 		TextureProvider textureProvider = client.getTextureProvider();
 		if (textureProvider == null)
