@@ -191,6 +191,8 @@ final class DrawCallbackStats
 		return nanos / 1_000_000.0;
 	}
 
+	// The one-line "recon" format is load-bearing: it is the ground-truth
+	// diagnostic users paste into bug reports. Segments append to one line.
 	void maybeLog()
 	{
 		if (!isEnabled())
@@ -202,128 +204,29 @@ final class DrawCallbackStats
 		nextLogNanos = now + 1_000_000_000L;
 
 		long frameCount = frames.getAndSet(0);
-		long drawFrame = drawFrameNanos.getAndSet(0);
-		long maxDrawFrame = drawFrameNanos.getMaxAndReset();
-		long fenceWait = fenceWaitNanos.getAndSet(0);
-		long maxFenceWait = fenceWaitNanos.getMaxAndReset();
-		long uiUpload = uiUploadNanos.getAndSet(0);
-		long maxUiUpload = uiUploadNanos.getMaxAndReset();
-		long acquire = acquireNanos.getAndSet(0);
-		long maxAcquire = acquireNanos.getMaxAndReset();
-		long commandRecord = commandRecordNanos.getAndSet(0);
-		long maxCommandRecord = commandRecordNanos.getMaxAndReset();
-		long beforePass = beforeRenderPassNanos.getAndSet(0);
-		long maxBeforePass = beforeRenderPassNanos.getMaxAndReset();
-		long renderPass = renderPassNanos.getAndSet(0);
-		long maxRenderPass = renderPassNanos.getMaxAndReset();
-		long submit = submitNanos.getAndSet(0);
-		long maxSubmit = submitNanos.getMaxAndReset();
-		long present = presentNanos.getAndSet(0);
-		long maxPresent = presentNanos.getMaxAndReset();
-		long customDrawable = customDrawableNanos.getAndSet(0);
-		long maxCustomDrawable = customDrawableNanos.getMaxAndReset();
 		long drawSceneCount = drawScene.getAndSet(0);
-		long beginFrame = beginFrameNanos.getAndSet(0);
-		long maxBeginFrame = beginFrameNanos.getMaxAndReset();
-		long pendingCapture = pendingCaptureNanos.getAndSet(0);
-		long maxPendingCapture = pendingCaptureNanos.getMaxAndReset();
-		long sceneCapture = sceneCaptureNanos.getAndSet(0);
-		long maxSceneCapture = sceneCaptureNanos.getMaxAndReset();
-		long dynamicCapture = dynamicCaptureNanos.getAndSet(0);
-		long maxDynamicCapture = dynamicCaptureNanos.getMaxAndReset();
-		long tempCapture = tempCaptureNanos.getAndSet(0);
-		long maxTempCapture = tempCaptureNanos.getMaxAndReset();
-		long singleCapture = singleCaptureNanos.getAndSet(0);
-		long maxSingleCapture = singleCaptureNanos.getMaxAndReset();
-		long sceneDrawCallCount = sceneDrawCalls.getAndSet(0);
-		long sceneDrawVertexCount = sceneDrawVertices.getAndSet(0);
-		long scenePushConstantCount = scenePushConstants.getAndSet(0);
-		long roofSkipPairCount = roofSkipPairs.getAndSet(0);
-		long overlayDirtyZoneCount = overlayDirtyZones.getAndSet(0);
-		long uiBytes = uiUploadBytes.getAndSet(0);
-		long screenshotBytes = screenshotReadbackBytes.getAndSet(0);
-		if (!detailedModelStats)
+
+		StringBuilder line = new StringBuilder(1024);
+		appendCallbackCounts(line, drawSceneCount);
+		appendSubmitCounts(line);
+		appendCpuTimings(line, frameCount);
+		appendSceneTimings(line, drawSceneCount);
+		if (detailedModelStats)
 		{
-			log.info(String.format(
-				"recon | scene=%d preSD=%d postSD=%d swap=%d load=%d | paint=%d tileModel=%d | zoneOpq=%d zoneAlpha=%d | dyn=%d temp=%d pass=%d single=%d | cam=(%.1f, %.1f, %.1f) plane=%d | anim=%d | submit: draws=%d drawVerts=%d pushes=%d roofSkips=%d overlayZones=%d uiBytes=%d readbackBytes=%d | cpu/frame avg ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f | cpu max ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f | scene avg/max ms: begin=%.2f/%.2f pending=%.2f/%.2f staticCaptureTotal=%.2f max=%.2f | capture total/max ms: dyn=%.2f/%.2f temp=%.2f/%.2f single=%.2f/%.2f",
-				drawSceneCount,
-				preSceneDraw.getAndSet(0),
-				postDrawScene.getAndSet(0),
-				swapScene.getAndSet(0),
-				loadScene.getAndSet(0),
-				drawScenePaint.getAndSet(0),
-				drawSceneTileModel.getAndSet(0),
-				drawZoneOpaque.getAndSet(0),
-				drawZoneAlpha.getAndSet(0),
-				drawDynamic.getAndSet(0),
-				drawTemp.getAndSet(0),
-				drawPass.getAndSet(0),
-				drawSingle.getAndSet(0),
-				lastCamX, lastCamY, lastCamZ, lastCamPlane,
-				animate.getAndSet(0),
-				sceneDrawCallCount,
-				sceneDrawVertexCount,
-				scenePushConstantCount,
-				roofSkipPairCount,
-				overlayDirtyZoneCount,
-				uiBytes,
-				screenshotBytes,
-				avgMs(drawFrame, frameCount),
-				avgMs(fenceWait, frameCount),
-				avgMs(uiUpload, frameCount),
-				avgMs(acquire, frameCount),
-				avgMs(commandRecord, frameCount),
-				avgMs(beforePass, frameCount),
-				avgMs(renderPass, frameCount),
-				avgMs(submit, frameCount),
-				avgMs(present, frameCount),
-				avgMs(customDrawable, frameCount),
-				maxMs(maxDrawFrame),
-				maxMs(maxFenceWait),
-				maxMs(maxUiUpload),
-				maxMs(maxAcquire),
-				maxMs(maxCommandRecord),
-				maxMs(maxBeforePass),
-				maxMs(maxRenderPass),
-				maxMs(maxSubmit),
-				maxMs(maxPresent),
-				maxMs(maxCustomDrawable),
-				avgMs(beginFrame, drawSceneCount),
-				maxMs(maxBeginFrame),
-				avgMs(pendingCapture, drawSceneCount),
-				maxMs(maxPendingCapture),
-				totalMs(sceneCapture),
-				maxMs(maxSceneCapture),
-				totalMs(dynamicCapture),
-				maxMs(maxDynamicCapture),
-				totalMs(tempCapture),
-				maxMs(maxTempCapture),
-				totalMs(singleCapture),
-				maxMs(maxSingleCapture)
-			));
-			return;
+			discardCaptureTotals();
+			appendModelStats(line);
 		}
+		else
+		{
+			appendCaptureTotals(line);
+		}
+		log.info(line.toString());
+	}
 
-		long sort = modelSortNanos.getAndSet(0);
-		long fullSort = modelFullSortNanos.getAndSet(0);
-		long cullOnly = modelCullOnlyNanos.getAndSet(0);
-		long emit = modelEmitNanos.getAndSet(0);
-		long sortedEmit = modelSortedEmitNanos.getAndSet(0);
-		long unsortedEmit = modelUnsortedEmitNanos.getAndSet(0);
-		long uv = modelUvNanos.getAndSet(0);
-		long sortedModelCount = sortedModels.getAndSet(0);
-		long fullSortModelCount = fullSortModels.getAndSet(0);
-		long cullOnlyModelCount = cullOnlyModels.getAndSet(0);
-		long unsortedModelCount = unsortedModels.getAndSet(0);
-		long fallbackModelCount = sortFallbackModels.getAndSet(0);
-		long sortedFaceCount = sortedFaces.getAndSet(0);
-		long unsortedFaceCount = unsortedFaces.getAndSet(0);
-		long transparentFaceCount = fullSortTransparentFaces.getAndSet(0);
-		long texturedFaceCount = texturedEmitFaces.getAndSet(0);
-		long overrideFaceCount = overrideEmitFaces.getAndSet(0);
-
-			log.info(String.format(
-				"recon | scene=%d preSD=%d postSD=%d swap=%d load=%d | paint=%d tileModel=%d | zoneOpq=%d zoneAlpha=%d | dyn=%d temp=%d pass=%d single=%d | dynVerts=%d dynFaces=%d maxF=%d | cam=(%.1f, %.1f, %.1f) plane=%d | anim=%d | submit: draws=%d drawVerts=%d pushes=%d roofSkips=%d overlayZones=%d uiBytes=%d readbackBytes=%d | cpu/frame avg ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f | cpu max ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f | scene avg/max ms: begin=%.2f/%.2f pending=%.2f/%.2f staticCaptureTotal=%.2f max=%.2f | model ms: sort=%.2f full=%.2f cull=%.2f emit=%.2f sortedEmit=%.2f unsortedEmit=%.2f uv=%.2f | models sorted=%d full=%d cull=%d unsorted=%d fallback=%d | faces sorted=%d unsorted=%d tex=%d override=%d fullTrans=%d",
+	private void appendCallbackCounts(StringBuilder line, long drawSceneCount)
+	{
+		line.append(String.format(
+			"recon | scene=%d preSD=%d postSD=%d swap=%d load=%d | paint=%d tileModel=%d | zoneOpq=%d zoneAlpha=%d | dyn=%d temp=%d pass=%d single=%d",
 			drawSceneCount,
 			preSceneDraw.getAndSet(0),
 			postDrawScene.getAndSet(0),
@@ -336,19 +239,45 @@ final class DrawCallbackStats
 			drawDynamic.getAndSet(0),
 			drawTemp.getAndSet(0),
 			drawPass.getAndSet(0),
-			drawSingle.getAndSet(0),
-			totalDynamicVerts.getAndSet(0),
-			totalDynamicFaces.getAndSet(0),
-			maxDynamicFaces.getAndSet(0),
-			lastCamX, lastCamY, lastCamZ, lastCamPlane,
-			animate.getAndSet(0),
-			sceneDrawCallCount,
-			sceneDrawVertexCount,
-			scenePushConstantCount,
-			roofSkipPairCount,
-			overlayDirtyZoneCount,
-			uiBytes,
-			screenshotBytes,
+			drawSingle.getAndSet(0)));
+		if (detailedModelStats)
+		{
+			line.append(String.format(" | dynVerts=%d dynFaces=%d maxF=%d",
+				totalDynamicVerts.getAndSet(0),
+				totalDynamicFaces.getAndSet(0),
+				maxDynamicFaces.getAndSet(0)));
+		}
+		line.append(String.format(" | cam=(%.1f, %.1f, %.1f) plane=%d | anim=%d",
+			lastCamX, lastCamY, lastCamZ, lastCamPlane, animate.getAndSet(0)));
+	}
+
+	private void appendSubmitCounts(StringBuilder line)
+	{
+		line.append(String.format(
+			" | submit: draws=%d drawVerts=%d pushes=%d roofSkips=%d overlayZones=%d uiBytes=%d readbackBytes=%d",
+			sceneDrawCalls.getAndSet(0),
+			sceneDrawVertices.getAndSet(0),
+			scenePushConstants.getAndSet(0),
+			roofSkipPairs.getAndSet(0),
+			overlayDirtyZones.getAndSet(0),
+			uiUploadBytes.getAndSet(0),
+			screenshotReadbackBytes.getAndSet(0)));
+	}
+
+	private void appendCpuTimings(StringBuilder line, long frameCount)
+	{
+		long drawFrame = drawFrameNanos.getAndSet(0);
+		long fenceWait = fenceWaitNanos.getAndSet(0);
+		long uiUpload = uiUploadNanos.getAndSet(0);
+		long acquire = acquireNanos.getAndSet(0);
+		long commandRecord = commandRecordNanos.getAndSet(0);
+		long beforePass = beforeRenderPassNanos.getAndSet(0);
+		long renderPass = renderPassNanos.getAndSet(0);
+		long submit = submitNanos.getAndSet(0);
+		long present = presentNanos.getAndSet(0);
+		long customDrawable = customDrawableNanos.getAndSet(0);
+		line.append(String.format(
+			" | cpu/frame avg ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f",
 			avgMs(drawFrame, frameCount),
 			avgMs(fenceWait, frameCount),
 			avgMs(uiUpload, frameCount),
@@ -357,42 +286,79 @@ final class DrawCallbackStats
 			avgMs(beforePass, frameCount),
 			avgMs(renderPass, frameCount),
 			avgMs(submit, frameCount),
-				avgMs(present, frameCount),
-				avgMs(customDrawable, frameCount),
-				maxMs(maxDrawFrame),
-				maxMs(maxFenceWait),
-				maxMs(maxUiUpload),
-				maxMs(maxAcquire),
-				maxMs(maxCommandRecord),
-				maxMs(maxBeforePass),
-				maxMs(maxRenderPass),
-				maxMs(maxSubmit),
-				maxMs(maxPresent),
-				maxMs(maxCustomDrawable),
-				avgMs(beginFrame, drawSceneCount),
-				maxMs(maxBeginFrame),
-				avgMs(pendingCapture, drawSceneCount),
-				maxMs(maxPendingCapture),
-				totalMs(sceneCapture),
-				maxMs(maxSceneCapture),
-			totalMs(sort),
-			totalMs(fullSort),
-			totalMs(cullOnly),
-			totalMs(emit),
-			totalMs(sortedEmit),
-			totalMs(unsortedEmit),
-			totalMs(uv),
-			sortedModelCount,
-			fullSortModelCount,
-			cullOnlyModelCount,
-			unsortedModelCount,
-			fallbackModelCount,
-			sortedFaceCount,
-			unsortedFaceCount,
-			texturedFaceCount,
-			overrideFaceCount,
-			transparentFaceCount
-		));
+			avgMs(present, frameCount),
+			avgMs(customDrawable, frameCount)));
+		line.append(String.format(
+			" | cpu max ms: draw=%.2f fence=%.2f ui=%.2f acquire=%.2f record=%.2f beforePass=%.2f pass=%.2f submit=%.2f present=%.2f drawable=%.2f",
+			maxMs(drawFrameNanos.getMaxAndReset()),
+			maxMs(fenceWaitNanos.getMaxAndReset()),
+			maxMs(uiUploadNanos.getMaxAndReset()),
+			maxMs(acquireNanos.getMaxAndReset()),
+			maxMs(commandRecordNanos.getMaxAndReset()),
+			maxMs(beforeRenderPassNanos.getMaxAndReset()),
+			maxMs(renderPassNanos.getMaxAndReset()),
+			maxMs(submitNanos.getMaxAndReset()),
+			maxMs(presentNanos.getMaxAndReset()),
+			maxMs(customDrawableNanos.getMaxAndReset())));
+	}
+
+	private void appendSceneTimings(StringBuilder line, long drawSceneCount)
+	{
+		line.append(String.format(
+			" | scene avg/max ms: begin=%.2f/%.2f pending=%.2f/%.2f staticCaptureTotal=%.2f max=%.2f",
+			avgMs(beginFrameNanos.getAndSet(0), drawSceneCount),
+			maxMs(beginFrameNanos.getMaxAndReset()),
+			avgMs(pendingCaptureNanos.getAndSet(0), drawSceneCount),
+			maxMs(pendingCaptureNanos.getMaxAndReset()),
+			totalMs(sceneCaptureNanos.getAndSet(0)),
+			maxMs(sceneCaptureNanos.getMaxAndReset())));
+	}
+
+	private void appendCaptureTotals(StringBuilder line)
+	{
+		line.append(String.format(
+			" | capture total/max ms: dyn=%.2f/%.2f temp=%.2f/%.2f single=%.2f/%.2f",
+			totalMs(dynamicCaptureNanos.getAndSet(0)),
+			maxMs(dynamicCaptureNanos.getMaxAndReset()),
+			totalMs(tempCaptureNanos.getAndSet(0)),
+			maxMs(tempCaptureNanos.getMaxAndReset()),
+			totalMs(singleCaptureNanos.getAndSet(0)),
+			maxMs(singleCaptureNanos.getMaxAndReset())));
+	}
+
+	// The detailed line omits the capture totals; reset them anyway so they
+	// don't dump stale sums into the first line after the toggle flips.
+	private void discardCaptureTotals()
+	{
+		dynamicCaptureNanos.getAndSet(0);
+		dynamicCaptureNanos.getMaxAndReset();
+		tempCaptureNanos.getAndSet(0);
+		tempCaptureNanos.getMaxAndReset();
+		singleCaptureNanos.getAndSet(0);
+		singleCaptureNanos.getMaxAndReset();
+	}
+
+	private void appendModelStats(StringBuilder line)
+	{
+		line.append(String.format(
+			" | model ms: sort=%.2f full=%.2f cull=%.2f emit=%.2f sortedEmit=%.2f unsortedEmit=%.2f uv=%.2f | models sorted=%d full=%d cull=%d unsorted=%d fallback=%d | faces sorted=%d unsorted=%d tex=%d override=%d fullTrans=%d",
+			totalMs(modelSortNanos.getAndSet(0)),
+			totalMs(modelFullSortNanos.getAndSet(0)),
+			totalMs(modelCullOnlyNanos.getAndSet(0)),
+			totalMs(modelEmitNanos.getAndSet(0)),
+			totalMs(modelSortedEmitNanos.getAndSet(0)),
+			totalMs(modelUnsortedEmitNanos.getAndSet(0)),
+			totalMs(modelUvNanos.getAndSet(0)),
+			sortedModels.getAndSet(0),
+			fullSortModels.getAndSet(0),
+			cullOnlyModels.getAndSet(0),
+			unsortedModels.getAndSet(0),
+			sortFallbackModels.getAndSet(0),
+			sortedFaces.getAndSet(0),
+			unsortedFaces.getAndSet(0),
+			texturedEmitFaces.getAndSet(0),
+			overrideEmitFaces.getAndSet(0),
+			fullSortTransparentFaces.getAndSet(0)));
 	}
 
 	private void resetDetailedModelStats()
