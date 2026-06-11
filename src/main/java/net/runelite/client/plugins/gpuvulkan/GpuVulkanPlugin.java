@@ -1051,10 +1051,14 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 
 	private void prepareScene(Scene scene)
 	{
-		// Region stripping mutates the live Scene via removeTile(). That is too
-		// strong an operation for this renderer: if the reference chunk is wrong
-		// for an overlapping/edge map, the first full capture after plugin start
-		// can permanently remove the active scene. Keep capture side-effect free.
+		// removeTile() mutates the live Scene, but stock does the same to the
+		// already-live scene at plugin start (GpuPlugin.startUp -> loadScene),
+		// with identical chunk math and regions data — production-proven. The
+		// toggle takes effect on the next scene load, matching stock.
+		if (regionManager != null)
+		{
+			regionManager.prepare(scene, config.hideUnrelatedMaps());
+		}
 	}
 
 	private void captureSceneNow(Scene scene)
