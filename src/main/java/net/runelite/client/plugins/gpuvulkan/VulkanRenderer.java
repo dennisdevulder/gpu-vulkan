@@ -94,6 +94,10 @@ final class VulkanRenderer implements AutoCloseable
 	private long customPresentResizeAfterNanos;
 	private static final long CUSTOM_PRESENT_RESIZE_SETTLE_NANOS = 200_000_000L;
 	private long nextCustomPresentNanos;
+	// Scratch written by acquireMetalDrawable for the current frame only.
+	private long pendingDrawable;
+	private int pendingDrawableWidth;
+	private int pendingDrawableHeight;
 	private final long customPresentIntervalNanos =
 		1_000_000_000L / Math.max(1L, Long.getLong("vkgpu.presentFps", 75L));
 
@@ -207,25 +211,69 @@ final class VulkanRenderer implements AutoCloseable
 	{
 		long frameStart = stats.startNanos();
 		stats.frames.incrementAndGet();
-		if (desiredWidth <= 0 || desiredHeight <= 0 || uiPixels == null || uiWidth <= 0 || uiHeight <= 0)
+		if (desiredWidth <= 0 || desiredHeight <= 0 || uiPixels == null || uiWidth <= 0 || uiHeight <= 0
+			|| !surfaceReady(desiredWidth, desiredHeight))
 		{
 			return;
 		}
+
+		stashFrameParams(cameraX, cameraY, cameraZ, cameraPitch, cameraYaw,
+			viewportXOffset, viewportYOffset, viewportWidth, viewportHeight,
+			canvasWidth, canvasHeight, scale, skyboxColor, brightness,
+			textureLightMode, colorBlindMode, colorBlindIntensity,
+			drawDistanceTiles, fogDepthTiles, gameTick, smoothBanding, overlayColor);
+
+		try (MemoryStack stack = stackPush())
+		{
+			waitForFrameFence();
+
+			// CPU-side memcpy into the persistently-mapped staging buffer. Done
+			// before recording the command buffer so the GPU read sees it.
+			long start = stats.startNanos();
+			stats.uiUploadBytes.addAndGet((long) uiWidth * uiHeight * Integer.BYTES);
+			renderExtensions.uploadUiPixels(uiPixels, uiWidth, uiHeight);
+			stats.addNanos(stats.uiUploadNanos, start);
+
+			if (useCustomPresent)
+			{
+				drawFrameCustomPresent(stack, desiredWidth, desiredHeight);
+			}
+			else
+			{
+				drawFrameSwapchain(stack, desiredWidth, desiredHeight);
+			}
+
+			sync.advance();
+		}
+		finally
+		{
+			stats.addNanos(stats.drawFrameNanos, frameStart);
+		}
+	}
+
+	// Rebuilds a stale swapchain once the target size settles; false skips
+	// the frame (minimised window, mid-resize).
+	private boolean surfaceReady(int desiredWidth, int desiredHeight)
+	{
 		if (!useCustomPresent && swapchainRebuild.isStale())
 		{
 			if (!swapchainRebuild.targetStable(desiredWidth, desiredHeight))
 			{
-				return;
+				return false;
 			}
 			rebuildSwapchain(desiredWidth, desiredHeight);
 		}
-		if (swapchain.width() == 0 || swapchain.height() == 0)
-		{
-			return; // window minimised — nothing to render
-		}
+		return swapchain.width() != 0 && swapchain.height() != 0;
+	}
 
-
-		// Stash for the scene MVP we'll build at record time.
+	/** Stash for the scene MVP and frame context built at record time. */
+	private void stashFrameParams(double cameraX, double cameraY, double cameraZ,
+		double cameraPitch, double cameraYaw,
+		int viewportXOffset, int viewportYOffset, int viewportWidth, int viewportHeight,
+		int canvasWidth, int canvasHeight, int scale, int skyboxColor, float brightness,
+		float textureLightMode, int colorBlindMode, float colorBlindIntensity,
+		int drawDistanceTiles, int fogDepthTiles, int gameTick, float smoothBanding, int overlayColor)
+	{
 		this.cameraX = cameraX;
 		this.cameraY = cameraY;
 		this.cameraZ = cameraZ;
@@ -249,43 +297,18 @@ final class VulkanRenderer implements AutoCloseable
 		this.smoothBanding = smoothBanding;
 		this.overlayColor = overlayColor;
 		this.screenshotReadbackRequested = !disableScreenshotReadback && hasPendingScreenshotRequest();
+	}
 
-		try (MemoryStack stack = stackPush())
+	// Must complete before uploadPixels writes this slot's UI staging buffer,
+	// or the memcpy races the GPU copy from FRAMES_IN_FLIGHT frames ago.
+	private void waitForFrameFence()
+	{
+		long start = stats.startNanos();
+		if (vkGetFenceStatus(device.handle(), sync.inFlightFence()) == VK_NOT_READY)
 		{
-			// Wait BEFORE writing this slot's UI staging buffer — otherwise the
-			// CPU memcpy in uploadPixels can race the GPU's vkCmdCopyBufferToImage
-			// from FRAMES_IN_FLIGHT frames ago, producing the half-old, half-new
-			// UI texture that reads as the UI/scene "layer" intermittently
-			// covering and uncovering.
-			long start = stats.startNanos();
-			if (vkGetFenceStatus(device.handle(), sync.inFlightFence()) == VK_NOT_READY)
-			{
-				Vk.check("vkWaitForFences",
-					vkWaitForFences(device.handle(), sync.inFlightFence(), true, Long.MAX_VALUE));
-				stats.addNanos(stats.fenceWaitNanos, start);
-			}
-
-			// CPU-side memcpy into the persistently-mapped staging buffer. Done
-			// before recording the command buffer so the GPU read sees it.
-			start = stats.startNanos();
-			stats.uiUploadBytes.addAndGet((long) uiWidth * uiHeight * Integer.BYTES);
-			renderExtensions.uploadUiPixels(uiPixels, uiWidth, uiHeight);
-			stats.addNanos(stats.uiUploadNanos, start);
-
-			if (useCustomPresent)
-			{
-				drawFrameCustomPresent(stack, desiredWidth, desiredHeight);
-			}
-			else
-			{
-				drawFrameSwapchain(stack, desiredWidth, desiredHeight);
-			}
-
-			sync.advance();
-		}
-		finally
-		{
-			stats.addNanos(stats.drawFrameNanos, frameStart);
+			Vk.check("vkWaitForFences",
+				vkWaitForFences(device.handle(), sync.inFlightFence(), true, Long.MAX_VALUE));
+			stats.addNanos(stats.fenceWaitNanos, start);
 		}
 	}
 
@@ -368,25 +391,10 @@ final class VulkanRenderer implements AutoCloseable
 
 		ensureCustomPresentTarget(desiredWidth, desiredHeight);
 
-		long drawable = 0L;
-		MetalDrawableSet.Entry drawableEntry = null;
-		int drawableWidth = 0;
-		int drawableHeight = 0;
-		{
-			long start = stats.startNanos();
-			long[] d = MacOSMetalHelper.nextDrawable();
-			stats.addNanos(stats.customDrawableNanos, start);
-			nextCustomPresentNanos = System.nanoTime() + customPresentIntervalNanos;
-			if (d != null)
-			{
-				drawable = d[0];
-				long mtlTexture = d[1];
-				drawableWidth = (int) d[2];
-				drawableHeight = (int) d[3];
-				drawableEntry = metalDrawables.acquire(
-					mtlTexture, drawableWidth, drawableHeight, renderPass, customPresentTarget.depth(), null);
-			}
-		}
+		MetalDrawableSet.Entry drawableEntry = acquireMetalDrawable();
+		long drawable = pendingDrawable;
+		int drawableWidth = pendingDrawableWidth;
+		int drawableHeight = pendingDrawableHeight;
 		boolean presented = false;
 
 		try
@@ -429,6 +437,29 @@ final class VulkanRenderer implements AutoCloseable
 				MacOSMetalHelper.releaseObject(drawable);
 			}
 		}
+	}
+
+	// Returns null when CAMetalLayer has no drawable this frame (render is
+	// still recorded, nothing presents). Sets the pendingDrawable* scratch.
+	private MetalDrawableSet.Entry acquireMetalDrawable()
+	{
+		pendingDrawable = 0L;
+		pendingDrawableWidth = 0;
+		pendingDrawableHeight = 0;
+		long start = stats.startNanos();
+		long[] d = MacOSMetalHelper.nextDrawable();
+		stats.addNanos(stats.customDrawableNanos, start);
+		nextCustomPresentNanos = System.nanoTime() + customPresentIntervalNanos;
+		if (d == null)
+		{
+			return null;
+		}
+		pendingDrawable = d[0];
+		long mtlTexture = d[1];
+		pendingDrawableWidth = (int) d[2];
+		pendingDrawableHeight = (int) d[3];
+		return metalDrawables.acquire(
+			mtlTexture, pendingDrawableWidth, pendingDrawableHeight, renderPass, customPresentTarget.depth(), null);
 	}
 
 	private void ensureCustomPresentTarget(int width, int height)
@@ -649,22 +680,31 @@ final class VulkanRenderer implements AutoCloseable
 		if (redirect != null)
 		{
 			recordRedirectedPass(stack, cmd, redirect, framebuffer, targetWidth, targetHeight);
-			if (screenshotReadbackRequested)
-			{
-				stats.screenshotReadbackBytes.addAndGet((long) targetWidth * targetHeight * Integer.BYTES);
-				screenshotReadback.recordCopy(cmd, targetImage, targetWidth, targetHeight, sync.currentFrame());
-			}
-			recordAfterComposite(cmd, targetImage, targetWidth, targetHeight);
+			recordPostComposite(cmd, targetImage, targetWidth, targetHeight);
 			Vk.check("vkEndCommandBuffer", vkEndCommandBuffer(cmd));
 			return;
 		}
 
-		// Two clears now: colour attachment then depth attachment, in the same
-		// order they were declared in the render pass. Depth clear = 0 because
-		// the OSRS projection is reverse-Z (closer = bigger value).
-		// Skybox-derived clear so the area outside rendered geometry blends
-		// into the sky tint OSRS picked for the current region. Stock GpuPlugin
-		// reads this from `client.getSkyboxColor()` once per frame.
+		beginClearedRenderPass(stack, cmd, renderPass.handle(), framebuffer, targetWidth, targetHeight);
+
+		// Scene draws use the OSRS viewport rect — the area inside the canvas
+		// where the UI texture is transparent. The UI quad draws under its own
+		// full-canvas viewport (InterfaceRenderer.recordDraw).
+		VulkanFrameContext frame = setupSceneViewportAndFrame(stack, cmd, targetWidth, targetHeight);
+		start = stats.startNanos();
+		renderExtensions.recordRenderPass(frame);
+		stats.addNanos(stats.renderPassNanos, start);
+
+		vkCmdEndRenderPass(cmd);
+		recordPostComposite(cmd, targetImage, targetWidth, targetHeight);
+
+		Vk.check("vkEndCommandBuffer", vkEndCommandBuffer(cmd));
+	}
+
+	// Colour clears to the engine's skybox tint; depth clears to 0 (reverse-Z).
+	private void beginClearedRenderPass(MemoryStack stack, VkCommandBuffer cmd,
+		long pass, long framebuffer, int targetWidth, int targetHeight)
+	{
 		float skyR = ((skyboxColor >> 16) & 0xFF) / 255f;
 		float skyG = ((skyboxColor >>  8) & 0xFF) / 255f;
 		float skyB = ( skyboxColor        & 0xFF) / 255f;
@@ -674,111 +714,22 @@ final class VulkanRenderer implements AutoCloseable
 
 		VkRenderPassBeginInfo rpInfo = VkRenderPassBeginInfo.calloc(stack)
 			.sType$Default()
-			.renderPass(renderPass.handle())
+			.renderPass(pass)
 			.framebuffer(framebuffer)
 			.renderArea(r -> r.offset(o -> o.set(0, 0)).extent(e -> e.set(targetWidth, targetHeight)))
 			.pClearValues(clears);
 
 		vkCmdBeginRenderPass(cmd, rpInfo, VK_SUBPASS_CONTENTS_INLINE);
+	}
 
-		// Scene draws use the OSRS viewport rect — that's the area inside the
-		// canvas where the UI texture is transparent. The UI fullscreen-quad
-		// below switches back to the full canvas extent.
-		//
-		// Stretch ratio comes from CANVAS dims, not VIEWPORT dims (matches
-		// stock GpuPlugin's `dim.getHeight() / canvasHeight` derivation). The
-		// engine renders into a logical canvas (e.g. 1117×917) which gets
-		// stretched uniformly to the swapchain (1676×1375 here, 1.5×). The
-		// viewport rect lives inside the canvas with possible insets (e.g.
-		// resizable mode's top toolbar trims viewportHeight). Deriving dpi
-		// from viewport dims would give different X/Y ratios when the viewport
-		// is shorter than the canvas — that non-uniform stretch shifts
-		// rendered tiles off the engine's projection target by tens of
-		// pixels in Y, which is exactly the "click only works in shifting
-		// spots near the player" symptom.
-		float dpiX = (float) targetWidth  / Math.max(canvasWidth, 1);
-		float dpiY = (float) targetHeight / Math.max(canvasHeight, 1);
-		int sx = Math.max(Math.round(viewportXOffset * dpiX), 0);
-		int sy = Math.max(Math.round(viewportYOffset * dpiY), 0);
-		int sw = Math.max(Math.min(Math.round(viewportWidth  * dpiX), targetWidth  - sx), 1);
-		int sh = Math.max(Math.min(Math.round(viewportHeight * dpiY), targetHeight - sy), 1);
-		// Standard positive-height Vulkan viewport. We Y-flip in the matrix
-		// (scale Y by -1 below) instead of relying on KHR_maintenance1
-		// negative-height — that was being silently ignored by the runtime,
-		// leaving Y un-flipped and rendering everything at the wrong half.
-		VkViewport.Buffer sceneVp = VkViewport.calloc(1, stack);
-		sceneVp.get(0)
-			.x(sx).y(sy)
-			.width(sw).height(sh)
-			.minDepth(0).maxDepth(1);
-		vkCmdSetViewport(cmd, 0, sceneVp);
-
-		VkRect2D.Buffer sceneScissor = VkRect2D.calloc(1, stack);
-		sceneScissor.get(0)
-			.offset(o -> o.set(sx, sy))
-			.extent(e -> e.set(sw, sh));
-		vkCmdSetScissor(cmd, 0, sceneScissor);
-
-		// Stock GpuPlugin's matrix verbatim, with Y scale negated so the projection's
-		// m[5]=-2/h (OpenGL y-up clip-space) lands right-side-up in Vulkan's y-down
-		// clip space. viewportWidth/Height stay in logical pixels — the matrix output
-		// is in those same units, and the DPI-scaled Vulkan viewport above maps NDC
-		// onto the swapchain's display pixels. Z is unscaled to keep the reverse-Z
-		// projection (z_ndc = 2n/z) inside Vulkan's [0,1] clip range.
-		int vw = Math.max(viewportWidth, 1);
-		int vh = Math.max(viewportHeight, 1);
-		float[] sceneMvp = Mat4Ops.scale(scale, -scale, 1);
-		Mat4Ops.mul(sceneMvp, Mat4Ops.projection(vw, vh, 50));
-		Mat4Ops.mul(sceneMvp, Mat4Ops.rotateX((float) cameraPitch));
-		Mat4Ops.mul(sceneMvp, Mat4Ops.rotateY((float) cameraYaw));
-		Mat4Ops.mul(sceneMvp, Mat4Ops.translate(-(float) cameraX, -(float) cameraY, -(float) cameraZ));
-
-		VulkanFrameContext frame = new DefaultVulkanFrameContext(cmd,
-			targetWidth, targetHeight,
-			viewportXOffset, viewportYOffset, viewportWidth, viewportHeight,
-			canvasWidth, canvasHeight, scale,
-			sceneMvp,
-			(float) cameraX, (float) cameraY, (float) cameraZ, brightness,
-			drawDistanceTiles, fogDepthTiles,
-			((skyboxColor >> 16) & 0xFF) / 255f,
-			((skyboxColor >>  8) & 0xFF) / 255f,
-			( skyboxColor        & 0xFF) / 255f,
-			gameTick, textureLightMode,
-			colorBlindMode, colorBlindIntensity,
-			smoothBanding, overlayColor);
-		start = stats.startNanos();
-		renderExtensions.recordRenderPass(frame);
-		stats.addNanos(stats.renderPassNanos, start);
-
-		// Switch viewport back to full canvas for the UI fullscreen quad — the UI
-		// texture covers everything, including the regions outside the scene rect.
-		VkViewport.Buffer uiVp = VkViewport.calloc(1, stack);
-		uiVp.get(0)
-			.x(0).y(0)
-			.width(targetWidth).height(targetHeight)
-			.minDepth(0).maxDepth(1);
-		vkCmdSetViewport(cmd, 0, uiVp);
-
-		VkRect2D.Buffer uiScissor = VkRect2D.calloc(1, stack);
-		uiScissor.get(0)
-			.offset(o -> o.set(0, 0))
-			.extent(e -> e.set(targetWidth, targetHeight));
-		vkCmdSetScissor(cmd, 0, uiScissor);
-
-		// UI on top — fullscreen quad sampling the just-uploaded texture, alpha-blended,
-		// depth disabled in the pipeline so it always wins. overlayColor is the engine's
-		// per-frame fade/tint (login screen fade, etc.) — passed all the way through
-		// from DrawCallbacks.draw(int) to the ui.frag push constant.
-		vkCmdEndRenderPass(cmd);
-
+	private void recordPostComposite(VkCommandBuffer cmd, long targetImage, int targetWidth, int targetHeight)
+	{
 		if (screenshotReadbackRequested)
 		{
 			stats.screenshotReadbackBytes.addAndGet((long) targetWidth * targetHeight * Integer.BYTES);
 			screenshotReadback.recordCopy(cmd, targetImage, targetWidth, targetHeight, sync.currentFrame());
 		}
 		recordAfterComposite(cmd, targetImage, targetWidth, targetHeight);
-
-		Vk.check("vkEndCommandBuffer", vkEndCommandBuffer(cmd));
 	}
 
 	private void recordAfterComposite(VkCommandBuffer cmd, long targetImage, int targetWidth, int targetHeight)
@@ -801,41 +752,24 @@ final class VulkanRenderer implements AutoCloseable
 	{
 		GfxRenderTarget sceneTarget = (GfxRenderTarget) redirect.sceneTarget(targetWidth, targetHeight);
 
-		float skyR = ((skyboxColor >> 16) & 0xFF) / 255f;
-		float skyG = ((skyboxColor >>  8) & 0xFF) / 255f;
-		float skyB = ( skyboxColor        & 0xFF) / 255f;
-		VkClearValue.Buffer clears = VkClearValue.calloc(2, stack);
-		clears.get(0).color(c -> c.float32(0, skyR).float32(1, skyG).float32(2, skyB).float32(3, 1.0f));
-		clears.get(1).depthStencil(ds -> ds.depth(0.0f).stencil(0));
-
-		VkRenderPassBeginInfo sceneRp = VkRenderPassBeginInfo.calloc(stack)
-			.sType$Default()
-			.renderPass(sceneTarget.renderPassHandle())
-			.framebuffer(sceneTarget.framebuffer())
-			.renderArea(r -> r.offset(o -> o.set(0, 0)).extent(e -> e.set(sceneTarget.width(), sceneTarget.height())))
-			.pClearValues(clears);
-		vkCmdBeginRenderPass(cmd, sceneRp, VK_SUBPASS_CONTENTS_INLINE);
-
+		beginClearedRenderPass(stack, cmd, sceneTarget.renderPassHandle(), sceneTarget.framebuffer(),
+			sceneTarget.width(), sceneTarget.height());
 		VulkanFrameContext sceneFrame = setupSceneViewportAndFrame(stack, cmd, sceneTarget.width(), sceneTarget.height());
 		renderExtensions.recordScenePass(sceneFrame);
 		vkCmdEndRenderPass(cmd);
 
 		redirect.recordAfterScene(cmd);
 
-		VkRenderPassBeginInfo mainRp = VkRenderPassBeginInfo.calloc(stack)
-			.sType$Default()
-			.renderPass(renderPass.handle())
-			.framebuffer(framebuffer)
-			.renderArea(r -> r.offset(o -> o.set(0, 0)).extent(e -> e.set(targetWidth, targetHeight)))
-			.pClearValues(clears);
-		vkCmdBeginRenderPass(cmd, mainRp, VK_SUBPASS_CONTENTS_INLINE);
-
+		beginClearedRenderPass(stack, cmd, renderPass.handle(), framebuffer, targetWidth, targetHeight);
 		VulkanFrameContext resolveFrame = setupUiViewportAndFrame(stack, cmd, targetWidth, targetHeight);
 		redirect.recordResolve(resolveFrame);
 		renderExtensions.recordUiPass(resolveFrame);
 		vkCmdEndRenderPass(cmd);
 	}
 
+	// DPI from CANVAS dims, not viewport dims (stock's derivation): viewport
+	// insets would skew X/Y ratios and shift clickboxes. Y-flip lives in the
+	// matrix, not a negative-height viewport (runtime ignored it).
 	private VulkanFrameContext setupSceneViewportAndFrame(MemoryStack stack, VkCommandBuffer cmd,
 														  int targetWidth, int targetHeight)
 	{
@@ -881,6 +815,8 @@ final class VulkanRenderer implements AutoCloseable
 		return createFrameContext(cmd, targetWidth, targetHeight);
 	}
 
+	// Stock's matrix with Y negated for Vulkan's y-down clip space; Z
+	// unscaled to keep reverse-Z inside [0,1].
 	private VulkanFrameContext createFrameContext(VkCommandBuffer cmd, int targetWidth, int targetHeight)
 	{
 		int vw = Math.max(viewportWidth, 1);
