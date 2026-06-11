@@ -819,7 +819,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			renderer.markSwapchainStale();
 			return false;
 		}
-		ResizeTrace.frame(w + "x" + h);
+		ResizeTrace.frame(w, h);
 		if (!ensureNativeSurfaceCurrent(w, h))
 		{
 			return false;

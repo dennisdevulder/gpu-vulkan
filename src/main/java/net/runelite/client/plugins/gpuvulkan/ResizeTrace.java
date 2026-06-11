@@ -78,7 +78,9 @@ final class ResizeTrace
 		}
 	}
 
-	static void frame(String detail)
+	// (int, int) so per-frame callers don't build a string when disabled —
+	// ENABLED is static final, the JIT erases the whole call.
+	static void frame(int width, int height)
 	{
 		if (!ENABLED)
 		{
@@ -89,7 +91,7 @@ final class ResizeTrace
 		long next = nextFrameLogNanos.get();
 		if (now >= next && nextFrameLogNanos.compareAndSet(next, now + TimeUnit.MILLISECONDS.toNanos(500)))
 		{
-			log.info("resize-trace plugin.draw heartbeat {}", detail);
+			log.info("resize-trace plugin.draw heartbeat {}x{}", width, height);
 		}
 	}
 }
