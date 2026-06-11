@@ -84,38 +84,7 @@ final class VulkanInstance implements AutoCloseable
 	{
 		try (MemoryStack stack = stackPush())
 		{
-			String[] requestedExts = platform.requiredInstanceExtensions();
-
-			// Filter against what the implementation actually exposes.
-			// VK_KHR_portability_enumeration is a loader-level extension: with
-			// the official Vulkan SDK loader on macOS it IS advertised, but
-			// when LWJGL bundles MoltenVK directly there's no loader in the
-			// picture and the extension is missing. Requesting an extension
-			// the impl doesn't advertise → vkCreateInstance returns
-			// VK_ERROR_EXTENSION_NOT_PRESENT (-7). The matching create-flag
-			// is also skipped in that case (set further down).
-			Set<String> available = enumerateInstanceExtensions(stack);
-			java.util.ArrayList<String> surfaceExtList = new java.util.ArrayList<>(requestedExts.length);
-			for (String e : requestedExts)
-			{
-				if (available.contains(e))
-				{
-					surfaceExtList.add(e);
-				}
-				else
-				{
-					log.info("Requested instance extension {} not exposed by the Vulkan implementation — skipping", e);
-				}
-			}
-			String[] surfaceExts = surfaceExtList.toArray(new String[0]);
-
-			VkApplicationInfo app = VkApplicationInfo.calloc(stack)
-				.sType$Default()
-				.pApplicationName(stack.UTF8("RuneLite GPU (Vulkan)"))
-				.applicationVersion(VK_MAKE_VERSION(0, 1, 0))
-				.pEngineName(stack.UTF8("gpuvulkan"))
-				.engineVersion(VK_MAKE_VERSION(0, 1, 0))
-				.apiVersion(VK_API_VERSION_1_3);
+			String[] surfaceExts = filterSurfaceExtensions(stack, platform.requiredInstanceExtensions());
 
 			boolean validationOn = enableValidation && hasValidationLayer(stack);
 			if (enableValidation && !validationOn)
@@ -123,63 +92,7 @@ final class VulkanInstance implements AutoCloseable
 				log.warn("Validation requested but {} not installed — running without", VALIDATION_LAYER);
 			}
 
-			// Surface extensions come from the platform layer (VK_KHR_surface
-			// + the right platform-specific surface extension for X11 / Win32
-			// / Metal). VK_EXT_debug_utils is added when validation is on so
-			// we can register a messenger callback. VK_EXT_validation_features
-			// is added so we can opt into synchronization validation, which is
-			// the layer's race-condition / missing-barrier detector — off by
-			// default because it's expensive at runtime.
-			int validationExtCount = validationOn ? 2 : 0;
-			int extCount = surfaceExts.length + validationExtCount;
-			PointerBuffer extNames = stack.mallocPointer(extCount);
-			for (String name : surfaceExts)
-			{
-				extNames.put(stack.UTF8(name));
-			}
-			if (validationOn)
-			{
-				extNames.put(stack.UTF8(EXTDebugUtils.VK_EXT_DEBUG_UTILS_EXTENSION_NAME));
-				extNames.put(stack.UTF8(EXTValidationFeatures.VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME));
-			}
-			extNames.flip();
-
-			// VK_KHR_portability_enumeration is requested on platforms that run
-			// on top of a portability-subset implementation (MoltenVK on macOS).
-			// When the extension is present in the list, also set the matching
-			// instance-create flag — without it MoltenVK refuses to enumerate
-			// and vkCreateInstance returns VK_ERROR_INCOMPATIBLE_DRIVER.
-			int instanceFlags = 0;
-			for (String name : surfaceExts)
-			{
-				if (KHRPortabilityEnumeration.VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME.equals(name))
-				{
-					instanceFlags |= KHRPortabilityEnumeration.VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
-					break;
-				}
-			}
-
-			VkInstanceCreateInfo info = VkInstanceCreateInfo.calloc(stack)
-				.sType$Default()
-				.flags(instanceFlags)
-				.pApplicationInfo(app)
-				.ppEnabledExtensionNames(extNames);
-
-			// Opt into synchronization validation. The validation layer's default
-			// checks catch API misuse (wrong types, bad handles, etc.) but NOT
-			// missing barriers or CPU↔GPU host-memory races on persistently-mapped
-			// buffers — exactly the bug class we're hunting. The extra cost is
-			// fine for a development run; we leave it off in production by virtue
-			// of validation being opt-in via -Dvkgpu.validation=true.
-			if (validationOn)
-			{
-				IntBuffer enables = stack.ints(
-					EXTValidationFeatures.VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT);
-				VkValidationFeaturesEXT vfeatures = VkValidationFeaturesEXT.calloc(stack)
-					.sType$Default()
-					.pEnabledValidationFeatures(enables);
-				info.pNext(vfeatures.address());
-			}
+			VkInstanceCreateInfo info = buildInstanceCreateInfo(stack, surfaceExts, validationOn);
 
 			VkDebugUtilsMessengerCallbackEXT cb = null;
 			if (validationOn)
@@ -187,25 +100,7 @@ final class VulkanInstance implements AutoCloseable
 				info.ppEnabledLayerNames(stack.pointers(stack.UTF8(VALIDATION_LAYER)));
 				log.info("Vulkan validation layers enabled (with VK_EXT_debug_utils messenger — messages will appear in this log)");
 
-				cb = VkDebugUtilsMessengerCallbackEXT.create((severity, type, pCallbackData, pUserData) ->
-				{
-					VkDebugUtilsMessengerCallbackDataEXT data =
-						VkDebugUtilsMessengerCallbackDataEXT.create(pCallbackData);
-					String text = data.pMessageString();
-					if ((severity & EXTDebugUtils.VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) != 0)
-					{
-						log.error("[VK] {}", text);
-					}
-					else if ((severity & EXTDebugUtils.VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) != 0)
-					{
-						log.warn("[VK] {}", text);
-					}
-					else
-					{
-						log.info("[VK] {}", text);
-					}
-					return VK_FALSE;
-				});
+				cb = createDebugCallback();
 
 				// Deliberately NOT chaining a pNext create-info onto
 				// vkCreateInstance. That trick catches messages from inside
@@ -216,37 +111,165 @@ final class VulkanInstance implements AutoCloseable
 				// everything else.
 			}
 
-			PointerBuffer pInst = stack.mallocPointer(1);
-			int r = vkCreateInstance(info, null, pInst);
-			if (r != VK_SUCCESS)
-			{
-				if (cb != null) cb.free();
-				throw new RuntimeException("vkCreateInstance failed: " + r);
-			}
-			this.handle = new VkInstance(pInst.get(0), info);
+			this.handle = createInstance(stack, info, cb);
+			this.debugCallback = cb;
+			this.debugMessenger = validationOn ? createDebugMessenger(stack, handle, cb) : VK_NULL_HANDLE;
+		}
+	}
 
-			if (validationOn)
+	private static String[] filterSurfaceExtensions(MemoryStack stack, String[] requestedExts)
+	{
+		// Filter against what the implementation actually exposes.
+		// VK_KHR_portability_enumeration is a loader-level extension: with
+		// the official Vulkan SDK loader on macOS it IS advertised, but
+		// when LWJGL bundles MoltenVK directly there's no loader in the
+		// picture and the extension is missing. Requesting an extension
+		// the impl doesn't advertise → vkCreateInstance returns
+		// VK_ERROR_EXTENSION_NOT_PRESENT (-7). The matching create-flag
+		// is also skipped in that case (set further down).
+		Set<String> available = enumerateInstanceExtensions(stack);
+		java.util.ArrayList<String> surfaceExtList = new java.util.ArrayList<>(requestedExts.length);
+		for (String e : requestedExts)
+		{
+			if (available.contains(e))
 			{
-				this.debugCallback = cb;
-				VkDebugUtilsMessengerCreateInfoEXT persistentInfo = makeCreateInfo(stack, cb);
-				LongBuffer pMessenger = stack.mallocLong(1);
-				int mr = EXTDebugUtils.vkCreateDebugUtilsMessengerEXT(handle, persistentInfo, null, pMessenger);
-				if (mr != VK_SUCCESS)
-				{
-					log.warn("vkCreateDebugUtilsMessengerEXT failed: {} — continuing without persistent messenger", mr);
-					this.debugMessenger = VK_NULL_HANDLE;
-				}
-				else
-				{
-					this.debugMessenger = pMessenger.get(0);
-				}
+				surfaceExtList.add(e);
 			}
 			else
 			{
-				this.debugCallback = null;
-				this.debugMessenger = VK_NULL_HANDLE;
+				log.info("Requested instance extension {} not exposed by the Vulkan implementation — skipping", e);
 			}
 		}
+		return surfaceExtList.toArray(new String[0]);
+	}
+
+	private static VkInstanceCreateInfo buildInstanceCreateInfo(MemoryStack stack, String[] surfaceExts,
+		boolean validationOn)
+	{
+		VkApplicationInfo app = VkApplicationInfo.calloc(stack)
+			.sType$Default()
+			.pApplicationName(stack.UTF8("RuneLite GPU (Vulkan)"))
+			.applicationVersion(VK_MAKE_VERSION(0, 1, 0))
+			.pEngineName(stack.UTF8("gpuvulkan"))
+			.engineVersion(VK_MAKE_VERSION(0, 1, 0))
+			.apiVersion(VK_API_VERSION_1_3);
+
+		VkInstanceCreateInfo info = VkInstanceCreateInfo.calloc(stack)
+			.sType$Default()
+			.flags(portabilityInstanceFlags(surfaceExts))
+			.pApplicationInfo(app)
+			.ppEnabledExtensionNames(buildExtensionNames(stack, surfaceExts, validationOn));
+
+		// Opt into synchronization validation. The validation layer's default
+		// checks catch API misuse (wrong types, bad handles, etc.) but NOT
+		// missing barriers or CPU↔GPU host-memory races on persistently-mapped
+		// buffers — exactly the bug class we're hunting. The extra cost is
+		// fine for a development run; we leave it off in production by virtue
+		// of validation being opt-in via -Dvkgpu.validation=true.
+		if (validationOn)
+		{
+			IntBuffer enables = stack.ints(
+				EXTValidationFeatures.VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT);
+			VkValidationFeaturesEXT vfeatures = VkValidationFeaturesEXT.calloc(stack)
+				.sType$Default()
+				.pEnabledValidationFeatures(enables);
+			info.pNext(vfeatures.address());
+		}
+		return info;
+	}
+
+	private static PointerBuffer buildExtensionNames(MemoryStack stack, String[] surfaceExts, boolean validationOn)
+	{
+		// Surface extensions come from the platform layer (VK_KHR_surface
+		// + the right platform-specific surface extension for X11 / Win32
+		// / Metal). VK_EXT_debug_utils is added when validation is on so
+		// we can register a messenger callback. VK_EXT_validation_features
+		// is added so we can opt into synchronization validation, which is
+		// the layer's race-condition / missing-barrier detector — off by
+		// default because it's expensive at runtime.
+		int validationExtCount = validationOn ? 2 : 0;
+		int extCount = surfaceExts.length + validationExtCount;
+		PointerBuffer extNames = stack.mallocPointer(extCount);
+		for (String name : surfaceExts)
+		{
+			extNames.put(stack.UTF8(name));
+		}
+		if (validationOn)
+		{
+			extNames.put(stack.UTF8(EXTDebugUtils.VK_EXT_DEBUG_UTILS_EXTENSION_NAME));
+			extNames.put(stack.UTF8(EXTValidationFeatures.VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME));
+		}
+		extNames.flip();
+		return extNames;
+	}
+
+	private static int portabilityInstanceFlags(String[] surfaceExts)
+	{
+		// VK_KHR_portability_enumeration is requested on platforms that run
+		// on top of a portability-subset implementation (MoltenVK on macOS).
+		// When the extension is present in the list, also set the matching
+		// instance-create flag — without it MoltenVK refuses to enumerate
+		// and vkCreateInstance returns VK_ERROR_INCOMPATIBLE_DRIVER.
+		int instanceFlags = 0;
+		for (String name : surfaceExts)
+		{
+			if (KHRPortabilityEnumeration.VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME.equals(name))
+			{
+				instanceFlags |= KHRPortabilityEnumeration.VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+				break;
+			}
+		}
+		return instanceFlags;
+	}
+
+	private static VkDebugUtilsMessengerCallbackEXT createDebugCallback()
+	{
+		return VkDebugUtilsMessengerCallbackEXT.create((severity, type, pCallbackData, pUserData) ->
+		{
+			VkDebugUtilsMessengerCallbackDataEXT data =
+				VkDebugUtilsMessengerCallbackDataEXT.create(pCallbackData);
+			String text = data.pMessageString();
+			if ((severity & EXTDebugUtils.VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) != 0)
+			{
+				log.error("[VK] {}", text);
+			}
+			else if ((severity & EXTDebugUtils.VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) != 0)
+			{
+				log.warn("[VK] {}", text);
+			}
+			else
+			{
+				log.info("[VK] {}", text);
+			}
+			return VK_FALSE;
+		});
+	}
+
+	private static VkInstance createInstance(MemoryStack stack, VkInstanceCreateInfo info,
+		VkDebugUtilsMessengerCallbackEXT cb)
+	{
+		PointerBuffer pInst = stack.mallocPointer(1);
+		int r = vkCreateInstance(info, null, pInst);
+		if (r != VK_SUCCESS)
+		{
+			if (cb != null) cb.free();
+			throw new RuntimeException("vkCreateInstance failed: " + r);
+		}
+		return new VkInstance(pInst.get(0), info);
+	}
+
+	private static long createDebugMessenger(MemoryStack stack, VkInstance handle,
+		VkDebugUtilsMessengerCallbackEXT cb)
+	{
+		VkDebugUtilsMessengerCreateInfoEXT persistentInfo = makeCreateInfo(stack, cb);
+		LongBuffer pMessenger = stack.mallocLong(1);
+		int mr = EXTDebugUtils.vkCreateDebugUtilsMessengerEXT(handle, persistentInfo, null, pMessenger);
+		if (mr != VK_SUCCESS)
+		{
+			log.warn("vkCreateDebugUtilsMessengerEXT failed: {} — continuing without persistent messenger", mr);
+			return VK_NULL_HANDLE;
+		}
+		return pMessenger.get(0);
 	}
 
 	VkInstance handle()

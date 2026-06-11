@@ -79,77 +79,100 @@ final class TextureArray implements AutoCloseable
 
 		try (MemoryStack stack = stackPush())
 		{
-			// TRANSFER_SRC required for the mip-chain vkCmdBlitImage cascade.
-			VkImageCreateInfo info = VkImageCreateInfo.calloc(stack)
-				.sType$Default()
-				.imageType(VK_IMAGE_TYPE_2D)
-				.format(FORMAT)
-				.extent(e -> e.width(LAYER_SIZE).height(LAYER_SIZE).depth(1))
-				.mipLevels(MIP_LEVELS)
-				.arrayLayers(layerCount)
-				.samples(VK_SAMPLE_COUNT_1_BIT)
-				.tiling(VK_IMAGE_TILING_OPTIMAL)
-				.usage(VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)
-				.sharingMode(VK_SHARING_MODE_EXCLUSIVE)
-				.initialLayout(VK_IMAGE_LAYOUT_UNDEFINED);
-
-			LongBuffer pImage = stack.mallocLong(1);
-			Vk.check("vkCreateImage (textureArray)", vkCreateImage(device.handle(), info, null, pImage));
-			image = pImage.get(0);
-
-			VkMemoryRequirements memReq = VkMemoryRequirements.calloc(stack);
-			vkGetImageMemoryRequirements(device.handle(), image, memReq);
-			int memType = Buffer.findMemoryType(device, memReq.memoryTypeBits(),
-				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, stack);
-			VkMemoryAllocateInfo alloc = VkMemoryAllocateInfo.calloc(stack)
-				.sType$Default()
-				.allocationSize(memReq.size())
-				.memoryTypeIndex(memType);
-			LongBuffer pMem = stack.mallocLong(1);
-			Vk.check("vkAllocateMemory (textureArray)", vkAllocateMemory(device.handle(), alloc, null, pMem));
-			memory = pMem.get(0);
-			Vk.check("vkBindImageMemory (textureArray)", vkBindImageMemory(device.handle(), image, memory, 0));
-
-			VkImageViewCreateInfo viewInfo = VkImageViewCreateInfo.calloc(stack)
-				.sType$Default()
-				.image(image)
-				.viewType(VK_IMAGE_VIEW_TYPE_2D_ARRAY)
-				.format(FORMAT);
-			viewInfo.subresourceRange()
-				.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
-				.baseMipLevel(0).levelCount(MIP_LEVELS)
-				.baseArrayLayer(0).layerCount(layerCount);
-			LongBuffer pView = stack.mallocLong(1);
-			Vk.check("vkCreateImageView (textureArray)", vkCreateImageView(device.handle(), viewInfo, null, pView));
-			view = pView.get(0);
-
-			float aniso = Math.max(1f, Math.min((float) requestedAnisotropy, device.maxSamplerAnisotropy()));
-			boolean anisoOn = aniso > 1f && device.supportsSamplerAnisotropy();
-			// LANDMINE: magFilter must stay NEAREST. OSRS encodes texture
-			// transparency as rgb==0 → alpha==0; LINEAR mag bilinear-blends
-			// that into adjacent opaque texels and the wall vanishes on
-			// the alpha-discard test. NEAREST mag keeps the alpha binary.
-			// LINEAR minFilter is safe — scene.frag discards at < 0.5 so
-			// partial-alpha mip texels still render.
-			VkSamplerCreateInfo sampInfo = VkSamplerCreateInfo.calloc(stack)
-				.sType$Default()
-				.magFilter(VK_FILTER_NEAREST).minFilter(VK_FILTER_LINEAR)
-				.mipmapMode(VK_SAMPLER_MIPMAP_MODE_LINEAR)
-				.addressModeU(VK_SAMPLER_ADDRESS_MODE_REPEAT)
-				.addressModeV(VK_SAMPLER_ADDRESS_MODE_REPEAT)
-				.addressModeW(VK_SAMPLER_ADDRESS_MODE_REPEAT)
-				.anisotropyEnable(anisoOn)
-				.maxAnisotropy(anisoOn ? aniso : 1.0f)
-				.minLod(0f)
-				.maxLod((float) (MIP_LEVELS - 1))
-				.unnormalizedCoordinates(false);
-			LongBuffer pSamp = stack.mallocLong(1);
-			Vk.check("vkCreateSampler (textureArray)", vkCreateSampler(device.handle(), sampInfo, null, pSamp));
-			sampler = pSamp.get(0);
+			image = createImage(stack);
+			memory = allocateImageMemory(stack);
+			view = createView(stack);
+			sampler = createSampler(stack, requestedAnisotropy);
 		}
 
-		// Transient command pool decouples upload from the main pool.
-		long localPool;
+		uploadInitialContents(tp, osrsTextures);
+
+		animationUbo = buildAnimationUbo(osrsTextures);
+	}
+
+	private long createImage(MemoryStack stack)
+	{
+		// TRANSFER_SRC required for the mip-chain vkCmdBlitImage cascade.
+		VkImageCreateInfo info = VkImageCreateInfo.calloc(stack)
+			.sType$Default()
+			.imageType(VK_IMAGE_TYPE_2D)
+			.format(FORMAT)
+			.extent(e -> e.width(LAYER_SIZE).height(LAYER_SIZE).depth(1))
+			.mipLevels(MIP_LEVELS)
+			.arrayLayers(layerCount)
+			.samples(VK_SAMPLE_COUNT_1_BIT)
+			.tiling(VK_IMAGE_TILING_OPTIMAL)
+			.usage(VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)
+			.sharingMode(VK_SHARING_MODE_EXCLUSIVE)
+			.initialLayout(VK_IMAGE_LAYOUT_UNDEFINED);
+
+		LongBuffer pImage = stack.mallocLong(1);
+		Vk.check("vkCreateImage (textureArray)", vkCreateImage(device.handle(), info, null, pImage));
+		return pImage.get(0);
+	}
+
+	private long allocateImageMemory(MemoryStack stack)
+	{
+		VkMemoryRequirements memReq = VkMemoryRequirements.calloc(stack);
+		vkGetImageMemoryRequirements(device.handle(), image, memReq);
+		int memType = Buffer.findMemoryType(device, memReq.memoryTypeBits(),
+			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, stack);
+		VkMemoryAllocateInfo alloc = VkMemoryAllocateInfo.calloc(stack)
+			.sType$Default()
+			.allocationSize(memReq.size())
+			.memoryTypeIndex(memType);
+		LongBuffer pMem = stack.mallocLong(1);
+		Vk.check("vkAllocateMemory (textureArray)", vkAllocateMemory(device.handle(), alloc, null, pMem));
+		long mem = pMem.get(0);
+		Vk.check("vkBindImageMemory (textureArray)", vkBindImageMemory(device.handle(), image, mem, 0));
+		return mem;
+	}
+
+	private long createView(MemoryStack stack)
+	{
+		VkImageViewCreateInfo viewInfo = VkImageViewCreateInfo.calloc(stack)
+			.sType$Default()
+			.image(image)
+			.viewType(VK_IMAGE_VIEW_TYPE_2D_ARRAY)
+			.format(FORMAT);
+		viewInfo.subresourceRange()
+			.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
+			.baseMipLevel(0).levelCount(MIP_LEVELS)
+			.baseArrayLayer(0).layerCount(layerCount);
+		LongBuffer pView = stack.mallocLong(1);
+		Vk.check("vkCreateImageView (textureArray)", vkCreateImageView(device.handle(), viewInfo, null, pView));
+		return pView.get(0);
+	}
+
+	private long createSampler(MemoryStack stack, int requestedAnisotropy)
+	{
+		float aniso = Math.max(1f, Math.min((float) requestedAnisotropy, device.maxSamplerAnisotropy()));
+		boolean anisoOn = aniso > 1f && device.supportsSamplerAnisotropy();
+		// LANDMINE: magFilter must stay NEAREST. OSRS encodes texture
+		// transparency as rgb==0 → alpha==0; LINEAR mag bilinear-blends
+		// that into adjacent opaque texels and the wall vanishes on
+		// the alpha-discard test. NEAREST mag keeps the alpha binary.
+		// LINEAR minFilter is safe — scene.frag discards at < 0.5 so
+		// partial-alpha mip texels still render.
+		VkSamplerCreateInfo sampInfo = VkSamplerCreateInfo.calloc(stack)
+			.sType$Default()
+			.magFilter(VK_FILTER_NEAREST).minFilter(VK_FILTER_LINEAR)
+			.mipmapMode(VK_SAMPLER_MIPMAP_MODE_LINEAR)
+			.addressModeU(VK_SAMPLER_ADDRESS_MODE_REPEAT)
+			.addressModeV(VK_SAMPLER_ADDRESS_MODE_REPEAT)
+			.addressModeW(VK_SAMPLER_ADDRESS_MODE_REPEAT)
+			.anisotropyEnable(anisoOn)
+			.maxAnisotropy(anisoOn ? aniso : 1.0f)
+			.minLod(0f)
+			.maxLod((float) (MIP_LEVELS - 1))
+			.unnormalizedCoordinates(false);
+		LongBuffer pSamp = stack.mallocLong(1);
+		Vk.check("vkCreateSampler (textureArray)", vkCreateSampler(device.handle(), sampInfo, null, pSamp));
+		return pSamp.get(0);
+	}
+
+	private long createUploadCommandPool()
+	{
 		try (MemoryStack stack = stackPush())
 		{
 			VkCommandPoolCreateInfo cpInfo = VkCommandPoolCreateInfo.calloc(stack)
@@ -158,8 +181,14 @@ final class TextureArray implements AutoCloseable
 				.queueFamilyIndex(device.graphicsQueueFamily());
 			LongBuffer pPool = stack.mallocLong(1);
 			Vk.check("vkCreateCommandPool (textureArray)", vkCreateCommandPool(device.handle(), cpInfo, null, pPool));
-			localPool = pPool.get(0);
+			return pPool.get(0);
 		}
+	}
+
+	private void uploadInitialContents(TextureProvider tp, Texture[] osrsTextures)
+	{
+		// Transient command pool decouples upload from the main pool.
+		long localPool = createUploadCommandPool();
 		try
 		{
 			// null tp = empty texture set (layer 0 reserve only), nothing to upload.
@@ -184,8 +213,6 @@ final class TextureArray implements AutoCloseable
 		{
 			vkDestroyCommandPool(device.handle(), localPool, null);
 		}
-
-		animationUbo = buildAnimationUbo(osrsTextures);
 	}
 
 	/** LANDMINE: shader declares {@code vec4 anim[ANIM_UBO_COUNT]}; the

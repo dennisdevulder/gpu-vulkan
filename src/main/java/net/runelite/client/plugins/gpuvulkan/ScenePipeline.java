@@ -105,171 +105,219 @@ final class ScenePipeline implements AutoCloseable
 			long fragModule = createShaderModule(loadResource("scene.frag.spv"));
 			tmp.add(() -> vkDestroyShaderModule(device.handle(), fragModule, null));
 
-			ByteBuffer entry = stack.UTF8("main");
-
-			VkPipelineShaderStageCreateInfo.Buffer stages = VkPipelineShaderStageCreateInfo.calloc(2, stack);
-			stages.get(0).sType$Default().stage(VK_SHADER_STAGE_VERTEX_BIT)  .module(vertModule).pName(entry);
-			stages.get(1).sType$Default().stage(VK_SHADER_STAGE_FRAGMENT_BIT).module(fragModule).pName(entry);
-
-			VkVertexInputBindingDescription.Buffer binding = VkVertexInputBindingDescription.calloc(1, stack);
-			binding.get(0).binding(0).stride(VERTEX_STRIDE).inputRate(VK_VERTEX_INPUT_RATE_VERTEX);
-
-			VkVertexInputAttributeDescription.Buffer attrs = VkVertexInputAttributeDescription.calloc(3, stack);
-			attrs.get(0).binding(0).location(0).format(VK_FORMAT_R32G32B32_SFLOAT).offset(OFFSET_POS);
-			attrs.get(1).binding(0).location(1).format(VK_FORMAT_R32_UINT).offset(OFFSET_ABHSL);
-			attrs.get(2).binding(0).location(2).format(VK_FORMAT_R16G16B16A16_SINT).offset(OFFSET_TEX_UV);
-
-			VkPipelineVertexInputStateCreateInfo vertexInput =
-				VkPipelineVertexInputStateCreateInfo.calloc(stack).sType$Default()
-					.pVertexBindingDescriptions(binding)
-					.pVertexAttributeDescriptions(attrs);
-
-			VkPipelineInputAssemblyStateCreateInfo inputAssembly =
-				VkPipelineInputAssemblyStateCreateInfo.calloc(stack).sType$Default()
-					.topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
-					.primitiveRestartEnable(false);
-
-			VkPipelineViewportStateCreateInfo viewportState =
-				VkPipelineViewportStateCreateInfo.calloc(stack).sType$Default()
-					.viewportCount(1)
-					.scissorCount(1);
-
-			VkPipelineRasterizationStateCreateInfo raster =
-				VkPipelineRasterizationStateCreateInfo.calloc(stack).sType$Default()
-					.polygonMode(polygonMode)
-					.cullMode(polygonMode == VK_POLYGON_MODE_FILL && !forceBlend ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE)
-					.frontFace(VK_FRONT_FACE_COUNTER_CLOCKWISE)
-					.lineWidth(1.0f);
-
-			VkPipelineMultisampleStateCreateInfo multisample =
-				VkPipelineMultisampleStateCreateInfo.calloc(stack).sType$Default()
-					.rasterizationSamples(samples)
-					.minSampleShading(1.0f)
-					// Alpha-to-coverage: the GPU emits subsamples in proportion
-					// to the fragment's output alpha, so faces with low alpha
-					// (high faceTransparencies) effectively dissolve into the
-					// background WITHOUT needing a sorted alpha-blend pass.
-					// Stock GpuPlugin sorts and blends them in a separate pass;
-					// we get a close approximation by writing alpha=1-trans/255
-					// from the frag shader and letting MSAA's coverage hardware
-					// translate that into per-sample visibility. Stops fire
-					// "glow tip" faces (transparency 252+) from rendering as
-					// opaque red blobs while still keeping translucent geometry
-					// (tent drapes, banners, water surfaces) visible.
-					.alphaToCoverageEnable(alphaToCoverage && samples != VK_SAMPLE_COUNT_1_BIT);
+			VkPipelineShaderStageCreateInfo.Buffer stages = buildShaderStages(stack, vertModule, fragModule);
+			VkPipelineVertexInputStateCreateInfo vertexInput = buildVertexInput(stack);
+			VkPipelineRasterizationStateCreateInfo raster = buildRasterizationState(stack, polygonMode, forceBlend);
+			VkPipelineMultisampleStateCreateInfo multisample = buildMultisampleState(stack, samples, alphaToCoverage);
 
 			// The dedicated alpha pass forces standard src-over blending with
 			// depth writes off, matching stock GPU's transparent-face rule. The
 			// normal fill pipeline keeps its historical single-sample fallback.
 			boolean blendFallback = forceBlend || samples == VK_SAMPLE_COUNT_1_BIT;
-			VkPipelineColorBlendAttachmentState.Buffer blend =
-				VkPipelineColorBlendAttachmentState.calloc(1, stack);
-			blend.get(0)
-				.colorWriteMask(colorWrite
-					? VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
-						| VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT
-					: 0)
-				.blendEnable(blendFallback)
-				.srcColorBlendFactor(VK_BLEND_FACTOR_SRC_ALPHA)
-				.dstColorBlendFactor(VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA)
-				.colorBlendOp(VK_BLEND_OP_ADD)
-				.srcAlphaBlendFactor(VK_BLEND_FACTOR_ONE)
-				.dstAlphaBlendFactor(VK_BLEND_FACTOR_ZERO)
-				.alphaBlendOp(VK_BLEND_OP_ADD);
+			VkPipelineColorBlendStateCreateInfo colorBlend = buildColorBlendState(stack, colorWrite, blendFallback);
+			VkPipelineDepthStencilStateCreateInfo depth = buildDepthStencilState(stack, depthTest, depthWrite);
 
-			VkPipelineColorBlendStateCreateInfo colorBlend =
-				VkPipelineColorBlendStateCreateInfo.calloc(stack).sType$Default()
-					.pAttachments(blend);
-
-			// Reverse-Z to match OSRS's projection (z_ndc = 2n/z, closer = bigger).
-			// Paired with depth-clear value 0.0 in VulkanRenderer.
-			VkPipelineDepthStencilStateCreateInfo depth =
-				VkPipelineDepthStencilStateCreateInfo.calloc(stack).sType$Default()
-					.depthTestEnable(depthTest)
-					.depthWriteEnable(depthWrite)
-					.depthCompareOp(VK_COMPARE_OP_GREATER)
-					.depthBoundsTestEnable(false)
-					.stencilTestEnable(false);
-
-			VkPipelineDynamicStateCreateInfo dynamic =
-				VkPipelineDynamicStateCreateInfo.calloc(stack).sType$Default()
-					.pDynamicStates(stack.ints(VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR));
-
-			// Descriptor set 0:
-			//   binding 0 = combined image sampler (OSRS texture array, frag)
-			//   binding 1 = UBO of per-layer texture-animation vec2's (vert) —
-			//               vert shader looks them up to scroll UV per game tick.
-			VkDescriptorSetLayoutBinding.Buffer dsBindings = VkDescriptorSetLayoutBinding.calloc(2, stack);
-			dsBindings.get(0)
-				.binding(0)
-				.descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
-				.descriptorCount(1)
-				.stageFlags(VK_SHADER_STAGE_FRAGMENT_BIT);
-			dsBindings.get(1)
-				.binding(1)
-				.descriptorType(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
-				.descriptorCount(1)
-				.stageFlags(VK_SHADER_STAGE_VERTEX_BIT);
-			VkDescriptorSetLayoutCreateInfo dsInfo = VkDescriptorSetLayoutCreateInfo.calloc(stack)
-				.sType$Default()
-				.pBindings(dsBindings);
-			LongBuffer pDsl = stack.mallocLong(1);
-			Vk.check("vkCreateDescriptorSetLayout (scene)", vkCreateDescriptorSetLayout(device.handle(), dsInfo, null, pDsl));
-			descriptorSetLayout = pDsl.get(0);
-
-			// Push constant layout (128 bytes total — at Vulkan's guaranteed minimum):
-			//   Vertex   0..63   : mat4 mvp
-			//   Vertex   64..79  : vec4 (cameraX, cameraZ, drawDistance, fogDepth)
-			//   Vertex   80..95  : ivec4 misc (.x = tick, rest unused/padding for vec4 alignment)
-			//   Fragment 96..111 : vec4 (fogR, fogG, fogB, brightness)
-			//   Fragment 112..127: vec4 (textureLightMode, _, _, _) — first slot in use,
-			//                      rest reserved for future scene-frag uniforms.
-			VkPushConstantRange.Buffer pc = VkPushConstantRange.calloc(2, stack);
-			pc.get(0).stageFlags(VK_SHADER_STAGE_VERTEX_BIT)  .offset(0) .size(96);
-			pc.get(1).stageFlags(VK_SHADER_STAGE_FRAGMENT_BIT).offset(96).size(32);
-
-			VkPipelineLayoutCreateInfo layoutInfo = VkPipelineLayoutCreateInfo.calloc(stack)
-				.sType$Default()
-				.pSetLayouts(stack.longs(descriptorSetLayout))
-				.pPushConstantRanges(pc);
-
-			LongBuffer pLayout = stack.mallocLong(1);
-			if (vkCreatePipelineLayout(device.handle(), layoutInfo, null, pLayout) != VK_SUCCESS)
-			{
-				vkDestroyDescriptorSetLayout(device.handle(), descriptorSetLayout, null);
-				throw new RuntimeException("vkCreatePipelineLayout (scene) failed");
-			}
-			pipelineLayout = pLayout.get(0);
-
-			VkGraphicsPipelineCreateInfo.Buffer info = VkGraphicsPipelineCreateInfo.calloc(1, stack);
-			info.get(0).sType$Default()
-				.pStages(stages)
-				.pVertexInputState(vertexInput)
-				.pInputAssemblyState(inputAssembly)
-				.pViewportState(viewportState)
-				.pRasterizationState(raster)
-				.pMultisampleState(multisample)
-				.pColorBlendState(colorBlend)
-				.pDepthStencilState(depth)
-				.pDynamicState(dynamic)
-				.layout(pipelineLayout)
-				.renderPass(renderPass.handle())
-				.subpass(0);
-
-			LongBuffer pPipe = stack.mallocLong(1);
-			int r = vkCreateGraphicsPipelines(device.handle(), VK_NULL_HANDLE, info, null, pPipe);
-			if (r != VK_SUCCESS)
-			{
-				vkDestroyPipelineLayout(device.handle(), pipelineLayout, null);
-				vkDestroyDescriptorSetLayout(device.handle(), descriptorSetLayout, null);
-				throw new RuntimeException("vkCreateGraphicsPipelines (scene) failed: " + r);
-			}
-			pipeline = pPipe.get(0);
+			descriptorSetLayout = createDescriptorSetLayout(stack);
+			pipelineLayout = createPipelineLayout(stack);
+			pipeline = createGraphicsPipeline(stack, stages, vertexInput, raster, multisample,
+				colorBlend, depth, renderPass);
 		}
 		finally
 		{
 			tmp.close();
 		}
+	}
+
+	private static VkPipelineShaderStageCreateInfo.Buffer buildShaderStages(MemoryStack stack,
+		long vertModule, long fragModule)
+	{
+		ByteBuffer entry = stack.UTF8("main");
+
+		VkPipelineShaderStageCreateInfo.Buffer stages = VkPipelineShaderStageCreateInfo.calloc(2, stack);
+		stages.get(0).sType$Default().stage(VK_SHADER_STAGE_VERTEX_BIT)  .module(vertModule).pName(entry);
+		stages.get(1).sType$Default().stage(VK_SHADER_STAGE_FRAGMENT_BIT).module(fragModule).pName(entry);
+		return stages;
+	}
+
+	private static VkPipelineVertexInputStateCreateInfo buildVertexInput(MemoryStack stack)
+	{
+		VkVertexInputBindingDescription.Buffer binding = VkVertexInputBindingDescription.calloc(1, stack);
+		binding.get(0).binding(0).stride(VERTEX_STRIDE).inputRate(VK_VERTEX_INPUT_RATE_VERTEX);
+
+		VkVertexInputAttributeDescription.Buffer attrs = VkVertexInputAttributeDescription.calloc(3, stack);
+		attrs.get(0).binding(0).location(0).format(VK_FORMAT_R32G32B32_SFLOAT).offset(OFFSET_POS);
+		attrs.get(1).binding(0).location(1).format(VK_FORMAT_R32_UINT).offset(OFFSET_ABHSL);
+		attrs.get(2).binding(0).location(2).format(VK_FORMAT_R16G16B16A16_SINT).offset(OFFSET_TEX_UV);
+
+		return VkPipelineVertexInputStateCreateInfo.calloc(stack).sType$Default()
+			.pVertexBindingDescriptions(binding)
+			.pVertexAttributeDescriptions(attrs);
+	}
+
+	private static VkPipelineRasterizationStateCreateInfo buildRasterizationState(MemoryStack stack,
+		int polygonMode, boolean forceBlend)
+	{
+		return VkPipelineRasterizationStateCreateInfo.calloc(stack).sType$Default()
+			.polygonMode(polygonMode)
+			.cullMode(polygonMode == VK_POLYGON_MODE_FILL && !forceBlend ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE)
+			.frontFace(VK_FRONT_FACE_COUNTER_CLOCKWISE)
+			.lineWidth(1.0f);
+	}
+
+	private static VkPipelineMultisampleStateCreateInfo buildMultisampleState(MemoryStack stack,
+		int samples, boolean alphaToCoverage)
+	{
+		return VkPipelineMultisampleStateCreateInfo.calloc(stack).sType$Default()
+			.rasterizationSamples(samples)
+			.minSampleShading(1.0f)
+			// Alpha-to-coverage: the GPU emits subsamples in proportion
+			// to the fragment's output alpha, so faces with low alpha
+			// (high faceTransparencies) effectively dissolve into the
+			// background WITHOUT needing a sorted alpha-blend pass.
+			// Stock GpuPlugin sorts and blends them in a separate pass;
+			// we get a close approximation by writing alpha=1-trans/255
+			// from the frag shader and letting MSAA's coverage hardware
+			// translate that into per-sample visibility. Stops fire
+			// "glow tip" faces (transparency 252+) from rendering as
+			// opaque red blobs while still keeping translucent geometry
+			// (tent drapes, banners, water surfaces) visible.
+			.alphaToCoverageEnable(alphaToCoverage && samples != VK_SAMPLE_COUNT_1_BIT);
+	}
+
+	private static VkPipelineColorBlendStateCreateInfo buildColorBlendState(MemoryStack stack,
+		boolean colorWrite, boolean blendFallback)
+	{
+		VkPipelineColorBlendAttachmentState.Buffer blend =
+			VkPipelineColorBlendAttachmentState.calloc(1, stack);
+		blend.get(0)
+			.colorWriteMask(colorWrite
+				? VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
+					| VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT
+				: 0)
+			.blendEnable(blendFallback)
+			.srcColorBlendFactor(VK_BLEND_FACTOR_SRC_ALPHA)
+			.dstColorBlendFactor(VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA)
+			.colorBlendOp(VK_BLEND_OP_ADD)
+			.srcAlphaBlendFactor(VK_BLEND_FACTOR_ONE)
+			.dstAlphaBlendFactor(VK_BLEND_FACTOR_ZERO)
+			.alphaBlendOp(VK_BLEND_OP_ADD);
+
+		return VkPipelineColorBlendStateCreateInfo.calloc(stack).sType$Default()
+			.pAttachments(blend);
+	}
+
+	private static VkPipelineDepthStencilStateCreateInfo buildDepthStencilState(MemoryStack stack,
+		boolean depthTest, boolean depthWrite)
+	{
+		// Reverse-Z to match OSRS's projection (z_ndc = 2n/z, closer = bigger).
+		// Paired with depth-clear value 0.0 in VulkanRenderer.
+		return VkPipelineDepthStencilStateCreateInfo.calloc(stack).sType$Default()
+			.depthTestEnable(depthTest)
+			.depthWriteEnable(depthWrite)
+			.depthCompareOp(VK_COMPARE_OP_GREATER)
+			.depthBoundsTestEnable(false)
+			.stencilTestEnable(false);
+	}
+
+	private long createDescriptorSetLayout(MemoryStack stack)
+	{
+		// Descriptor set 0:
+		//   binding 0 = combined image sampler (OSRS texture array, frag)
+		//   binding 1 = UBO of per-layer texture-animation vec2's (vert) —
+		//               vert shader looks them up to scroll UV per game tick.
+		VkDescriptorSetLayoutBinding.Buffer dsBindings = VkDescriptorSetLayoutBinding.calloc(2, stack);
+		dsBindings.get(0)
+			.binding(0)
+			.descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+			.descriptorCount(1)
+			.stageFlags(VK_SHADER_STAGE_FRAGMENT_BIT);
+		dsBindings.get(1)
+			.binding(1)
+			.descriptorType(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
+			.descriptorCount(1)
+			.stageFlags(VK_SHADER_STAGE_VERTEX_BIT);
+		VkDescriptorSetLayoutCreateInfo dsInfo = VkDescriptorSetLayoutCreateInfo.calloc(stack)
+			.sType$Default()
+			.pBindings(dsBindings);
+		LongBuffer pDsl = stack.mallocLong(1);
+		Vk.check("vkCreateDescriptorSetLayout (scene)", vkCreateDescriptorSetLayout(device.handle(), dsInfo, null, pDsl));
+		return pDsl.get(0);
+	}
+
+	private long createPipelineLayout(MemoryStack stack)
+	{
+		// Push constant layout (128 bytes total — at Vulkan's guaranteed minimum):
+		//   Vertex   0..63   : mat4 mvp
+		//   Vertex   64..79  : vec4 (cameraX, cameraZ, drawDistance, fogDepth)
+		//   Vertex   80..95  : ivec4 misc (.x = tick, rest unused/padding for vec4 alignment)
+		//   Fragment 96..111 : vec4 (fogR, fogG, fogB, brightness)
+		//   Fragment 112..127: vec4 (textureLightMode, _, _, _) — first slot in use,
+		//                      rest reserved for future scene-frag uniforms.
+		VkPushConstantRange.Buffer pc = VkPushConstantRange.calloc(2, stack);
+		pc.get(0).stageFlags(VK_SHADER_STAGE_VERTEX_BIT)  .offset(0) .size(96);
+		pc.get(1).stageFlags(VK_SHADER_STAGE_FRAGMENT_BIT).offset(96).size(32);
+
+		VkPipelineLayoutCreateInfo layoutInfo = VkPipelineLayoutCreateInfo.calloc(stack)
+			.sType$Default()
+			.pSetLayouts(stack.longs(descriptorSetLayout))
+			.pPushConstantRanges(pc);
+
+		LongBuffer pLayout = stack.mallocLong(1);
+		if (vkCreatePipelineLayout(device.handle(), layoutInfo, null, pLayout) != VK_SUCCESS)
+		{
+			vkDestroyDescriptorSetLayout(device.handle(), descriptorSetLayout, null);
+			throw new RuntimeException("vkCreatePipelineLayout (scene) failed");
+		}
+		return pLayout.get(0);
+	}
+
+	private long createGraphicsPipeline(MemoryStack stack,
+		VkPipelineShaderStageCreateInfo.Buffer stages,
+		VkPipelineVertexInputStateCreateInfo vertexInput,
+		VkPipelineRasterizationStateCreateInfo raster,
+		VkPipelineMultisampleStateCreateInfo multisample,
+		VkPipelineColorBlendStateCreateInfo colorBlend,
+		VkPipelineDepthStencilStateCreateInfo depth,
+		RenderPass renderPass)
+	{
+		VkPipelineInputAssemblyStateCreateInfo inputAssembly =
+			VkPipelineInputAssemblyStateCreateInfo.calloc(stack).sType$Default()
+				.topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+				.primitiveRestartEnable(false);
+
+		VkPipelineViewportStateCreateInfo viewportState =
+			VkPipelineViewportStateCreateInfo.calloc(stack).sType$Default()
+				.viewportCount(1)
+				.scissorCount(1);
+
+		VkPipelineDynamicStateCreateInfo dynamic =
+			VkPipelineDynamicStateCreateInfo.calloc(stack).sType$Default()
+				.pDynamicStates(stack.ints(VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR));
+
+		VkGraphicsPipelineCreateInfo.Buffer info = VkGraphicsPipelineCreateInfo.calloc(1, stack);
+		info.get(0).sType$Default()
+			.pStages(stages)
+			.pVertexInputState(vertexInput)
+			.pInputAssemblyState(inputAssembly)
+			.pViewportState(viewportState)
+			.pRasterizationState(raster)
+			.pMultisampleState(multisample)
+			.pColorBlendState(colorBlend)
+			.pDepthStencilState(depth)
+			.pDynamicState(dynamic)
+			.layout(pipelineLayout)
+			.renderPass(renderPass.handle())
+			.subpass(0);
+
+		LongBuffer pPipe = stack.mallocLong(1);
+		int r = vkCreateGraphicsPipelines(device.handle(), VK_NULL_HANDLE, info, null, pPipe);
+		if (r != VK_SUCCESS)
+		{
+			vkDestroyPipelineLayout(device.handle(), pipelineLayout, null);
+			vkDestroyDescriptorSetLayout(device.handle(), descriptorSetLayout, null);
+			throw new RuntimeException("vkCreateGraphicsPipelines (scene) failed: " + r);
+		}
+		return pPipe.get(0);
 	}
 
 	long handle() { return pipeline; }

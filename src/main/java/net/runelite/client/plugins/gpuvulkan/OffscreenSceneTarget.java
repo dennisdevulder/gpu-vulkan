@@ -106,67 +106,85 @@ final class OffscreenSceneTarget implements AutoCloseable
 	{
 		try (MemoryStack stack = stackPush())
 		{
-			VkImageCreateInfo info = VkImageCreateInfo.calloc(stack)
-				.sType$Default()
-				.imageType(VK_IMAGE_TYPE_2D)
-				.format(format)
-				.extent(e -> e.width(width).height(height).depth(1))
-				.mipLevels(1)
-				.arrayLayers(1)
-				.samples(VK_SAMPLE_COUNT_1_BIT)
-				.tiling(VK_IMAGE_TILING_OPTIMAL)
-				.usage(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
-					| VK_IMAGE_USAGE_SAMPLED_BIT
-					| VK_IMAGE_USAGE_TRANSFER_SRC_BIT)
-				.sharingMode(VK_SHARING_MODE_EXCLUSIVE)
-				.initialLayout(VK_IMAGE_LAYOUT_UNDEFINED);
-
-			LongBuffer pImage = stack.mallocLong(1);
-			Vk.check("vkCreateImage (offscreen scene)", vkCreateImage(device.handle(), info, null, pImage));
-			colorImage = pImage.get(0);
-
-			VkMemoryRequirements memReq = VkMemoryRequirements.calloc(stack);
-			vkGetImageMemoryRequirements(device.handle(), colorImage, memReq);
-			int memType = Buffer.findMemoryType(device, memReq.memoryTypeBits(),
-				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, stack);
-			VkMemoryAllocateInfo alloc = VkMemoryAllocateInfo.calloc(stack)
-				.sType$Default()
-				.allocationSize(memReq.size())
-				.memoryTypeIndex(memType);
-
-			LongBuffer pMem = stack.mallocLong(1);
-			Vk.check("vkAllocateMemory (offscreen scene)", vkAllocateMemory(device.handle(), alloc, null, pMem));
-			colorMemory = pMem.get(0);
-			Vk.check("vkBindImageMemory (offscreen scene)", vkBindImageMemory(device.handle(), colorImage, colorMemory, 0));
-
-			VkImageViewCreateInfo viewInfo = VkImageViewCreateInfo.calloc(stack)
-				.sType$Default()
-				.image(colorImage)
-				.viewType(VK_IMAGE_VIEW_TYPE_2D)
-				.format(format);
-			viewInfo.subresourceRange()
-				.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
-				.baseMipLevel(0).levelCount(1)
-				.baseArrayLayer(0).layerCount(1);
-			LongBuffer pView = stack.mallocLong(1);
-			Vk.check("vkCreateImageView (offscreen scene)", vkCreateImageView(device.handle(), viewInfo, null, pView));
-			colorView = pView.get(0);
-
-			VkSamplerCreateInfo samplerInfo = VkSamplerCreateInfo.calloc(stack)
-				.sType$Default()
-				.magFilter(VK_FILTER_LINEAR)
-				.minFilter(VK_FILTER_LINEAR)
-				.mipmapMode(VK_SAMPLER_MIPMAP_MODE_NEAREST)
-				.addressModeU(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-				.addressModeV(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-				.addressModeW(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-				.minLod(0f)
-				.maxLod(0f)
-				.unnormalizedCoordinates(false);
-			LongBuffer pSampler = stack.mallocLong(1);
-			Vk.check("vkCreateSampler (offscreen scene)", vkCreateSampler(device.handle(), samplerInfo, null, pSampler));
-			sampler = pSampler.get(0);
+			colorImage = createColorImage(stack);
+			colorMemory = allocateColorMemory(stack);
+			colorView = createColorView(stack);
+			sampler = createColorSampler(stack);
 		}
+	}
+
+	private long createColorImage(MemoryStack stack)
+	{
+		VkImageCreateInfo info = VkImageCreateInfo.calloc(stack)
+			.sType$Default()
+			.imageType(VK_IMAGE_TYPE_2D)
+			.format(format)
+			.extent(e -> e.width(width).height(height).depth(1))
+			.mipLevels(1)
+			.arrayLayers(1)
+			.samples(VK_SAMPLE_COUNT_1_BIT)
+			.tiling(VK_IMAGE_TILING_OPTIMAL)
+			.usage(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+				| VK_IMAGE_USAGE_SAMPLED_BIT
+				| VK_IMAGE_USAGE_TRANSFER_SRC_BIT)
+			.sharingMode(VK_SHARING_MODE_EXCLUSIVE)
+			.initialLayout(VK_IMAGE_LAYOUT_UNDEFINED);
+
+		LongBuffer pImage = stack.mallocLong(1);
+		Vk.check("vkCreateImage (offscreen scene)", vkCreateImage(device.handle(), info, null, pImage));
+		return pImage.get(0);
+	}
+
+	private long allocateColorMemory(MemoryStack stack)
+	{
+		VkMemoryRequirements memReq = VkMemoryRequirements.calloc(stack);
+		vkGetImageMemoryRequirements(device.handle(), colorImage, memReq);
+		int memType = Buffer.findMemoryType(device, memReq.memoryTypeBits(),
+			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, stack);
+		VkMemoryAllocateInfo alloc = VkMemoryAllocateInfo.calloc(stack)
+			.sType$Default()
+			.allocationSize(memReq.size())
+			.memoryTypeIndex(memType);
+
+		LongBuffer pMem = stack.mallocLong(1);
+		Vk.check("vkAllocateMemory (offscreen scene)", vkAllocateMemory(device.handle(), alloc, null, pMem));
+		long mem = pMem.get(0);
+		Vk.check("vkBindImageMemory (offscreen scene)", vkBindImageMemory(device.handle(), colorImage, mem, 0));
+		return mem;
+	}
+
+	private long createColorView(MemoryStack stack)
+	{
+		VkImageViewCreateInfo viewInfo = VkImageViewCreateInfo.calloc(stack)
+			.sType$Default()
+			.image(colorImage)
+			.viewType(VK_IMAGE_VIEW_TYPE_2D)
+			.format(format);
+		viewInfo.subresourceRange()
+			.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
+			.baseMipLevel(0).levelCount(1)
+			.baseArrayLayer(0).layerCount(1);
+		LongBuffer pView = stack.mallocLong(1);
+		Vk.check("vkCreateImageView (offscreen scene)", vkCreateImageView(device.handle(), viewInfo, null, pView));
+		return pView.get(0);
+	}
+
+	private long createColorSampler(MemoryStack stack)
+	{
+		VkSamplerCreateInfo samplerInfo = VkSamplerCreateInfo.calloc(stack)
+			.sType$Default()
+			.magFilter(VK_FILTER_LINEAR)
+			.minFilter(VK_FILTER_LINEAR)
+			.mipmapMode(VK_SAMPLER_MIPMAP_MODE_NEAREST)
+			.addressModeU(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+			.addressModeV(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+			.addressModeW(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+			.minLod(0f)
+			.maxLod(0f)
+			.unnormalizedCoordinates(false);
+		LongBuffer pSampler = stack.mallocLong(1);
+		Vk.check("vkCreateSampler (offscreen scene)", vkCreateSampler(device.handle(), samplerInfo, null, pSampler));
+		return pSampler.get(0);
 	}
 
 	private void createFramebuffer()

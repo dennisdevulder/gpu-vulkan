@@ -174,13 +174,7 @@ final class SceneZoneDrawScheduler
 			for (int zz = minZoneZ; zz <= maxZoneZ; zz++)
 			{
 				int zoneIdx = zx * zonesPerSide + zz;
-				if (zoneCulled(zoneIdx))
-				{
-					continue;
-				}
-				// A rebuilt zone replaces its static counterpart even when
-				// the rebuild emitted zero vertices (object removed).
-				if (overlayZoneValid[slot][zoneIdx])
+				if (staticZoneHidden(slot, zoneIdx))
 				{
 					continue;
 				}
@@ -222,6 +216,17 @@ final class SceneZoneDrawScheduler
 			drawEmitter.drawRange(cmd, mergedStart, mergedEnd, skips, 0, false,
 				slotFirstVertex, pipelineLayout, vertPush, fragPush);
 		}
+	}
+
+	private boolean staticZoneHidden(int slot, int zoneIdx)
+	{
+		if (zoneCulled(zoneIdx))
+		{
+			return true;
+		}
+		// A rebuilt zone replaces its static counterpart even when
+		// the rebuild emitted zero vertices (object removed).
+		return overlayZoneValid[slot][zoneIdx];
 	}
 
 	private int buildOverlayStaticSkipPairs(int layer, int plane, int slot)

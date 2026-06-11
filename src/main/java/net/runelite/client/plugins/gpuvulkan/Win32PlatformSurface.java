@@ -75,46 +75,7 @@ final class Win32PlatformSurface implements PlatformSurface
 			}
 			try
 			{
-				int lockResult = JAWTFunctions.JAWT_DrawingSurface_Lock(ds, ds.Lock());
-				if ((lockResult & JAWTFunctions.JAWT_LOCK_ERROR) != 0)
-				{
-					throw new RuntimeException("JAWT_DrawingSurface_Lock failed: " + lockResult);
-				}
-				try
-				{
-					JAWTDrawingSurfaceInfo dsi = JAWTFunctions.JAWT_DrawingSurface_GetDrawingSurfaceInfo(
-						ds, ds.GetDrawingSurfaceInfo());
-					if (dsi == null)
-					{
-						throw new RuntimeException("JAWT_DrawingSurface_GetDrawingSurfaceInfo returned null");
-					}
-					try
-					{
-						JAWTWin32DrawingSurfaceInfo win = JAWTWin32DrawingSurfaceInfo.create(dsi.platformInfo());
-						long hwnd = win.hwnd();
-						// GetModuleHandle(NULL) → HMODULE of the process EXE. The
-						long hinstance = WinBase.GetModuleHandle(null, (java.nio.ByteBuffer) null);
-						try (MemoryStack stack = stackPush())
-						{
-							VkWin32SurfaceCreateInfoKHR info = VkWin32SurfaceCreateInfoKHR.calloc(stack)
-								.sType$Default()
-								.hinstance(hinstance)
-								.hwnd(hwnd);
-							LongBuffer pSurface = stack.mallocLong(1);
-							Vk.check("vkCreateWin32SurfaceKHR", KHRWin32Surface.vkCreateWin32SurfaceKHR(
-								instance.handle(), info, null, pSurface));
-							return pSurface.get(0);
-						}
-					}
-					finally
-					{
-						JAWTFunctions.JAWT_DrawingSurface_FreeDrawingSurfaceInfo(dsi, ds.FreeDrawingSurfaceInfo());
-					}
-				}
-				finally
-				{
-					JAWTFunctions.JAWT_DrawingSurface_Unlock(ds, ds.Unlock());
-				}
+				return lockAndCreateSurface(instance, ds);
 			}
 			finally
 			{
@@ -124,6 +85,54 @@ final class Win32PlatformSurface implements PlatformSurface
 		finally
 		{
 			awt.free();
+		}
+	}
+
+	private static long lockAndCreateSurface(VulkanInstance instance, JAWTDrawingSurface ds)
+	{
+		int lockResult = JAWTFunctions.JAWT_DrawingSurface_Lock(ds, ds.Lock());
+		if ((lockResult & JAWTFunctions.JAWT_LOCK_ERROR) != 0)
+		{
+			throw new RuntimeException("JAWT_DrawingSurface_Lock failed: " + lockResult);
+		}
+		try
+		{
+			JAWTDrawingSurfaceInfo dsi = JAWTFunctions.JAWT_DrawingSurface_GetDrawingSurfaceInfo(
+				ds, ds.GetDrawingSurfaceInfo());
+			if (dsi == null)
+			{
+				throw new RuntimeException("JAWT_DrawingSurface_GetDrawingSurfaceInfo returned null");
+			}
+			try
+			{
+				JAWTWin32DrawingSurfaceInfo win = JAWTWin32DrawingSurfaceInfo.create(dsi.platformInfo());
+				return createWin32Surface(instance, win.hwnd());
+			}
+			finally
+			{
+				JAWTFunctions.JAWT_DrawingSurface_FreeDrawingSurfaceInfo(dsi, ds.FreeDrawingSurfaceInfo());
+			}
+		}
+		finally
+		{
+			JAWTFunctions.JAWT_DrawingSurface_Unlock(ds, ds.Unlock());
+		}
+	}
+
+	private static long createWin32Surface(VulkanInstance instance, long hwnd)
+	{
+		// GetModuleHandle(NULL) → HMODULE of the process EXE. The
+		long hinstance = WinBase.GetModuleHandle(null, (java.nio.ByteBuffer) null);
+		try (MemoryStack stack = stackPush())
+		{
+			VkWin32SurfaceCreateInfoKHR info = VkWin32SurfaceCreateInfoKHR.calloc(stack)
+				.sType$Default()
+				.hinstance(hinstance)
+				.hwnd(hwnd);
+			LongBuffer pSurface = stack.mallocLong(1);
+			Vk.check("vkCreateWin32SurfaceKHR", KHRWin32Surface.vkCreateWin32SurfaceKHR(
+				instance.handle(), info, null, pSurface));
+			return pSurface.get(0);
 		}
 	}
 }

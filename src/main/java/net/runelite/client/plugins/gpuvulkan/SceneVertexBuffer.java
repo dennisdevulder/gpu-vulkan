@@ -83,88 +83,102 @@ final class SceneVertexBuffer implements AutoCloseable
 		vertexBuffer.mapPersistent();
 		this.mapped = vertexBuffer.mappedByteBuffer().order(ByteOrder.nativeOrder());
 
-		// Without ReBAR the big allocation falls back to plain host memory and
-		// the GPU would fetch every static vertex across PCIe each frame —
-		// mirror the static region into VRAM and draw statics from there.
 		boolean hostIsDeviceLocal =
 			(vertexBuffer.memoryPropertyFlags() & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
-		Buffer mirror = null;
-		if (!hostIsDeviceLocal)
-		{
-			try
-			{
-				mirror = new Buffer(device, staticBytes,
-					VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-					VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-			}
-			catch (RuntimeException e)
-			{
-				// VRAM too small for the mirror — statics draw from host
-				// memory like before, slower but functional.
-			}
-		}
-		this.staticMirror = mirror;
+		this.staticMirror = createStaticMirror(hostIsDeviceLocal);
 		log.info("Scene vertex buffer: {} MiB, memory flags 0x{} ({}), static mirror {}",
 			totalBytes >> 20,
 			Integer.toHexString(vertexBuffer.memoryPropertyFlags()),
 			hostIsDeviceLocal ? "device-local/ReBAR-UMA" : "host memory",
-			mirror != null ? (staticBytes >> 20) + " MiB VRAM" : (hostIsDeviceLocal ? "not needed" : "FAILED"));
+			staticMirror != null ? (staticBytes >> 20) + " MiB VRAM" : (hostIsDeviceLocal ? "not needed" : "FAILED"));
 
 		try (MemoryStack stack = stackPush())
 		{
-			// Pool needs slots for both descriptor types:
-			//   binding 0 = combined image sampler (texture array)
-			//   binding 1 = uniform buffer (texture animations)
-			VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.calloc(2, stack);
-			poolSizes.get(0).type(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(1);
-			poolSizes.get(1).type(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)        .descriptorCount(1);
-			VkDescriptorPoolCreateInfo poolInfo = VkDescriptorPoolCreateInfo.calloc(stack)
-				.sType$Default()
-				.maxSets(1)
-				.pPoolSizes(poolSizes);
-			LongBuffer pPool = stack.mallocLong(1);
-			Vk.check("vkCreateDescriptorPool (scene)", vkCreateDescriptorPool(device.handle(), poolInfo, null, pPool));
-			descriptorPool = pPool.get(0);
-
-			VkDescriptorSetAllocateInfo allocInfo = VkDescriptorSetAllocateInfo.calloc(stack)
-				.sType$Default()
-				.descriptorPool(descriptorPool)
-				.pSetLayouts(stack.longs(descriptorSetLayout));
-			LongBuffer pSet = stack.mallocLong(1);
-			Vk.check("vkAllocateDescriptorSets (scene)", vkAllocateDescriptorSets(device.handle(), allocInfo, pSet));
-			descriptorSet = pSet.get(0);
-
-			VkDescriptorImageInfo.Buffer imgInfo = VkDescriptorImageInfo.calloc(1, stack);
-			imgInfo.get(0)
-				.imageLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
-				.imageView(textureArray.view())
-				.sampler(textureArray.sampler());
-
-			VkDescriptorBufferInfo.Buffer animBufInfo = VkDescriptorBufferInfo.calloc(1, stack);
-			animBufInfo.get(0)
-				.buffer(textureArray.animationUboHandle())
-				.offset(0)
-				.range(textureArray.animationUboSize());
-
-			VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(2, stack);
-			writes.get(0)
-				.sType$Default()
-				.dstSet(descriptorSet)
-				.dstBinding(0)
-				.dstArrayElement(0)
-				.descriptorCount(1)
-				.descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
-				.pImageInfo(imgInfo);
-			writes.get(1)
-				.sType$Default()
-				.dstSet(descriptorSet)
-				.dstBinding(1)
-				.dstArrayElement(0)
-				.descriptorCount(1)
-				.descriptorType(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
-				.pBufferInfo(animBufInfo);
-			vkUpdateDescriptorSets(device.handle(), writes, null);
+			descriptorPool = createDescriptorPool(stack);
+			descriptorSet = allocateAndWriteDescriptorSet(stack, descriptorSetLayout, textureArray);
 		}
+	}
+
+	// Without ReBAR the big allocation falls back to plain host memory and
+	// the GPU would fetch every static vertex across PCIe each frame —
+	// mirror the static region into VRAM and draw statics from there.
+	private Buffer createStaticMirror(boolean hostIsDeviceLocal)
+	{
+		if (hostIsDeviceLocal)
+		{
+			return null;
+		}
+		try
+		{
+			return new Buffer(device, staticBytes,
+				VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+		}
+		catch (RuntimeException e)
+		{
+			// VRAM too small for the mirror — statics draw from host
+			// memory like before, slower but functional.
+			return null;
+		}
+	}
+
+	// Pool needs slots for both descriptor types: binding 0 = combined image
+	// sampler (texture array), binding 1 = uniform buffer (texture animations).
+	private long createDescriptorPool(MemoryStack stack)
+	{
+		VkDescriptorPoolSize.Buffer poolSizes = VkDescriptorPoolSize.calloc(2, stack);
+		poolSizes.get(0).type(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER).descriptorCount(1);
+		poolSizes.get(1).type(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)        .descriptorCount(1);
+		VkDescriptorPoolCreateInfo poolInfo = VkDescriptorPoolCreateInfo.calloc(stack)
+			.sType$Default()
+			.maxSets(1)
+			.pPoolSizes(poolSizes);
+		LongBuffer pPool = stack.mallocLong(1);
+		Vk.check("vkCreateDescriptorPool (scene)", vkCreateDescriptorPool(device.handle(), poolInfo, null, pPool));
+		return pPool.get(0);
+	}
+
+	private long allocateAndWriteDescriptorSet(MemoryStack stack, long descriptorSetLayout, TextureArray textureArray)
+	{
+		VkDescriptorSetAllocateInfo allocInfo = VkDescriptorSetAllocateInfo.calloc(stack)
+			.sType$Default()
+			.descriptorPool(descriptorPool)
+			.pSetLayouts(stack.longs(descriptorSetLayout));
+		LongBuffer pSet = stack.mallocLong(1);
+		Vk.check("vkAllocateDescriptorSets (scene)", vkAllocateDescriptorSets(device.handle(), allocInfo, pSet));
+		long set = pSet.get(0);
+
+		VkDescriptorImageInfo.Buffer imgInfo = VkDescriptorImageInfo.calloc(1, stack);
+		imgInfo.get(0)
+			.imageLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+			.imageView(textureArray.view())
+			.sampler(textureArray.sampler());
+
+		VkDescriptorBufferInfo.Buffer animBufInfo = VkDescriptorBufferInfo.calloc(1, stack);
+		animBufInfo.get(0)
+			.buffer(textureArray.animationUboHandle())
+			.offset(0)
+			.range(textureArray.animationUboSize());
+
+		VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(2, stack);
+		writes.get(0)
+			.sType$Default()
+			.dstSet(set)
+			.dstBinding(0)
+			.dstArrayElement(0)
+			.descriptorCount(1)
+			.descriptorType(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+			.pImageInfo(imgInfo);
+		writes.get(1)
+			.sType$Default()
+			.dstSet(set)
+			.dstBinding(1)
+			.dstArrayElement(0)
+			.descriptorCount(1)
+			.descriptorType(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)
+			.pBufferInfo(animBufInfo);
+		vkUpdateDescriptorSets(device.handle(), writes, null);
+		return set;
 	}
 
 	long handle() { return vertexBuffer.handle(); }

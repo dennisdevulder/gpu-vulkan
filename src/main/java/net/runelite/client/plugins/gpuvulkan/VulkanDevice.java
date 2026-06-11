@@ -104,30 +104,10 @@ final class VulkanDevice implements AutoCloseable
 			vkGetPhysicalDeviceFeatures(physicalDevice, supported);
 			this.supportsFillModeNonSolid  = supported.fillModeNonSolid();
 			this.supportsSamplerAnisotropy = supported.samplerAnisotropy();
-			if (!supportsFillModeNonSolid)
-			{
-				log.info("Device does not support fillModeNonSolid — wireframe toggles will be no-ops");
-			}
-			if (!supportsSamplerAnisotropy)
-			{
-				log.info("Device does not support samplerAnisotropy — anisotropic filter clamped to 1×");
-			}
+			logUnsupportedFeatures();
 
-			// Some drivers report 0 if anisotropy isn't supported even though
-			// the feature bit says yes — clamp to 1 so disabled samplers don't
-			// trip validation. Otherwise we go up to whatever the device allows
-			// (usually 16 on modern hardware). If the feature itself isn't
-			// supported, force 1 regardless of the limit.
-			this.maxSamplerAnisotropy = supportsSamplerAnisotropy
-				? Math.max(1.0f, props.limits().maxSamplerAnisotropy())
-				: 1.0f;
-
-			// Sample counts the device supports for both color and depth
-			// attachments at once — this is what we can actually request for
-			// an MSAA renderpass. Pick the highest bit they share.
-			int counts = props.limits().framebufferColorSampleCounts()
-				& props.limits().framebufferDepthSampleCounts();
-			this.maxSampleCount = highestSampleBit(counts);
+			this.maxSamplerAnisotropy = clampMaxSamplerAnisotropy(props);
+			this.maxSampleCount = pickMaxSampleCount(props);
 
 			// Spec: if a device advertises VK_KHR_portability_subset, the app
 			// MUST enable it at vkCreateDevice or device creation fails with
@@ -144,60 +124,102 @@ final class VulkanDevice implements AutoCloseable
 				&& !Boolean.getBoolean("vkgpu.disableCustomPresent");
 			this.supportsMetalObjects = hasMetalObjects;
 
-			VkDeviceQueueCreateInfo.Buffer qInfo = VkDeviceQueueCreateInfo.calloc(1, stack);
-			qInfo.get(0).sType$Default()
-				.queueFamilyIndex(graphicsQueueFamily)
-				.pQueuePriorities(stack.floats(1.0f));
-
-			int extCount = 1
-				+ (hasPortabilitySubset ? 1 : 0)
-				+ (hasMetalObjects ? 1 : 0);
-			PointerBuffer devExtensions = stack.mallocPointer(extCount);
-			devExtensions.put(stack.UTF8(KHRSwapchain.VK_KHR_SWAPCHAIN_EXTENSION_NAME));
-			if (hasPortabilitySubset)
-			{
-				devExtensions.put(stack.UTF8("VK_KHR_portability_subset"));
-				log.info("Enabling VK_KHR_portability_subset (MoltenVK / portability impl)");
-			}
-			if (hasMetalObjects)
-			{
-				devExtensions.put(stack.UTF8("VK_EXT_metal_objects"));
-				log.info("Enabling VK_EXT_metal_objects (custom-present path)");
-			}
-			devExtensions.flip();
-
-			// Enable only what's both wanted AND supported. Downstream code
-			// (ScenePipeline wireframe, TextureArray sampler) reads the
-			// corresponding supports* flag and degrades gracefully.
-			VkPhysicalDeviceFeatures features = VkPhysicalDeviceFeatures.calloc(stack)
-				.fillModeNonSolid(supportsFillModeNonSolid)
-				.samplerAnisotropy(supportsSamplerAnisotropy);
-
-			VkDeviceCreateInfo info = VkDeviceCreateInfo.calloc(stack)
-				.sType$Default()
-				.pQueueCreateInfos(qInfo)
-				.ppEnabledExtensionNames(devExtensions)
-				.pEnabledFeatures(features);
-
-			PointerBuffer pDev = stack.mallocPointer(1);
-			Vk.check("vkCreateDevice", vkCreateDevice(physicalDevice, info, null, pDev));
-			this.handle = new VkDevice(pDev.get(0), physicalDevice, info);
+			this.handle = createLogicalDevice(stack, hasPortabilitySubset, hasMetalObjects);
 
 			PointerBuffer pQueue = stack.mallocPointer(1);
 			vkGetDeviceQueue(handle, graphicsQueueFamily, 0, pQueue);
 			this.graphicsQueue = new VkQueue(pQueue.get(0), handle);
 
-			if (supportsMetalObjects)
-			{
-				this.metalCommandQueue = extractMetalCommandQueue(stack);
-				log.info("Extracted MTLCommandQueue 0x{} for custom-present path",
-					Long.toHexString(metalCommandQueue));
-			}
-			else
-			{
-				this.metalCommandQueue = 0L;
-			}
+			this.metalCommandQueue = initMetalCommandQueue(stack);
 		}
+	}
+
+	private void logUnsupportedFeatures()
+	{
+		if (!supportsFillModeNonSolid)
+		{
+			log.info("Device does not support fillModeNonSolid — wireframe toggles will be no-ops");
+		}
+		if (!supportsSamplerAnisotropy)
+		{
+			log.info("Device does not support samplerAnisotropy — anisotropic filter clamped to 1×");
+		}
+	}
+
+	private float clampMaxSamplerAnisotropy(VkPhysicalDeviceProperties props)
+	{
+		// Some drivers report 0 if anisotropy isn't supported even though
+		// the feature bit says yes — clamp to 1 so disabled samplers don't
+		// trip validation. Otherwise we go up to whatever the device allows
+		// (usually 16 on modern hardware). If the feature itself isn't
+		// supported, force 1 regardless of the limit.
+		return supportsSamplerAnisotropy
+			? Math.max(1.0f, props.limits().maxSamplerAnisotropy())
+			: 1.0f;
+	}
+
+	private static int pickMaxSampleCount(VkPhysicalDeviceProperties props)
+	{
+		// Sample counts the device supports for both color and depth
+		// attachments at once — this is what we can actually request for
+		// an MSAA renderpass. Pick the highest bit they share.
+		int counts = props.limits().framebufferColorSampleCounts()
+			& props.limits().framebufferDepthSampleCounts();
+		return highestSampleBit(counts);
+	}
+
+	private VkDevice createLogicalDevice(MemoryStack stack, boolean hasPortabilitySubset, boolean hasMetalObjects)
+	{
+		VkDeviceQueueCreateInfo.Buffer qInfo = VkDeviceQueueCreateInfo.calloc(1, stack);
+		qInfo.get(0).sType$Default()
+			.queueFamilyIndex(graphicsQueueFamily)
+			.pQueuePriorities(stack.floats(1.0f));
+
+		int extCount = 1
+			+ (hasPortabilitySubset ? 1 : 0)
+			+ (hasMetalObjects ? 1 : 0);
+		PointerBuffer devExtensions = stack.mallocPointer(extCount);
+		devExtensions.put(stack.UTF8(KHRSwapchain.VK_KHR_SWAPCHAIN_EXTENSION_NAME));
+		if (hasPortabilitySubset)
+		{
+			devExtensions.put(stack.UTF8("VK_KHR_portability_subset"));
+			log.info("Enabling VK_KHR_portability_subset (MoltenVK / portability impl)");
+		}
+		if (hasMetalObjects)
+		{
+			devExtensions.put(stack.UTF8("VK_EXT_metal_objects"));
+			log.info("Enabling VK_EXT_metal_objects (custom-present path)");
+		}
+		devExtensions.flip();
+
+		// Enable only what's both wanted AND supported. Downstream code
+		// (ScenePipeline wireframe, TextureArray sampler) reads the
+		// corresponding supports* flag and degrades gracefully.
+		VkPhysicalDeviceFeatures features = VkPhysicalDeviceFeatures.calloc(stack)
+			.fillModeNonSolid(supportsFillModeNonSolid)
+			.samplerAnisotropy(supportsSamplerAnisotropy);
+
+		VkDeviceCreateInfo info = VkDeviceCreateInfo.calloc(stack)
+			.sType$Default()
+			.pQueueCreateInfos(qInfo)
+			.ppEnabledExtensionNames(devExtensions)
+			.pEnabledFeatures(features);
+
+		PointerBuffer pDev = stack.mallocPointer(1);
+		Vk.check("vkCreateDevice", vkCreateDevice(physicalDevice, info, null, pDev));
+		return new VkDevice(pDev.get(0), physicalDevice, info);
+	}
+
+	private long initMetalCommandQueue(MemoryStack stack)
+	{
+		if (!supportsMetalObjects)
+		{
+			return 0L;
+		}
+		long queue = extractMetalCommandQueue(stack);
+		log.info("Extracted MTLCommandQueue 0x{} for custom-present path",
+			Long.toHexString(queue));
+		return queue;
 	}
 
 	/**

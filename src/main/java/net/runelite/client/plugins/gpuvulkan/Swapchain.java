@@ -168,24 +168,10 @@ final class Swapchain implements AutoCloseable
 			VkSurfaceCapabilitiesKHR caps = VkSurfaceCapabilitiesKHR.calloc(stack);
 			Vk.check("vkGetPhysicalDeviceSurfaceCapabilitiesKHR",
 				KHRSurface.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device.physicalDevice(), surface.handle(), caps));
-
-			// currentExtent == (0xFFFFFFFF, 0xFFFFFFFF) means "we don't care, you pick".
-			// Otherwise we must match it. Java reads those as -1.
-			VkExtent2D ext = caps.currentExtent();
-			if (ext.width() != -1)
-			{
-				width = ext.width();
-				height = ext.height();
-			}
-			else
-			{
-				width = clamp(desiredWidth, caps.minImageExtent().width(), caps.maxImageExtent().width());
-				height = clamp(desiredHeight, caps.minImageExtent().height(), caps.maxImageExtent().height());
-			}
+			resolveExtent(caps, desiredWidth, desiredHeight);
 
 			VkSurfaceFormatKHR format = pickFormat(stack);
 			imageFormat = format.format();
-
 			int presentMode = pickPresentMode(stack);
 
 			// Triple-buffer pinned: MoltenVK's Runtime Guide recommends 3
@@ -199,45 +185,72 @@ final class Swapchain implements AutoCloseable
 			log.info("Vulkan swapchain: {}x{} images={} presentMode={}",
 				width, height, imageCount, presentModeName(presentMode));
 
-			VkSwapchainCreateInfoKHR info = VkSwapchainCreateInfoKHR.calloc(stack)
-				.sType$Default()
-				.surface(surface.handle())
-				.minImageCount(imageCount)
-				.imageFormat(format.format())
-				.imageColorSpace(format.colorSpace())
-				.imageExtent(e -> e.width(width).height(height))
-				.imageArrayLayers(1)
-				.imageUsage(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)
-				.imageSharingMode(VK_SHARING_MODE_EXCLUSIVE)
-				.preTransform(caps.currentTransform())
-				.compositeAlpha(KHRSurface.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)
-				.presentMode(presentMode)
-				.clipped(true)
-				.oldSwapchain(oldSwapchainHandle);
+			createSwapchainHandle(stack, caps, format, presentMode, imageCount, oldSwapchainHandle);
+			fetchImagesAndViews(stack);
+		}
+	}
 
-			LongBuffer pSwap = stack.mallocLong(1);
-			int createResult = KHRSwapchain.vkCreateSwapchainKHR(device.handle(), info, null, pSwap);
-			if (createResult == VK_ERROR_OUT_OF_DATE_KHR)
-			{
-				throw new StaleSurfaceException();
-			}
-			Vk.check("vkCreateSwapchainKHR", createResult);
-			handle = pSwap.get(0);
+	// currentExtent == (0xFFFFFFFF, 0xFFFFFFFF) means "you pick"; Java reads
+	// those as -1. Otherwise the surface extent must be matched exactly.
+	private void resolveExtent(VkSurfaceCapabilitiesKHR caps, int desiredWidth, int desiredHeight)
+	{
+		VkExtent2D ext = caps.currentExtent();
+		if (ext.width() != -1)
+		{
+			width = ext.width();
+			height = ext.height();
+		}
+		else
+		{
+			width = clamp(desiredWidth, caps.minImageExtent().width(), caps.maxImageExtent().width());
+			height = clamp(desiredHeight, caps.minImageExtent().height(), caps.maxImageExtent().height());
+		}
+	}
 
-			IntBuffer count = stack.mallocInt(1);
-			Vk.check("vkGetSwapchainImagesKHR (count)",
-				KHRSwapchain.vkGetSwapchainImagesKHR(device.handle(), handle, count, null));
-			LongBuffer pImages = stack.mallocLong(count.get(0));
-			Vk.check("vkGetSwapchainImagesKHR (images)",
-				KHRSwapchain.vkGetSwapchainImagesKHR(device.handle(), handle, count, pImages));
+	private void createSwapchainHandle(MemoryStack stack, VkSurfaceCapabilitiesKHR caps,
+		VkSurfaceFormatKHR format, int presentMode, int imageCount, long oldSwapchainHandle)
+	{
+		VkSwapchainCreateInfoKHR info = VkSwapchainCreateInfoKHR.calloc(stack)
+			.sType$Default()
+			.surface(surface.handle())
+			.minImageCount(imageCount)
+			.imageFormat(format.format())
+			.imageColorSpace(format.colorSpace())
+			.imageExtent(e -> e.width(width).height(height))
+			.imageArrayLayers(1)
+			.imageUsage(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)
+			.imageSharingMode(VK_SHARING_MODE_EXCLUSIVE)
+			.preTransform(caps.currentTransform())
+			.compositeAlpha(KHRSurface.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)
+			.presentMode(presentMode)
+			.clipped(true)
+			.oldSwapchain(oldSwapchainHandle);
 
-			images = new long[count.get(0)];
-			imageViews = new long[count.get(0)];
-			for (int i = 0; i < images.length; i++)
-			{
-				images[i] = pImages.get(i);
-				imageViews[i] = createView(stack, images[i], imageFormat);
-			}
+		LongBuffer pSwap = stack.mallocLong(1);
+		int createResult = KHRSwapchain.vkCreateSwapchainKHR(device.handle(), info, null, pSwap);
+		if (createResult == VK_ERROR_OUT_OF_DATE_KHR)
+		{
+			throw new StaleSurfaceException();
+		}
+		Vk.check("vkCreateSwapchainKHR", createResult);
+		handle = pSwap.get(0);
+	}
+
+	private void fetchImagesAndViews(MemoryStack stack)
+	{
+		IntBuffer count = stack.mallocInt(1);
+		Vk.check("vkGetSwapchainImagesKHR (count)",
+			KHRSwapchain.vkGetSwapchainImagesKHR(device.handle(), handle, count, null));
+		LongBuffer pImages = stack.mallocLong(count.get(0));
+		Vk.check("vkGetSwapchainImagesKHR (images)",
+			KHRSwapchain.vkGetSwapchainImagesKHR(device.handle(), handle, count, pImages));
+
+		images = new long[count.get(0)];
+		imageViews = new long[count.get(0)];
+		for (int i = 0; i < images.length; i++)
+		{
+			images[i] = pImages.get(i);
+			imageViews[i] = createView(stack, images[i], imageFormat);
 		}
 	}
 

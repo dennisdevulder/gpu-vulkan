@@ -66,71 +66,89 @@ final class Texture implements AutoCloseable
 
 		try (MemoryStack stack = stackPush())
 		{
-			VkImageCreateInfo info = VkImageCreateInfo.calloc(stack)
-				.sType$Default()
-				.imageType(VK_IMAGE_TYPE_2D)
-				.format(format)
-				.extent(e -> e.width(width).height(height).depth(1))
-				.mipLevels(1)
-				.arrayLayers(1)
-				.samples(VK_SAMPLE_COUNT_1_BIT)
-				.tiling(VK_IMAGE_TILING_OPTIMAL)
-				.usage(VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)
-				.sharingMode(VK_SHARING_MODE_EXCLUSIVE)
-				.initialLayout(VK_IMAGE_LAYOUT_UNDEFINED);
-
-			LongBuffer pImage = stack.mallocLong(1);
-			Vk.check("vkCreateImage", vkCreateImage(device.handle(), info, null, pImage));
-			image = pImage.get(0);
-
-			VkMemoryRequirements memReq = VkMemoryRequirements.calloc(stack);
-			vkGetImageMemoryRequirements(device.handle(), image, memReq);
-
-			int memType = Buffer.findMemoryType(device, memReq.memoryTypeBits(),
-				VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, stack);
-			VkMemoryAllocateInfo alloc = VkMemoryAllocateInfo.calloc(stack)
-				.sType$Default()
-				.allocationSize(memReq.size())
-				.memoryTypeIndex(memType);
-
-			LongBuffer pMem = stack.mallocLong(1);
-			if (vkAllocateMemory(device.handle(), alloc, null, pMem) != VK_SUCCESS)
-			{
-				vkDestroyImage(device.handle(), image, null);
-				throw new RuntimeException("vkAllocateMemory failed (texture)");
-			}
-			memory = pMem.get(0);
-			Vk.check("vkBindImageMemory", vkBindImageMemory(device.handle(), image, memory, 0));
-
-			VkImageViewCreateInfo viewInfo = VkImageViewCreateInfo.calloc(stack)
-				.sType$Default()
-				.image(image)
-				.viewType(VK_IMAGE_VIEW_TYPE_2D)
-				.format(format);
-			viewInfo.subresourceRange()
-				.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
-				.baseMipLevel(0).levelCount(1)
-				.baseArrayLayer(0).layerCount(1);
-
-			LongBuffer pView = stack.mallocLong(1);
-			Vk.check("vkCreateImageView", vkCreateImageView(device.handle(), viewInfo, null, pView));
-			view = pView.get(0);
-
-			VkSamplerCreateInfo sampInfo = VkSamplerCreateInfo.calloc(stack)
-				.sType$Default()
-				.magFilter(VK_FILTER_LINEAR)
-				.minFilter(VK_FILTER_LINEAR)
-				.mipmapMode(VK_SAMPLER_MIPMAP_MODE_NEAREST)
-				.addressModeU(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-				.addressModeV(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-				.addressModeW(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
-				.borderColor(VK_BORDER_COLOR_INT_OPAQUE_BLACK)
-				.unnormalizedCoordinates(false);
-
-			LongBuffer pSamp = stack.mallocLong(1);
-			Vk.check("vkCreateSampler", vkCreateSampler(device.handle(), sampInfo, null, pSamp));
-			sampler = pSamp.get(0);
+			image = createImage(stack, format);
+			memory = allocateAndBindMemory(stack);
+			view = createView(stack, format);
+			sampler = createSampler(stack);
 		}
+	}
+
+	private long createImage(MemoryStack stack, int format)
+	{
+		VkImageCreateInfo info = VkImageCreateInfo.calloc(stack)
+			.sType$Default()
+			.imageType(VK_IMAGE_TYPE_2D)
+			.format(format)
+			.extent(e -> e.width(width).height(height).depth(1))
+			.mipLevels(1)
+			.arrayLayers(1)
+			.samples(VK_SAMPLE_COUNT_1_BIT)
+			.tiling(VK_IMAGE_TILING_OPTIMAL)
+			.usage(VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)
+			.sharingMode(VK_SHARING_MODE_EXCLUSIVE)
+			.initialLayout(VK_IMAGE_LAYOUT_UNDEFINED);
+
+		LongBuffer pImage = stack.mallocLong(1);
+		Vk.check("vkCreateImage", vkCreateImage(device.handle(), info, null, pImage));
+		return pImage.get(0);
+	}
+
+	private long allocateAndBindMemory(MemoryStack stack)
+	{
+		VkMemoryRequirements memReq = VkMemoryRequirements.calloc(stack);
+		vkGetImageMemoryRequirements(device.handle(), image, memReq);
+
+		int memType = Buffer.findMemoryType(device, memReq.memoryTypeBits(),
+			VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, stack);
+		VkMemoryAllocateInfo alloc = VkMemoryAllocateInfo.calloc(stack)
+			.sType$Default()
+			.allocationSize(memReq.size())
+			.memoryTypeIndex(memType);
+
+		LongBuffer pMem = stack.mallocLong(1);
+		if (vkAllocateMemory(device.handle(), alloc, null, pMem) != VK_SUCCESS)
+		{
+			vkDestroyImage(device.handle(), image, null);
+			throw new RuntimeException("vkAllocateMemory failed (texture)");
+		}
+		long mem = pMem.get(0);
+		Vk.check("vkBindImageMemory", vkBindImageMemory(device.handle(), image, mem, 0));
+		return mem;
+	}
+
+	private long createView(MemoryStack stack, int format)
+	{
+		VkImageViewCreateInfo viewInfo = VkImageViewCreateInfo.calloc(stack)
+			.sType$Default()
+			.image(image)
+			.viewType(VK_IMAGE_VIEW_TYPE_2D)
+			.format(format);
+		viewInfo.subresourceRange()
+			.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
+			.baseMipLevel(0).levelCount(1)
+			.baseArrayLayer(0).layerCount(1);
+
+		LongBuffer pView = stack.mallocLong(1);
+		Vk.check("vkCreateImageView", vkCreateImageView(device.handle(), viewInfo, null, pView));
+		return pView.get(0);
+	}
+
+	private long createSampler(MemoryStack stack)
+	{
+		VkSamplerCreateInfo sampInfo = VkSamplerCreateInfo.calloc(stack)
+			.sType$Default()
+			.magFilter(VK_FILTER_LINEAR)
+			.minFilter(VK_FILTER_LINEAR)
+			.mipmapMode(VK_SAMPLER_MIPMAP_MODE_NEAREST)
+			.addressModeU(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+			.addressModeV(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+			.addressModeW(VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+			.borderColor(VK_BORDER_COLOR_INT_OPAQUE_BLACK)
+			.unnormalizedCoordinates(false);
+
+		LongBuffer pSamp = stack.mallocLong(1);
+		Vk.check("vkCreateSampler", vkCreateSampler(device.handle(), sampInfo, null, pSamp));
+		return pSamp.get(0);
 	}
 
 	long image() { return image; }

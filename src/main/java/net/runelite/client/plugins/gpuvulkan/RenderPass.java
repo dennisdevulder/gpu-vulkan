@@ -67,102 +67,10 @@ final class RenderPass implements AutoCloseable
 			int finalColorLayout = swapchainPresent
 				? KHRSwapchain.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
 				: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-			int attachmentCount = msaa ? 3 : 2;
-			VkAttachmentDescription.Buffer attachments = VkAttachmentDescription.calloc(attachmentCount, stack);
-
-			// Attachment 0: color. With MSAA we render into the multi-sampled
-			// image then resolve out, so we don't need to store it. Without
-			// MSAA we render directly into the final color image so storeOp is
-			// STORE and finalLayout matches the presentation path.
-			attachments.get(0)
-				.format(colorFormat)
-				.samples(samples)
-				.loadOp(VK_ATTACHMENT_LOAD_OP_CLEAR)
-				.storeOp(msaa ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE)
-				.stencilLoadOp(VK_ATTACHMENT_LOAD_OP_DONT_CARE)
-				.stencilStoreOp(VK_ATTACHMENT_STORE_OP_DONT_CARE)
-				.initialLayout(VK_IMAGE_LAYOUT_UNDEFINED)
-				.finalLayout(msaa
-					? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-					: finalColorLayout);
-
-			// Attachment 1: depth. Same sample count as color. Never stored.
-			attachments.get(1)
-				.format(DepthBuffer.FORMAT)
-				.samples(samples)
-				.loadOp(VK_ATTACHMENT_LOAD_OP_CLEAR)
-				.storeOp(VK_ATTACHMENT_STORE_OP_DONT_CARE)
-				.stencilLoadOp(VK_ATTACHMENT_LOAD_OP_DONT_CARE)
-				.stencilStoreOp(VK_ATTACHMENT_STORE_OP_DONT_CARE)
-				.initialLayout(VK_IMAGE_LAYOUT_UNDEFINED)
-				.finalLayout(VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-
-			VkAttachmentReference.Buffer colorRef = VkAttachmentReference.calloc(1, stack);
-			colorRef.get(0).attachment(0).layout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-
-			VkAttachmentReference depthRef = VkAttachmentReference.calloc(stack)
-				.attachment(1)
-				.layout(VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-
-			VkAttachmentReference.Buffer resolveRef = null;
-			if (msaa)
-			{
-				// Attachment 2: resolve = single-sample final color image.
-				attachments.get(2)
-					.format(colorFormat)
-					.samples(VK_SAMPLE_COUNT_1_BIT)
-					.loadOp(VK_ATTACHMENT_LOAD_OP_DONT_CARE)
-					.storeOp(VK_ATTACHMENT_STORE_OP_STORE)
-					.stencilLoadOp(VK_ATTACHMENT_LOAD_OP_DONT_CARE)
-					.stencilStoreOp(VK_ATTACHMENT_STORE_OP_DONT_CARE)
-					.initialLayout(VK_IMAGE_LAYOUT_UNDEFINED)
-					.finalLayout(finalColorLayout);
-
-				resolveRef = VkAttachmentReference.calloc(1, stack);
-				resolveRef.get(0).attachment(2).layout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-			}
-
-			VkSubpassDescription.Buffer subpass = VkSubpassDescription.calloc(1, stack);
-			subpass.get(0)
-				.pipelineBindPoint(VK_PIPELINE_BIND_POINT_GRAPHICS)
-				.colorAttachmentCount(1)
-				.pColorAttachments(colorRef)
-				.pDepthStencilAttachment(depthRef)
-				.pResolveAttachments(resolveRef);
-
-			// Frame-to-frame sync. The color attachment for swapchain images
-			// is per-image (acquired via the semaphore — UNDEFINED initial
-			// layout absorbs that side). But the depth attachment is a single
-			// image reused across frames, so frame N+1's depth write hazards
-			// against frame N's LATE_FRAGMENT_TESTS write unless we declare
-			// the dependency here. srcAccessMask = 0 (the previous value)
-			// trips validation's WRITE_AFTER_WRITE check on every frame.
-			//
-			// Cover both attachments on the src side so the same dep works
-			// regardless of whether the swapchain image happens to be the
-			// same one we used a few frames ago (UNDEFINED handles the
-			// content-discard half; this handles the write-ordering half).
-			// Offscreen targets are shared across frames in flight and read
-			// after the pass by blits/FSR sampling — the next frame's
-			// clear/draw must wait for those reads (WAR, execution-only).
-			int srcStages = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-				| VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-			if (!swapchainPresent)
-			{
-				srcStages |= VK_PIPELINE_STAGE_TRANSFER_BIT
-					| VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-			}
-			VkSubpassDependency.Buffer dep = VkSubpassDependency.calloc(1, stack);
-			dep.get(0)
-				.srcSubpass(VK_SUBPASS_EXTERNAL)
-				.dstSubpass(0)
-				.srcStageMask(srcStages)
-				.srcAccessMask(VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
-					| VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT)
-				.dstStageMask(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-					| VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT)
-				.dstAccessMask(VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
-					| VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+			VkAttachmentDescription.Buffer attachments =
+				buildAttachments(stack, colorFormat, msaa, finalColorLayout);
+			VkSubpassDescription.Buffer subpass = buildSubpass(stack, msaa);
+			VkSubpassDependency.Buffer dep = buildFrameDependency(stack, swapchainPresent);
 
 			VkRenderPassCreateInfo info = VkRenderPassCreateInfo.calloc(stack)
 				.sType$Default()
@@ -174,6 +82,119 @@ final class RenderPass implements AutoCloseable
 			Vk.check("vkCreateRenderPass", vkCreateRenderPass(device.handle(), info, null, p));
 			handle = p.get(0);
 		}
+	}
+
+	private VkAttachmentDescription.Buffer buildAttachments(MemoryStack stack, int colorFormat,
+		boolean msaa, int finalColorLayout)
+	{
+		int attachmentCount = msaa ? 3 : 2;
+		VkAttachmentDescription.Buffer attachments = VkAttachmentDescription.calloc(attachmentCount, stack);
+
+		// Attachment 0: color. With MSAA we render into the multi-sampled
+		// image then resolve out, so we don't need to store it. Without
+		// MSAA we render directly into the final color image so storeOp is
+		// STORE and finalLayout matches the presentation path.
+		attachments.get(0)
+			.format(colorFormat)
+			.samples(samples)
+			.loadOp(VK_ATTACHMENT_LOAD_OP_CLEAR)
+			.storeOp(msaa ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE)
+			.stencilLoadOp(VK_ATTACHMENT_LOAD_OP_DONT_CARE)
+			.stencilStoreOp(VK_ATTACHMENT_STORE_OP_DONT_CARE)
+			.initialLayout(VK_IMAGE_LAYOUT_UNDEFINED)
+			.finalLayout(msaa
+				? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+				: finalColorLayout);
+
+		// Attachment 1: depth. Same sample count as color. Never stored.
+		attachments.get(1)
+			.format(DepthBuffer.FORMAT)
+			.samples(samples)
+			.loadOp(VK_ATTACHMENT_LOAD_OP_CLEAR)
+			.storeOp(VK_ATTACHMENT_STORE_OP_DONT_CARE)
+			.stencilLoadOp(VK_ATTACHMENT_LOAD_OP_DONT_CARE)
+			.stencilStoreOp(VK_ATTACHMENT_STORE_OP_DONT_CARE)
+			.initialLayout(VK_IMAGE_LAYOUT_UNDEFINED)
+			.finalLayout(VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+
+		if (msaa)
+		{
+			// Attachment 2: resolve = single-sample final color image.
+			attachments.get(2)
+				.format(colorFormat)
+				.samples(VK_SAMPLE_COUNT_1_BIT)
+				.loadOp(VK_ATTACHMENT_LOAD_OP_DONT_CARE)
+				.storeOp(VK_ATTACHMENT_STORE_OP_STORE)
+				.stencilLoadOp(VK_ATTACHMENT_LOAD_OP_DONT_CARE)
+				.stencilStoreOp(VK_ATTACHMENT_STORE_OP_DONT_CARE)
+				.initialLayout(VK_IMAGE_LAYOUT_UNDEFINED)
+				.finalLayout(finalColorLayout);
+		}
+		return attachments;
+	}
+
+	private static VkSubpassDescription.Buffer buildSubpass(MemoryStack stack, boolean msaa)
+	{
+		VkAttachmentReference.Buffer colorRef = VkAttachmentReference.calloc(1, stack);
+		colorRef.get(0).attachment(0).layout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+
+		VkAttachmentReference depthRef = VkAttachmentReference.calloc(stack)
+			.attachment(1)
+			.layout(VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+
+		VkAttachmentReference.Buffer resolveRef = null;
+		if (msaa)
+		{
+			resolveRef = VkAttachmentReference.calloc(1, stack);
+			resolveRef.get(0).attachment(2).layout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+		}
+
+		VkSubpassDescription.Buffer subpass = VkSubpassDescription.calloc(1, stack);
+		subpass.get(0)
+			.pipelineBindPoint(VK_PIPELINE_BIND_POINT_GRAPHICS)
+			.colorAttachmentCount(1)
+			.pColorAttachments(colorRef)
+			.pDepthStencilAttachment(depthRef)
+			.pResolveAttachments(resolveRef);
+		return subpass;
+	}
+
+	private static VkSubpassDependency.Buffer buildFrameDependency(MemoryStack stack, boolean swapchainPresent)
+	{
+		// Frame-to-frame sync. The color attachment for swapchain images
+		// is per-image (acquired via the semaphore — UNDEFINED initial
+		// layout absorbs that side). But the depth attachment is a single
+		// image reused across frames, so frame N+1's depth write hazards
+		// against frame N's LATE_FRAGMENT_TESTS write unless we declare
+		// the dependency here. srcAccessMask = 0 (the previous value)
+		// trips validation's WRITE_AFTER_WRITE check on every frame.
+		//
+		// Cover both attachments on the src side so the same dep works
+		// regardless of whether the swapchain image happens to be the
+		// same one we used a few frames ago (UNDEFINED handles the
+		// content-discard half; this handles the write-ordering half).
+		// Offscreen targets are shared across frames in flight and read
+		// after the pass by blits/FSR sampling — the next frame's
+		// clear/draw must wait for those reads (WAR, execution-only).
+		int srcStages = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+			| VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+		if (!swapchainPresent)
+		{
+			srcStages |= VK_PIPELINE_STAGE_TRANSFER_BIT
+				| VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+		}
+		VkSubpassDependency.Buffer dep = VkSubpassDependency.calloc(1, stack);
+		dep.get(0)
+			.srcSubpass(VK_SUBPASS_EXTERNAL)
+			.dstSubpass(0)
+			.srcStageMask(srcStages)
+			.srcAccessMask(VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+				| VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT)
+			.dstStageMask(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+				| VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT)
+			.dstAccessMask(VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+				| VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+		return dep;
 	}
 
 	long handle()

@@ -141,82 +141,20 @@ final class MetalDrawableSet implements AutoCloseable
 	{
 		try (MemoryStack stack = stackPush())
 		{
-			// Import the MTLTexture as a VkImage. MoltenVK reads the pointer
-			// out of VkImportMetalTextureInfoEXT and binds it as the image's
-			// Metal backing — no Vulkan-side allocation happens for the
-			// storage. The plane (BGRA single plane = 0 / PLANE_0_BIT) is
-			// the only sensible value for a CAMetalDrawable's color texture.
-			VkImportMetalTextureInfoEXT importInfo = VkImportMetalTextureInfoEXT.calloc(stack)
-				.sType$Default()
-				.plane(VK_IMAGE_ASPECT_PLANE_0_BIT)
-				.mtlTexture(textureHandle);
-
-			VkImageCreateInfo imageInfo = VkImageCreateInfo.calloc(stack)
-				.sType$Default()
-				.pNext(importInfo.address())
-				.imageType(VK_IMAGE_TYPE_2D)
-				.format(IMAGE_FORMAT)
-				.extent(ext -> ext.set(width, height, 1))
-				.mipLevels(1)
-				.arrayLayers(1)
-				.samples(VK_SAMPLE_COUNT_1_BIT)
-				.tiling(VK_IMAGE_TILING_OPTIMAL)
-				.usage(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
-					| VK_IMAGE_USAGE_TRANSFER_SRC_BIT
-					| VK_IMAGE_USAGE_TRANSFER_DST_BIT)
-				.sharingMode(VK_SHARING_MODE_EXCLUSIVE)
-				.initialLayout(VK_IMAGE_LAYOUT_UNDEFINED);
-
-			LongBuffer pImage = stack.mallocLong(1);
-			Vk.check("vkCreateImage (imported MTLTexture)", vkCreateImage(device.handle(), imageInfo, null, pImage));
-			long image = pImage.get(0);
+			long image = importDrawableImage(stack, textureHandle, width, height);
 
 			// Imported images come pre-bound to the Metal storage. The spec
 			// note in VK_EXT_metal_objects: no vkBindImageMemory call —
 			// MoltenVK has already wired the MTLTexture as the backing.
 
-			VkImageViewCreateInfo viewInfo = VkImageViewCreateInfo.calloc(stack)
-				.sType$Default()
-				.image(image)
-				.viewType(VK_IMAGE_VIEW_TYPE_2D)
-				.format(IMAGE_FORMAT)
-				.subresourceRange(rng -> rng
-					.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
-					.baseMipLevel(0).levelCount(1)
-					.baseArrayLayer(0).layerCount(1));
-			LongBuffer pView = stack.mallocLong(1);
-			if (vkCreateImageView(device.handle(), viewInfo, null, pView) != VK_SUCCESS)
-			{
-				vkDestroyImage(device.handle(), image, null);
-				throw new RuntimeException("vkCreateImageView (imported MTLTexture) failed");
-			}
-			long view = pView.get(0);
-
-			// Framebuffer attachment order matches RenderPass declaration.
-			// MSAA: [msaaColor, depth, drawable]. Non-MSAA: [drawable, depth].
-			LongBuffer attachments = msaa != null
-				? stack.longs(msaa.view(), depth.view(), view)
-				: stack.longs(view, depth.view());
-			VkFramebufferCreateInfo fbInfo = VkFramebufferCreateInfo.calloc(stack)
-				.sType$Default()
-				.renderPass(renderPass.handle())
-				.pAttachments(attachments)
-				.width(width)
-				.height(height)
-				.layers(1);
-			LongBuffer pFb = stack.mallocLong(1);
-			if (vkCreateFramebuffer(device.handle(), fbInfo, null, pFb) != VK_SUCCESS)
-			{
-				vkDestroyImageView(device.handle(), view, null);
-				vkDestroyImage(device.handle(), image, null);
-				throw new RuntimeException("vkCreateFramebuffer (drawable) failed");
-			}
+			long view = createDrawableView(stack, image);
+			long framebuffer = createDrawableFramebuffer(stack, image, view, width, height, renderPass, depth, msaa);
 
 			Entry e = new Entry();
 			e.textureHandle = textureHandle;
 			e.image = image;
 			e.view = view;
-			e.framebuffer = pFb.get(0);
+			e.framebuffer = framebuffer;
 			e.width = width;
 			e.height = height;
 			MacOSMetalHelper.retainObject(textureHandle);
@@ -224,6 +162,84 @@ final class MetalDrawableSet implements AutoCloseable
 				Long.toHexString(textureHandle), width, height);
 			return e;
 		}
+	}
+
+	private long importDrawableImage(MemoryStack stack, long textureHandle, int width, int height)
+	{
+		// Import the MTLTexture as a VkImage. MoltenVK reads the pointer
+		// out of VkImportMetalTextureInfoEXT and binds it as the image's
+		// Metal backing — no Vulkan-side allocation happens for the
+		// storage. The plane (BGRA single plane = 0 / PLANE_0_BIT) is
+		// the only sensible value for a CAMetalDrawable's color texture.
+		VkImportMetalTextureInfoEXT importInfo = VkImportMetalTextureInfoEXT.calloc(stack)
+			.sType$Default()
+			.plane(VK_IMAGE_ASPECT_PLANE_0_BIT)
+			.mtlTexture(textureHandle);
+
+		VkImageCreateInfo imageInfo = VkImageCreateInfo.calloc(stack)
+			.sType$Default()
+			.pNext(importInfo.address())
+			.imageType(VK_IMAGE_TYPE_2D)
+			.format(IMAGE_FORMAT)
+			.extent(ext -> ext.set(width, height, 1))
+			.mipLevels(1)
+			.arrayLayers(1)
+			.samples(VK_SAMPLE_COUNT_1_BIT)
+			.tiling(VK_IMAGE_TILING_OPTIMAL)
+			.usage(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+				| VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+				| VK_IMAGE_USAGE_TRANSFER_DST_BIT)
+			.sharingMode(VK_SHARING_MODE_EXCLUSIVE)
+			.initialLayout(VK_IMAGE_LAYOUT_UNDEFINED);
+
+		LongBuffer pImage = stack.mallocLong(1);
+		Vk.check("vkCreateImage (imported MTLTexture)", vkCreateImage(device.handle(), imageInfo, null, pImage));
+		return pImage.get(0);
+	}
+
+	private long createDrawableView(MemoryStack stack, long image)
+	{
+		VkImageViewCreateInfo viewInfo = VkImageViewCreateInfo.calloc(stack)
+			.sType$Default()
+			.image(image)
+			.viewType(VK_IMAGE_VIEW_TYPE_2D)
+			.format(IMAGE_FORMAT)
+			.subresourceRange(rng -> rng
+				.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
+				.baseMipLevel(0).levelCount(1)
+				.baseArrayLayer(0).layerCount(1));
+		LongBuffer pView = stack.mallocLong(1);
+		if (vkCreateImageView(device.handle(), viewInfo, null, pView) != VK_SUCCESS)
+		{
+			vkDestroyImage(device.handle(), image, null);
+			throw new RuntimeException("vkCreateImageView (imported MTLTexture) failed");
+		}
+		return pView.get(0);
+	}
+
+	private long createDrawableFramebuffer(MemoryStack stack, long image, long view, int width, int height,
+		RenderPass renderPass, DepthBuffer depth, MsaaColorBuffer msaa)
+	{
+		// Framebuffer attachment order matches RenderPass declaration.
+		// MSAA: [msaaColor, depth, drawable]. Non-MSAA: [drawable, depth].
+		LongBuffer attachments = msaa != null
+			? stack.longs(msaa.view(), depth.view(), view)
+			: stack.longs(view, depth.view());
+		VkFramebufferCreateInfo fbInfo = VkFramebufferCreateInfo.calloc(stack)
+			.sType$Default()
+			.renderPass(renderPass.handle())
+			.pAttachments(attachments)
+			.width(width)
+			.height(height)
+			.layers(1);
+		LongBuffer pFb = stack.mallocLong(1);
+		if (vkCreateFramebuffer(device.handle(), fbInfo, null, pFb) != VK_SUCCESS)
+		{
+			vkDestroyImageView(device.handle(), view, null);
+			vkDestroyImage(device.handle(), image, null);
+			throw new RuntimeException("vkCreateFramebuffer (drawable) failed");
+		}
+		return pFb.get(0);
 	}
 
 	private void destroyEntry(Entry e)
