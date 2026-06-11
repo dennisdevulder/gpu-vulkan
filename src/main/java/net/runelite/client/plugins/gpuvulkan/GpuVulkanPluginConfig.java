@@ -30,15 +30,55 @@ import net.runelite.client.config.ConfigItem;
 import net.runelite.client.config.ConfigSection;
 import net.runelite.client.config.Range;
 
+/**
+ * Panel layout: the four day-to-day settings (draw distance, FPS mode,
+ * FPS target, fog depth) sit at top level; everything else lives in a
+ * collapsed section. Key names are persistent storage keys — never rename
+ * one (saved settings die and the onConfigChanged handlers match on them).
+ */
 @ConfigGroup(GpuVulkanPluginConfig.GROUP)
 public interface GpuVulkanPluginConfig extends Config
 {
 	String GROUP = "gpuvulkan";
 
+	// ---------------------------------------------------------------- sections
+
+	@ConfigSection(
+		name = "Graphics",
+		description = "Scene rendering quality.",
+		position = 0,
+		closedByDefault = true
+	)
+	String GRAPHICS_SECTION = "graphics";
+
+	@ConfigSection(
+		name = "Upscaling",
+		description = "Render the 3D scene at a lower internal resolution and upscale before drawing UI.",
+		position = 1,
+		closedByDefault = true
+	)
+	String UPSCALING_SECTION = "upscaling";
+
+	@ConfigSection(
+		name = "Scene",
+		description = "What gets loaded and captured into the scene.",
+		position = 2,
+		closedByDefault = true
+	)
+	String SCENE_SECTION = "scene";
+
+	@ConfigSection(
+		name = "Accessibility",
+		description = "Colour-vision correction.",
+		position = 3,
+		closedByDefault = true
+	)
+	String ACCESSIBILITY_SECTION = "accessibility";
+
 	@ConfigSection(
 		name = "Debug",
 		description = "Runtime diagnostics for Vulkan memory and scene capture.",
-		position = 3,
+		position = 4,
 		closedByDefault = true
 	)
 	String DEBUG_SECTION = "debug";
@@ -46,23 +86,20 @@ public interface GpuVulkanPluginConfig extends Config
 	@ConfigSection(
 		name = "Benchmark",
 		description = "Temporary switches for isolating Vulkan CPU/GPU costs.",
-		position = 4,
+		position = 5,
 		closedByDefault = true
 	)
 	String BENCHMARK_SECTION = "benchmark";
 
+	// --------------------------------------------------------------- top level
+
 	@ConfigItem(
-		keyName = "validation",
-		name = "Validation layers",
-		description = "Enable VK_LAYER_KHRONOS_validation. Catches API misuse but adds overhead. Plugin must be re-enabled to take effect."
+		keyName = "drawDistance",
+		name = "Draw distance (tiles)",
+		description = "Maximum draw distance in OSRS tiles. Higher = more visible scene, lower performance.",
+		position = 0
 	)
-	default boolean validation()
-	{
-		// Default off because the layer SIGSEGVs on plugin disable on
-		// Fedora 43/44 (vulkan-validation-layers 1.4.341). See docs/KNOWN_ISSUES.md
-		// issue #2. Opt in via -Dvkgpu.validation=true (vkdev script does this).
-		return Boolean.parseBoolean(System.getProperty("vkgpu.validation", "false"));
-	}
+	default int drawDistance() { return 50; }
 
 	enum FpsMode
 	{
@@ -88,7 +125,8 @@ public interface GpuVulkanPluginConfig extends Config
 	@ConfigItem(
 		keyName = "fpsMode",
 		name = "FPS mode",
-		description = "Vsync = capped to refresh, no tearing. Adaptive vsync = vsync with single-frame tear when behind. Triple-buffer = decoupled render, no tearing. Uncapped = no vsync, tearing visible, max FPS for benchmarking. Plugin must be re-enabled for this to take effect."
+		description = "Vsync = capped to refresh, no tearing. Adaptive vsync = vsync with single-frame tear when behind. Triple-buffer = decoupled render, no tearing. Uncapped = no vsync, tearing visible, max FPS for benchmarking. Plugin must be re-enabled for this to take effect.",
+		position = 1
 	)
 	default FpsMode fpsMode() { return FpsMode.VSYNC; }
 
@@ -96,46 +134,60 @@ public interface GpuVulkanPluginConfig extends Config
 	@ConfigItem(
 		keyName = "fpsTarget",
 		name = "FPS target",
-		description = "Optional engine FPS target. 0 = no target; presentation mode controls pacing. Applies immediately."
+		description = "Optional engine FPS target. 0 = no target; presentation mode controls pacing. Applies immediately.",
+		position = 2
 	)
 	default int fpsTarget() { return 0; }
 
 	@ConfigItem(
-		keyName = "drawDistance",
-		name = "Draw distance (tiles)",
-		description = "Maximum draw distance in OSRS tiles. Higher = more visible scene, lower performance."
+		keyName = "fogDepth",
+		name = "Fog depth (tiles)",
+		description = "Distance over which the scene fades to the skybox color. 0 disables fog. Matches stock GPU's default.",
+		position = 3
 	)
-	default int drawDistance() { return 50; }
+	default int fogDepth() { return 0; }
 
-	@Range(min = 0, max = 5)
-	@ConfigItem(
-		keyName = "expandedMapLoadingChunks",
-		name = "Expanded map loading (chunks)",
-		description = "Extra 8-tile chunks of map streamed in beyond the default loaded region. Applies immediately; visible geometry may change after the scene reloads."
-	)
-	default int expandedMapLoadingChunks() { return 3; }
+	// ---------------------------------------------------------------- Graphics
+
+	enum AntiAliasingMode { DISABLED, MSAA_2, MSAA_4, MSAA_8, MSAA_16 }
 
 	@ConfigItem(
-		keyName = "removeVertexSnapping",
-		name = "Remove vertex snapping",
-		description = "Disable the legacy 1/128-tile vertex snap on animated entities. Applies immediately, but only animated models visibly change."
+		keyName = "antiAliasingMode",
+		name = "Anti aliasing",
+		description = "Multisample anti-aliasing. Higher = cleaner edges, lower FPS. Stock GPU defaults to 2×. Has no effect on macOS (rendered at 1x). Plugin must be re-enabled to take effect.",
+		section = GRAPHICS_SECTION,
+		position = 0
 	)
-	default boolean removeVertexSnapping() { return true; }
+	default AntiAliasingMode antiAliasingMode() { return AntiAliasingMode.MSAA_2; }
 
 	@ConfigItem(
-		keyName = "hideUnrelatedMaps",
-		name = "Hide unrelated maps",
-		description = "Strip scene zones that belong to a different game region than the player's, so neighbouring maps don't bleed into the horizon. No effect inside instances. Matches stock GPU's option."
+		keyName = "anisotropicFilteringLevel",
+		name = "Anisotropic filtering",
+		description = "Texture filtering quality (1 = bilinear/off, up to 16). Higher = sharper distant tiles, slightly lower FPS. Stock GPU defaults to 1. Plugin must be re-enabled to take effect.",
+		section = GRAPHICS_SECTION,
+		position = 1
 	)
-	default boolean hideUnrelatedMaps() { return true; }
+	default int anisotropicFilteringLevel() { return 1; }
 
-	@ConfigSection(
-		name = "Upscaling",
-		description = "Render the 3D scene at a lower internal resolution and upscale before drawing UI.",
-		position = 1,
-		closedByDefault = true
+	@ConfigItem(
+		keyName = "smoothBanding",
+		name = "Smooth banding",
+		description = "Interpolate vertex colors smoothly across faces (matches stock GPU's default). When disabled the HSL value is re-decoded per fragment, producing the faceted/banded look on terrain and crystals.",
+		section = GRAPHICS_SECTION,
+		position = 2
 	)
-	String UPSCALING_SECTION = "upscaling";
+	default boolean smoothBanding() { return true; }
+
+	@ConfigItem(
+		keyName = "brightTextures",
+		name = "Bright textures",
+		description = "Use the older texture-lighting mode: textured surfaces are tinted by the per-face vertex color instead of pure lightness. Brighter overall look on water, doors, crystals. Matches stock GPU's 'Bright textures' option.",
+		section = GRAPHICS_SECTION,
+		position = 3
+	)
+	default boolean brightTextures() { return false; }
+
+	// --------------------------------------------------------------- Upscaling
 
 	enum UpscalingMode
 	{
@@ -172,6 +224,151 @@ public interface GpuVulkanPluginConfig extends Config
 	)
 	default int fsrSharpness() { return 60; }
 
+	// ------------------------------------------------------------------- Scene
+
+	@Range(min = 0, max = 5)
+	@ConfigItem(
+		keyName = "expandedMapLoadingChunks",
+		name = "Expanded map loading (chunks)",
+		description = "Extra 8-tile chunks of map streamed in beyond the default loaded region. Applies immediately; visible geometry may change after the scene reloads.",
+		section = SCENE_SECTION,
+		position = 0
+	)
+	default int expandedMapLoadingChunks() { return 3; }
+
+	@ConfigItem(
+		keyName = "hideUnrelatedMaps",
+		name = "Hide unrelated maps",
+		description = "Strip scene zones that belong to a different game region than the player's, so neighbouring maps don't bleed into the horizon. No effect inside instances. Matches stock GPU's option.",
+		section = SCENE_SECTION,
+		position = 1
+	)
+	default boolean hideUnrelatedMaps() { return true; }
+
+	@ConfigItem(
+		keyName = "removeVertexSnapping",
+		name = "Remove vertex snapping",
+		description = "Disable the legacy 1/128-tile vertex snap on animated entities. Applies immediately, but only animated models visibly change.",
+		section = SCENE_SECTION,
+		position = 2
+	)
+	default boolean removeVertexSnapping() { return true; }
+
+	// ----------------------------------------------------------- Accessibility
+
+	@ConfigItem(
+		keyName = "colorBlindMode",
+		name = "Colour-blind mode",
+		description = "Apply Daltonization for red-deficient (protanope), green-deficient (deuteranope), or blue-deficient (tritanope) viewers. Matches stock GPU's colour-blind option.",
+		section = ACCESSIBILITY_SECTION,
+		position = 0
+	)
+	default ColorBlindMode colorBlindMode() { return ColorBlindMode.NONE; }
+
+	@Range(min = 0, max = 100)
+	@ConfigItem(
+		keyName = "colorBlindIntensity",
+		name = "Colour-blind intensity",
+		description = "Strength of the colour-blind correction, 0 = no correction, 100 = full correction. Ignored when mode is NONE.",
+		section = ACCESSIBILITY_SECTION,
+		position = 1
+	)
+	default int colorBlindIntensity() { return 100; }
+
+	// ------------------------------------------------------------------- Debug
+
+	@ConfigItem(
+		keyName = "debugOverlay",
+		name = "Debug overlay",
+		description = "Show Vulkan memory, scene capture, and callback diagnostics on screen.",
+		section = DEBUG_SECTION,
+		position = 0
+	)
+	default boolean debugOverlay() { return false; }
+
+	@ConfigItem(
+		keyName = "detailedModelStats",
+		name = "Detailed model stats",
+		description = "Log and time per-model Vulkan capture work. Useful while profiling, but it adds CPU overhead.",
+		section = DEBUG_SECTION,
+		position = 1
+	)
+	default boolean detailedModelStats()
+	{
+		return Boolean.parseBoolean(System.getProperty("vkgpu.modelStats", "false"));
+	}
+
+	@ConfigItem(
+		keyName = "validation",
+		name = "Validation layers",
+		description = "Enable VK_LAYER_KHRONOS_validation. Catches API misuse but adds overhead. Plugin must be re-enabled to take effect.",
+		section = DEBUG_SECTION,
+		position = 2
+	)
+	default boolean validation()
+	{
+		// Default off because the layer SIGSEGVs on plugin disable on
+		// Fedora 43/44 (vulkan-validation-layers 1.4.341). See docs/KNOWN_ISSUES.md
+		// issue #2. Opt in via -Dvkgpu.validation=true (vkdev script does this).
+		return Boolean.parseBoolean(System.getProperty("vkgpu.validation", "false"));
+	}
+
+	@ConfigItem(
+		keyName = "wireframeTerrain",
+		name = "Wireframe: terrain",
+		description = "Render flat tile paint and tile-model terrain as wireframe.",
+		section = DEBUG_SECTION,
+		position = 3
+	)
+	default boolean wireframeTerrain() { return false; }
+
+	@ConfigItem(
+		keyName = "wireframeWalls",
+		name = "Wireframe: walls",
+		description = "Render WallObject geometry as wireframe.",
+		section = DEBUG_SECTION,
+		position = 4
+	)
+	default boolean wireframeWalls() { return false; }
+
+	@ConfigItem(
+		keyName = "wireframeDecorative",
+		name = "Wireframe: decorative objects",
+		description = "Render DecorativeObject geometry (signs, banners, fixtures) as wireframe.",
+		section = DEBUG_SECTION,
+		position = 5
+	)
+	default boolean wireframeDecorative() { return false; }
+
+	@ConfigItem(
+		keyName = "wireframeGround",
+		name = "Wireframe: ground objects",
+		description = "Render GroundObject geometry (paintings on the floor, ground decorations) as wireframe.",
+		section = DEBUG_SECTION,
+		position = 6
+	)
+	default boolean wireframeGround() { return false; }
+
+	@ConfigItem(
+		keyName = "wireframeGameObjects",
+		name = "Wireframe: game objects",
+		description = "Render static game objects (buildings, trees, fences) as wireframe.",
+		section = DEBUG_SECTION,
+		position = 7
+	)
+	default boolean wireframeGameObjects() { return false; }
+
+	@ConfigItem(
+		keyName = "wireframeDynamic",
+		name = "Wireframe: dynamic entities",
+		description = "Render players, NPCs and other dynamic models as wireframe.",
+		section = DEBUG_SECTION,
+		position = 8
+	)
+	default boolean wireframeDynamic() { return false; }
+
+	// --------------------------------------------------------------- Benchmark
+
 	@ConfigItem(
 		keyName = "benchmarkSkipUi",
 		name = "Skip UI upload",
@@ -198,134 +395,4 @@ public interface GpuVulkanPluginConfig extends Config
 		position = 2
 	)
 	default boolean benchmarkSkipDynamicCapture() { return false; }
-
-	@ConfigItem(
-		keyName = "fogDepth",
-		name = "Fog depth (tiles)",
-		description = "Distance over which the scene fades to the skybox color. 0 disables fog. Matches stock GPU's default."
-	)
-	default int fogDepth() { return 0; }
-
-	enum AntiAliasingMode { DISABLED, MSAA_2, MSAA_4, MSAA_8, MSAA_16 }
-
-	@ConfigItem(
-		keyName = "antiAliasingMode",
-		name = "Anti aliasing",
-		description = "Multisample anti-aliasing. Higher = cleaner edges, lower FPS. Stock GPU defaults to 2×. Has no effect on macOS (rendered at 1x). Plugin must be re-enabled to take effect."
-	)
-	default AntiAliasingMode antiAliasingMode() { return AntiAliasingMode.MSAA_2; }
-
-	@ConfigItem(
-		keyName = "anisotropicFilteringLevel",
-		name = "Anisotropic filtering",
-		description = "Texture filtering quality (1 = bilinear/off, up to 16). Higher = sharper distant tiles, slightly lower FPS. Stock GPU defaults to 1. Plugin must be re-enabled to take effect."
-	)
-	default int anisotropicFilteringLevel() { return 1; }
-
-	@ConfigItem(
-		keyName = "brightTextures",
-		name = "Bright textures",
-		description = "Use the older texture-lighting mode: textured surfaces are tinted by the per-face vertex color instead of pure lightness. Brighter overall look on water, doors, crystals. Matches stock GPU's 'Bright textures' option."
-	)
-	default boolean brightTextures() { return false; }
-
-	@ConfigItem(
-		keyName = "smoothBanding",
-		name = "Smooth banding",
-		description = "Interpolate vertex colors smoothly across faces (matches stock GPU's default). When disabled the HSL value is re-decoded per fragment, producing the faceted/banded look on terrain and crystals."
-	)
-	default boolean smoothBanding() { return true; }
-
-	@ConfigItem(
-		keyName = "detailedModelStats",
-		name = "Detailed model stats",
-		description = "Log and time per-model Vulkan capture work. Useful while profiling, but it adds CPU overhead.",
-		section = DEBUG_SECTION,
-		position = 1
-	)
-	default boolean detailedModelStats()
-	{
-		return Boolean.parseBoolean(System.getProperty("vkgpu.modelStats", "false"));
-	}
-
-	@ConfigItem(
-		keyName = "colorBlindMode",
-		name = "Colour-blind mode",
-		description = "Apply Daltonization for red-deficient (protanope), green-deficient (deuteranope), or blue-deficient (tritanope) viewers. Matches stock GPU's colour-blind option."
-	)
-	default ColorBlindMode colorBlindMode() { return ColorBlindMode.NONE; }
-
-	@Range(min = 0, max = 100)
-	@ConfigItem(
-		keyName = "colorBlindIntensity",
-		name = "Colour-blind intensity",
-		description = "Strength of the colour-blind correction, 0 = no correction, 100 = full correction. Ignored when mode is NONE."
-	)
-	default int colorBlindIntensity() { return 100; }
-
-	@ConfigItem(
-		keyName = "debugOverlay",
-		name = "Debug overlay",
-		description = "Show Vulkan memory, scene capture, and callback diagnostics on screen.",
-		section = DEBUG_SECTION,
-		position = 0
-	)
-	default boolean debugOverlay() { return false; }
-
-	@ConfigSection(
-		name = "Wireframe",
-		description = "Render individual scene layers as wireframe. Each toggle is independent.",
-		position = 2,
-		closedByDefault = true
-	)
-	String WIREFRAME_SECTION = "wireframe";
-
-	@ConfigItem(
-		keyName = "wireframeTerrain",
-		name = "Terrain",
-		description = "Render flat tile paint and tile-model terrain as wireframe.",
-		section = WIREFRAME_SECTION
-	)
-	default boolean wireframeTerrain() { return false; }
-
-	@ConfigItem(
-		keyName = "wireframeWalls",
-		name = "Walls",
-		description = "Render WallObject geometry as wireframe.",
-		section = WIREFRAME_SECTION
-	)
-	default boolean wireframeWalls() { return false; }
-
-	@ConfigItem(
-		keyName = "wireframeDecorative",
-		name = "Decorative objects",
-		description = "Render DecorativeObject geometry (signs, banners, fixtures) as wireframe.",
-		section = WIREFRAME_SECTION
-	)
-	default boolean wireframeDecorative() { return false; }
-
-	@ConfigItem(
-		keyName = "wireframeGround",
-		name = "Ground objects",
-		description = "Render GroundObject geometry (paintings on the floor, ground decorations) as wireframe.",
-		section = WIREFRAME_SECTION
-	)
-	default boolean wireframeGround() { return false; }
-
-	@ConfigItem(
-		keyName = "wireframeGameObjects",
-		name = "Game objects",
-		description = "Render static game objects (buildings, trees, fences) as wireframe.",
-		section = WIREFRAME_SECTION
-	)
-	default boolean wireframeGameObjects() { return false; }
-
-	@ConfigItem(
-		keyName = "wireframeDynamic",
-		name = "Dynamic entities",
-		description = "Render players, NPCs and other dynamic models as wireframe.",
-		section = WIREFRAME_SECTION
-	)
-	default boolean wireframeDynamic() { return false; }
-
 }
