@@ -122,7 +122,6 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	/** Benchmark-only: skip the blended alpha pass entirely (translucent
 	 *  statics and dynamics disappear). The single-pass-alpha MODE is gone —
 	 *  after the STATIC_ALPHA split it measured equal FPS with worse output. */
-	private final boolean skipAlphaPass = Boolean.getBoolean("vkgpu.skipAlphaPass");
 	private long writePtr;
 	private long writeBasePtr;
 	private int writeBaseVertex;
@@ -1599,7 +1598,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 					float smoothBanding,
 					int entityTx, int entityTz, int entityYawJau)
 	{
-		if (skipAlphaPass || vertexCount == 0) return;
+		if (vertexCount == 0) return;
 		final int slot = sync.currentFrame();
 		final int slotFirstVertex = maxStaticVertices + slot * maxFrameVertices - staticVertexCount();
 		boundVertexBuffer = VK_NULL_HANDLE;
