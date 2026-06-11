@@ -65,35 +65,61 @@ final class SceneModelEmitter
 		captureModelUnsorted(m, orient, worldX, worldY, worldZ);
 	}
 
+	/** Per-model array snapshot, reused across captures (no allocation). */
+	private static final class ModelArrays
+	{
+		float[] vx, vy, vz;
+		int[] fa, fb, fc;
+		int[] c1, c2, c3;
+		short[] faceTextures;
+		byte[] textureFaces;
+		int[] texA, texB, texC;
+		byte[] trans, bias;
+		byte overrideHue, overrideSat, overrideLum, overrideAmount;
+		boolean hasOverride;
+
+		boolean load(Model m)
+		{
+			vx = m.getVerticesX();
+			vy = m.getVerticesY();
+			vz = m.getVerticesZ();
+			fa = m.getFaceIndices1();
+			fb = m.getFaceIndices2();
+			fc = m.getFaceIndices3();
+			c1 = m.getFaceColors1();
+			c2 = m.getFaceColors2();
+			c3 = m.getFaceColors3();
+			faceTextures = m.getFaceTextures();
+			textureFaces = m.getTextureFaces();
+			texA = m.getTexIndices1();
+			texB = m.getTexIndices2();
+			texC = m.getTexIndices3();
+			trans = m.getFaceTransparencies();
+			bias = m.getFaceBias();
+			overrideAmount = m.getOverrideAmount();
+			overrideHue = m.getOverrideHue();
+			overrideSat = m.getOverrideSaturation();
+			overrideLum = m.getOverrideLuminance();
+			hasOverride = (overrideAmount & 0xFF) != 0;
+			return vx != null && vy != null && vz != null && fa != null && fb != null && fc != null;
+		}
+	}
+
+	private final ModelArrays arrays = new ModelArrays();
+
+	// Per-model counters written by the emit loops, read by the callers'
+	// stats tails. Single-threaded scratch.
+	private int emitWrote;
+	private int emitTexturedFaces;
+	private int emitOverrideFaces;
+	private long emitUvNanos;
+
 	private void captureModelUnsorted(Model m, int orient, int worldX, int worldY, int worldZ)
 	{
 		boolean detailedStats = stats.isDetailedModelStats();
 		long emitStart = detailedStats ? System.nanoTime() : 0L;
-		float[] vx = m.getVerticesX();
-		float[] vy = m.getVerticesY();
-		float[] vz = m.getVerticesZ();
-		int[] fa = m.getFaceIndices1();
-		int[] fb = m.getFaceIndices2();
-		int[] fc = m.getFaceIndices3();
-		if (fa == null || fb == null || fc == null) return;
-
-		int[] c1 = m.getFaceColors1();
-		int[] c2 = m.getFaceColors2();
-		int[] c3 = m.getFaceColors3();
-
-		short[] faceTextures   = m.getFaceTextures();
-		byte[]  textureFaces   = m.getTextureFaces();
-		int[]   texIndicesA    = m.getTexIndices1();
-		int[]   texIndicesB    = m.getTexIndices2();
-		int[]   texIndicesC    = m.getTexIndices3();
-		byte[]  faceTransparencies = m.getFaceTransparencies();
-		byte[]  faceBias = m.getFaceBias();
-
-		final byte overrideAmount = m.getOverrideAmount();
-		final byte overrideHue    = m.getOverrideHue();
-		final byte overrideSat    = m.getOverrideSaturation();
-		final byte overrideLum    = m.getOverrideLuminance();
-		final boolean hasOverride = (overrideAmount & 0xFF) != 0;
+		ModelArrays a = arrays;
+		if (!a.load(m)) return;
 
 		float cos = Perspective.COSINE[orient & 0x7FF] / 65536f;
 		float sin = Perspective.SINE[orient & 0x7FF] / 65536f;
@@ -104,6 +130,30 @@ final class SceneModelEmitter
 		int faces = m.getFaceCount();
 		if (!sink.reserveVertices(faces * 3)) return;
 
+		emitUnsortedFaces(a, faces, cos, sin, worldX, worldY, worldZ, detailedStats);
+
+		sink.addVertices(emitWrote);
+		if (detailedStats)
+		{
+			stats.unsortedModels.incrementAndGet();
+			stats.unsortedFaces.addAndGet(emitWrote / 3);
+			long emitNanos = System.nanoTime() - emitStart;
+			stats.modelEmitNanos.addAndGet(emitNanos);
+			stats.modelUnsortedEmitNanos.addAndGet(emitNanos);
+			stats.modelUvNanos.addAndGet(emitUvNanos);
+			stats.texturedEmitFaces.addAndGet(emitTexturedFaces);
+			stats.overrideEmitFaces.addAndGet(emitOverrideFaces);
+		}
+	}
+
+	// Single atomic per-face emit sequence (flat/gouraud × uv/no-uv);
+	// splitting it adds per-face dispatch to the hottest loop in the plugin.
+	private void emitUnsortedFaces(ModelArrays a, int faces,
+		float cos, float sin, int worldX, int worldY, int worldZ, boolean detailedStats)
+	{
+		float[] vx = a.vx, vy = a.vy, vz = a.vz;
+		int[] fa = a.fa, fb = a.fb, fc = a.fc;
+		int[] c1 = a.c1, c2 = a.c2, c3 = a.c3;
 		float[] uv = uvScratch;
 		int wrote = 0;
 		int texturedFaces = 0;
@@ -126,12 +176,12 @@ final class SceneModelEmitter
 
 			int texLayer = 0;
 			float u0 = 0, v0 = 0, u1 = 0, v1 = 0, u2 = 0, v2 = 0;
-			if (faceTextures != null && faceTextures[f] != -1)
+			if (a.faceTextures != null && a.faceTextures[f] != -1)
 			{
 				long uvStart = detailedStats ? System.nanoTime() : 0L;
-				texLayer = (faceTextures[f] & 0xFFFF) + 1;
+				texLayer = (a.faceTextures[f] & 0xFFFF) + 1;
 				ModelUvMapper.computeFaceUvs(uv, vx, vy, vz, fa[f], fb[f], fc[f],
-					textureFaces, texIndicesA, texIndicesB, texIndicesC, f);
+					a.textureFaces, a.texA, a.texB, a.texC, f);
 				if (detailedStats)
 				{
 					uvNanos += System.nanoTime() - uvStart;
@@ -142,19 +192,18 @@ final class SceneModelEmitter
 				u2 = uv[4]; v2 = uv[5];
 			}
 
-			if (hasOverride && texLayer == 0)
+			if (a.hasOverride && texLayer == 0)
 			{
 				overrideFaces++;
-				col1 = HslColor.applyOverride(col1, overrideHue, overrideSat, overrideLum, overrideAmount);
-				col2 = HslColor.applyOverride(col2, overrideHue, overrideSat, overrideLum, overrideAmount);
-				col3 = HslColor.applyOverride(col3, overrideHue, overrideSat, overrideLum, overrideAmount);
+				col1 = HslColor.applyOverride(col1, a.overrideHue, a.overrideSat, a.overrideLum, a.overrideAmount);
+				col2 = HslColor.applyOverride(col2, a.overrideHue, a.overrideSat, a.overrideLum, a.overrideAmount);
+				col3 = HslColor.applyOverride(col3, a.overrideHue, a.overrideSat, a.overrideLum, a.overrideAmount);
 			}
 
-			int bias = faceBias != null ? (faceBias[f] & 0xFF) : 0;
-			int trans = faceTransparencies != null ? (faceTransparencies[f] & 0xFF) : 0;
+			int bias = a.bias != null ? (a.bias[f] & 0xFF) : 0;
+			int trans = a.trans != null ? (a.trans[f] & 0xFF) : 0;
 			// Static sweeps split faces by transparency; 255 is the engine
-			// invisibility sentinel (discarded in every pass) and is dropped
-			// from static capture entirely.
+			// invisibility sentinel and is dropped from static capture.
 			if (staticFaceFilter == FILTER_OPAQUE && trans != 0) continue;
 			if (staticFaceFilter == FILTER_ALPHA && (trans == 0 || trans == 255)) continue;
 			int packedTexLayer = texLayer | (bias << 16) | (trans << 24);
@@ -209,18 +258,10 @@ final class SceneModelEmitter
 			}
 			wrote += 3;
 		}
-		sink.addVertices(wrote);
-		if (detailedStats)
-		{
-			stats.unsortedModels.incrementAndGet();
-			stats.unsortedFaces.addAndGet(wrote / 3);
-			long emitNanos = System.nanoTime() - emitStart;
-			stats.modelEmitNanos.addAndGet(emitNanos);
-			stats.modelUnsortedEmitNanos.addAndGet(emitNanos);
-			stats.modelUvNanos.addAndGet(uvNanos);
-			stats.texturedEmitFaces.addAndGet(texturedFaces);
-			stats.overrideEmitFaces.addAndGet(overrideFaces);
-		}
+		emitWrote = wrote;
+		emitTexturedFaces = texturedFaces;
+		emitOverrideFaces = overrideFaces;
+		emitUvNanos = uvNanos;
 	}
 
 	void captureModelSorted(Projection proj, Model m, int orient, int worldX, int worldY, int worldZ)
@@ -262,11 +303,7 @@ final class SceneModelEmitter
 		{
 			if (!captureModelCullOnlyFused(proj, m, orient, worldX, worldY, worldZ))
 			{
-				if (detailedStats)
-				{
-					stats.sortFallbackModels.incrementAndGet();
-				}
-				captureModelUnsorted(m, orient, worldX, worldY, worldZ);
+				fallBackToUnsorted(m, orient, worldX, worldY, worldZ, detailedStats);
 			}
 			recordPriorityRange(priorityStart);
 			return;
@@ -279,61 +316,66 @@ final class SceneModelEmitter
 			stats.addNanos(stats.modelFullSortNanos, sortStart);
 			stats.addNanos(stats.modelSortNanos, sortStart);
 		}
-		if (!sorted)
+		if (!sorted || sorter.sortedCount == 0)
 		{
-			if (detailedStats)
-			{
-				stats.sortFallbackModels.incrementAndGet();
-			}
-			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
+			fallBackToUnsorted(m, orient, worldX, worldY, worldZ, detailedStats);
 			recordPriorityRange(priorityStart);
 			return;
 		}
 
+		emitSortedModel(m, modelInfo, detailedStats);
+		recordPriorityRange(priorityStart);
+	}
+
+	// Sort rejects must stay visible (projectiles, spotanims) — emit unsorted.
+	private void fallBackToUnsorted(Model m, int orient, int worldX, int worldY, int worldZ, boolean detailedStats)
+	{
+		if (detailedStats)
+		{
+			stats.sortFallbackModels.incrementAndGet();
+		}
+		captureModelUnsorted(m, orient, worldX, worldY, worldZ);
+	}
+
+	private void emitSortedModel(Model m, ModelFaceCache.Entry modelInfo, boolean detailedStats)
+	{
 		int faces = sorter.sortedCount;
-		if (faces == 0)
-		{
-			if (detailedStats)
-			{
-				stats.sortFallbackModels.incrementAndGet();
-			}
-			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
-			recordPriorityRange(priorityStart);
-			return;
-		}
 		if (!sink.reserveVertices(faces * 3)) return;
+		ModelArrays a = arrays;
+		if (!a.load(m)) return;
 
-		float[] vxs = m.getVerticesX();
-		float[] vys = m.getVerticesY();
-		float[] vzs = m.getVerticesZ();
-		int[] fa = m.getFaceIndices1();
-		int[] fb = m.getFaceIndices2();
-		int[] fc = m.getFaceIndices3();
+		long emitStart = detailedStats ? System.nanoTime() : 0L;
+		emitSortedFaces(a, faces, detailedStats);
 
-		int[] c1 = m.getFaceColors1();
-		int[] c2 = m.getFaceColors2();
-		int[] c3 = m.getFaceColors3();
+		sink.addVertices(emitWrote);
+		if (detailedStats)
+		{
+			stats.sortedModels.incrementAndGet();
+			stats.fullSortModels.incrementAndGet();
+			stats.fullSortTransparentFaces.addAndGet(modelInfo.transparentFaces);
+			stats.sortedFaces.addAndGet(emitWrote / 3);
+			long emitNanos = System.nanoTime() - emitStart;
+			stats.modelEmitNanos.addAndGet(emitNanos);
+			stats.modelSortedEmitNanos.addAndGet(emitNanos);
+			stats.modelUvNanos.addAndGet(emitUvNanos);
+			stats.texturedEmitFaces.addAndGet(emitTexturedFaces);
+			stats.overrideEmitFaces.addAndGet(emitOverrideFaces);
+		}
+	}
 
-		short[] faceTextures   = m.getFaceTextures();
-		byte[]  textureFaces   = m.getTextureFaces();
-		int[]   texIndicesA    = m.getTexIndices1();
-		int[]   texIndicesB    = m.getTexIndices2();
-		int[]   texIndicesC    = m.getTexIndices3();
-		byte[]  faceBiasArr = m.getFaceBias();
-
-		final byte overrideAmount = m.getOverrideAmount();
-		final byte overrideHue    = m.getOverrideHue();
-		final byte overrideSat    = m.getOverrideSaturation();
-		final byte overrideLum    = m.getOverrideLuminance();
-		final boolean hasOverride = (overrideAmount & 0xFF) != 0;
-
+	// Single atomic per-face emit sequence over the sorter's back-to-front
+	// order and pre-transformed local coords; see emitUnsortedFaces.
+	private void emitSortedFaces(ModelArrays a, int faces, boolean detailedStats)
+	{
+		float[] vxs = a.vx, vys = a.vy, vzs = a.vz;
+		int[] fa = a.fa, fb = a.fb, fc = a.fc;
+		int[] c1 = a.c1, c2 = a.c2, c3 = a.c3;
 		float[] uv = uvScratch;
 		float[] lx = sorter.localX;
 		float[] ly = sorter.localY;
 		float[] lz = sorter.localZ;
 
 		int wrote = 0;
-		long emitStart = detailedStats ? System.nanoTime() : 0L;
 		int texturedFaces = 0;
 		int overrideFaces = 0;
 		long uvNanos = 0;
@@ -355,12 +397,12 @@ final class SceneModelEmitter
 
 			int texLayer = 0;
 			float u0 = 0, v0 = 0, u1 = 0, v1 = 0, u2 = 0, v2 = 0;
-			if (faceTextures != null && faceTextures[f] != -1)
+			if (a.faceTextures != null && a.faceTextures[f] != -1)
 			{
 				long uvStart = detailedStats ? System.nanoTime() : 0L;
-				texLayer = (faceTextures[f] & 0xFFFF) + 1;
+				texLayer = (a.faceTextures[f] & 0xFFFF) + 1;
 				ModelUvMapper.computeFaceUvs(uv, vxs, vys, vzs, fa[f], fb[f], fc[f],
-					textureFaces, texIndicesA, texIndicesB, texIndicesC, f);
+					a.textureFaces, a.texA, a.texB, a.texC, f);
 				if (detailedStats)
 				{
 					uvNanos += System.nanoTime() - uvStart;
@@ -371,16 +413,16 @@ final class SceneModelEmitter
 				u2 = uv[4]; v2 = uv[5];
 			}
 
-			if (hasOverride && texLayer == 0)
+			if (a.hasOverride && texLayer == 0)
 			{
 				overrideFaces++;
-				col1 = HslColor.applyOverride(col1, overrideHue, overrideSat, overrideLum, overrideAmount);
-				col2 = HslColor.applyOverride(col2, overrideHue, overrideSat, overrideLum, overrideAmount);
-				col3 = HslColor.applyOverride(col3, overrideHue, overrideSat, overrideLum, overrideAmount);
+				col1 = HslColor.applyOverride(col1, a.overrideHue, a.overrideSat, a.overrideLum, a.overrideAmount);
+				col2 = HslColor.applyOverride(col2, a.overrideHue, a.overrideSat, a.overrideLum, a.overrideAmount);
+				col3 = HslColor.applyOverride(col3, a.overrideHue, a.overrideSat, a.overrideLum, a.overrideAmount);
 			}
 
-			int bias = faceBiasArr != null ? (faceBiasArr[f] & 0xFF) : 0;
-			int trans = faceTransparencies != null ? (faceTransparencies[f] & 0xFF) : 0;
+			int bias = a.bias != null ? (a.bias[f] & 0xFF) : 0;
+			int trans = a.trans != null ? (a.trans[f] & 0xFF) : 0;
 			int packedTexLayer = texLayer | (bias << 16) | (trans << 24);
 			boolean noUv = texLayer == 0;
 
@@ -435,28 +477,10 @@ final class SceneModelEmitter
 			}
 			wrote += 3;
 		}
-		sink.addVertices(wrote);
-		if (detailedStats)
-		{
-			stats.sortedModels.incrementAndGet();
-			if (needsFaceSort)
-			{
-				stats.fullSortModels.incrementAndGet();
-				stats.fullSortTransparentFaces.addAndGet(modelInfo.transparentFaces);
-			}
-			else
-			{
-				stats.cullOnlyModels.incrementAndGet();
-			}
-			stats.sortedFaces.addAndGet(wrote / 3);
-			long emitNanos = System.nanoTime() - emitStart;
-			stats.modelEmitNanos.addAndGet(emitNanos);
-			stats.modelSortedEmitNanos.addAndGet(emitNanos);
-			stats.modelUvNanos.addAndGet(uvNanos);
-			stats.texturedEmitFaces.addAndGet(texturedFaces);
-			stats.overrideEmitFaces.addAndGet(overrideFaces);
-		}
-		recordPriorityRange(priorityStart);
+		emitWrote = wrote;
+		emitTexturedFaces = texturedFaces;
+		emitOverrideFaces = overrideFaces;
+		emitUvNanos = uvNanos;
 	}
 
 	private void recordPriorityRange(int start)
@@ -472,24 +496,47 @@ final class SceneModelEmitter
 		{
 			return false;
 		}
-
-		final float[] vxs = m.getVerticesX();
-		final float[] vys = m.getVerticesY();
-		final float[] vzs = m.getVerticesZ();
-		if (vxs == null || vys == null || vzs == null)
+		ModelArrays a = arrays;
+		if (!a.load(m))
+		{
+			return false;
+		}
+		if (!transformVerticesFused(proj, a, modelVertexCount, orientation, wx, wy, wz, detailedStats))
 		{
 			return false;
 		}
 
 		final int faceCount = Math.min(m.getFaceCount(), ModelSorter.MAX_FACE_COUNT);
-		final int[] fa = m.getFaceIndices1();
-		final int[] fb = m.getFaceIndices2();
-		final int[] fc = m.getFaceIndices3();
-		if (fa == null || fb == null || fc == null)
-		{
-			return false;
-		}
+		long emitStart = detailedStats ? System.nanoTime() : 0L;
+		emitCulledFaces(a, faceCount, detailedStats);
 
+		if (emitWrote == 0)
+		{
+			return true;
+		}
+		sink.addVertices(emitWrote);
+		if (detailedStats)
+		{
+			stats.sortedModels.incrementAndGet();
+			stats.cullOnlyModels.incrementAndGet();
+			stats.sortedFaces.addAndGet(emitWrote / 3);
+			long emitNanos = System.nanoTime() - emitStart;
+			stats.modelEmitNanos.addAndGet(emitNanos);
+			stats.modelSortedEmitNanos.addAndGet(emitNanos);
+			stats.modelUvNanos.addAndGet(emitUvNanos);
+			stats.texturedEmitFaces.addAndGet(emitTexturedFaces);
+			stats.overrideEmitFaces.addAndGet(emitOverrideFaces);
+		}
+		return true;
+	}
+
+	// Rotates/translates every vertex into cullLocal* and projects it into
+	// cullProj*; false = a vertex landed inside the near plane (z < 50,
+	// stock's whole-model reject) and the caller must fall back.
+	private boolean transformVerticesFused(Projection proj, ModelArrays a, int modelVertexCount,
+		int orientation, int wx, int wy, int wz, boolean detailedStats)
+	{
+		float[] vxs = a.vx, vys = a.vy, vzs = a.vz;
 		float orientSine = 0f;
 		float orientCosine = 0f;
 		if (orientation != 0)
@@ -535,30 +582,22 @@ final class SceneModelEmitter
 			stats.modelCullOnlyNanos.addAndGet(cullNanos);
 			stats.modelSortNanos.addAndGet(cullNanos);
 		}
+		return true;
+	}
 
-		int[] c1 = m.getFaceColors1();
-		int[] c2 = m.getFaceColors2();
-		int[] c3 = m.getFaceColors3();
-		short[] faceTextures = m.getFaceTextures();
-		byte[] textureFaces = m.getTextureFaces();
-		int[] texIndicesA = m.getTexIndices1();
-		int[] texIndicesB = m.getTexIndices2();
-		int[] texIndicesC = m.getTexIndices3();
-		byte[] faceTransparencies = m.getFaceTransparencies();
-		byte[] faceBiasArr = m.getFaceBias();
-
-		final byte overrideAmount = m.getOverrideAmount();
-		final byte overrideHue = m.getOverrideHue();
-		final byte overrideSat = m.getOverrideSaturation();
-		final byte overrideLum = m.getOverrideLuminance();
-		final boolean hasOverride = (overrideAmount & 0xFF) != 0;
+	// Single atomic per-face emit sequence with screen-space backface cull;
+	// see emitUnsortedFaces.
+	private void emitCulledFaces(ModelArrays a, int faceCount, boolean detailedStats)
+	{
+		float[] vxs = a.vx, vys = a.vy, vzs = a.vz;
+		int[] fa = a.fa, fb = a.fb, fc = a.fc;
+		int[] c1 = a.c1, c2 = a.c2, c3 = a.c3;
 		float[] uv = uvScratch;
 
 		int wrote = 0;
 		int texturedFaces = 0;
 		int overrideFaces = 0;
 		long uvNanos = 0;
-		long emitStart = detailedStats ? System.nanoTime() : 0L;
 		for (int f = 0; f < faceCount; f++)
 		{
 			if (c3 != null && c3[f] == -2)
@@ -599,11 +638,11 @@ final class SceneModelEmitter
 
 			int texLayer = 0;
 			float u0 = 0, v0 = 0, u1 = 0, v1 = 0, u2 = 0, v2 = 0;
-			if (faceTextures != null && faceTextures[f] != -1)
+			if (a.faceTextures != null && a.faceTextures[f] != -1)
 			{
 				long uvStart = detailedStats ? System.nanoTime() : 0L;
-				texLayer = (faceTextures[f] & 0xFFFF) + 1;
-				ModelUvMapper.computeFaceUvs(uv, vxs, vys, vzs, ia, ib, ic, textureFaces, texIndicesA, texIndicesB, texIndicesC, f);
+				texLayer = (a.faceTextures[f] & 0xFFFF) + 1;
+				ModelUvMapper.computeFaceUvs(uv, vxs, vys, vzs, ia, ib, ic, a.textureFaces, a.texA, a.texB, a.texC, f);
 				if (detailedStats)
 				{
 					uvNanos += System.nanoTime() - uvStart;
@@ -614,16 +653,16 @@ final class SceneModelEmitter
 				u2 = uv[4]; v2 = uv[5];
 			}
 
-			if (hasOverride && texLayer == 0)
+			if (a.hasOverride && texLayer == 0)
 			{
 				overrideFaces++;
-				col1 = HslColor.applyOverride(col1, overrideHue, overrideSat, overrideLum, overrideAmount);
-				col2 = HslColor.applyOverride(col2, overrideHue, overrideSat, overrideLum, overrideAmount);
-				col3 = HslColor.applyOverride(col3, overrideHue, overrideSat, overrideLum, overrideAmount);
+				col1 = HslColor.applyOverride(col1, a.overrideHue, a.overrideSat, a.overrideLum, a.overrideAmount);
+				col2 = HslColor.applyOverride(col2, a.overrideHue, a.overrideSat, a.overrideLum, a.overrideAmount);
+				col3 = HslColor.applyOverride(col3, a.overrideHue, a.overrideSat, a.overrideLum, a.overrideAmount);
 			}
 
-			int bias = faceBiasArr != null ? (faceBiasArr[f] & 0xFF) : 0;
-			int trans = faceTransparencies != null ? (faceTransparencies[f] & 0xFF) : 0;
+			int bias = a.bias != null ? (a.bias[f] & 0xFF) : 0;
+			int trans = a.trans != null ? (a.trans[f] & 0xFF) : 0;
 			int packedTexLayer = texLayer | (bias << 16) | (trans << 24);
 			boolean noUv = texLayer == 0;
 
@@ -675,26 +714,10 @@ final class SceneModelEmitter
 			}
 			wrote += 3;
 		}
-
-		if (wrote == 0)
-		{
-			return true;
-		}
-
-		sink.addVertices(wrote);
-		if (detailedStats)
-		{
-			stats.sortedModels.incrementAndGet();
-			stats.cullOnlyModels.incrementAndGet();
-			stats.sortedFaces.addAndGet(wrote / 3);
-			long emitNanos = System.nanoTime() - emitStart;
-			stats.modelEmitNanos.addAndGet(emitNanos);
-			stats.modelSortedEmitNanos.addAndGet(emitNanos);
-			stats.modelUvNanos.addAndGet(uvNanos);
-			stats.texturedEmitFaces.addAndGet(texturedFaces);
-			stats.overrideEmitFaces.addAndGet(overrideFaces);
-		}
-		return true;
+		emitWrote = wrote;
+		emitTexturedFaces = texturedFaces;
+		emitOverrideFaces = overrideFaces;
+		emitUvNanos = uvNanos;
 	}
 
 	private static int intProperty(String name, int defaultValue, int min, int max)
