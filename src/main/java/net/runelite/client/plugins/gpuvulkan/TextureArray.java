@@ -257,176 +257,189 @@ final class TextureArray implements AutoCloseable
 	long sampler() { return sampler; }
 	int layerCount() { return layerCount; }
 
+	private static final int BYTES_PER_LAYER = LAYER_SIZE * LAYER_SIZE * 4;
+
 	private void uploadAllLayers(long commandPool, Texture[] osrsTextures, TextureProvider tp)
 	{
-		final int bytesPerLayer = LAYER_SIZE * LAYER_SIZE * 4;
-		final long totalBytes = (long) bytesPerLayer * layerCount;
-
-		// Single staging buffer covers all layers; one vkCmdCopyBufferToImage
-		// region per layer.
-		Buffer staging = new Buffer(device, totalBytes,
+		// Single staging buffer covers all layers; one copy region per layer.
+		Buffer staging = new Buffer(device, (long) BYTES_PER_LAYER * layerCount,
 			VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
 			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 		try
 		{
 			staging.mapPersistent();
-			ByteBuffer mapped = staging.mappedByteBuffer();
-
-			// Layer 0: solid white so untextured faces multiply through to HSL.
-			for (int i = 0; i < bytesPerLayer / 4; i++)
-			{
-				mapped.put((byte) 0xFF).put((byte) 0xFF).put((byte) 0xFF).put((byte) 0xFF);
-			}
-
-			for (int t = 0; t < osrsTextures.length; t++)
-			{
-				int[] argb = osrsTextures[t] == null ? null : tp.load(t);
-				if (argb == null || argb.length < LAYER_SIZE * LAYER_SIZE)
-				{
-					// Engine hasn't loaded this texture — grey fallback so the
-					// face doesn't render as a black hole.
-					for (int p = 0; p < LAYER_SIZE * LAYER_SIZE; p++)
-					{
-						mapped.put((byte) 0x80).put((byte) 0x80).put((byte) 0x80).put((byte) 0xFF);
-					}
-				}
-				if (argb != null && argb.length >= LAYER_SIZE * LAYER_SIZE)
-				{
-					// OSRS encodes transparency as rgb==0 → alpha 0; opaque
-					// otherwise. scene.frag uses an alpha-threshold discard.
-					for (int p = 0; p < LAYER_SIZE * LAYER_SIZE; p++)
-					{
-						int rgb = argb[p];
-						if (rgb == 0)
-						{
-							mapped.put((byte) 0).put((byte) 0).put((byte) 0).put((byte) 0);
-						}
-						else
-						{
-							mapped.put((byte) (rgb         & 0xFF))
-								  .put((byte) ((rgb >>  8) & 0xFF))
-								  .put((byte) ((rgb >> 16) & 0xFF))
-								  .put((byte) 0xFF);
-						}
-					}
-				}
-			}
+			fillLayerStaging(staging.mappedByteBuffer(), osrsTextures, tp);
 			log.info("Texture array initialized: {} textures, {} layers", osrsTextures.length, layerCount);
-
-			// One-shot command buffer to copy + transition.
-			try (MemoryStack stack = stackPush())
-			{
-				VkCommandBufferAllocateInfo cbInfo = VkCommandBufferAllocateInfo.calloc(stack)
-					.sType$Default()
-					.commandPool(commandPool)
-					.level(VK_COMMAND_BUFFER_LEVEL_PRIMARY)
-					.commandBufferCount(1);
-				PointerBuffer pCmd = stack.mallocPointer(1);
-				Vk.check("vkAllocateCommandBuffers (textureArray)", vkAllocateCommandBuffers(device.handle(), cbInfo, pCmd));
-				VkCommandBuffer cmd = new VkCommandBuffer(pCmd.get(0), device.handle());
-
-				VkCommandBufferBeginInfo begin = VkCommandBufferBeginInfo.calloc(stack)
-					.sType$Default()
-					.flags(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
-				vkBeginCommandBuffer(cmd, begin);
-
-				// All mips → TRANSFER_DST. Base level gets memcpy'd; higher
-				// levels are blit destinations in the mip cascade below.
-				transitionAllLayers(cmd, 0, MIP_LEVELS,
-					VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-					VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-					0, VK_ACCESS_TRANSFER_WRITE_BIT);
-
-				try (MemoryStack copyStack = stackPush())
-				{
-					VkBufferImageCopy.Buffer regions = VkBufferImageCopy.calloc(layerCount, copyStack);
-					for (int layer = 0; layer < layerCount; layer++)
-					{
-						regions.get(layer)
-							.bufferOffset((long) layer * bytesPerLayer)
-							.bufferRowLength(0)
-							.bufferImageHeight(0)
-							.imageOffset(o -> o.set(0, 0, 0))
-							.imageExtent(e -> e.width(LAYER_SIZE).height(LAYER_SIZE).depth(1));
-						regions.get(layer).imageSubresource()
-							.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
-							.mipLevel(0)
-							.baseArrayLayer(layer).layerCount(1);
-					}
-					vkCmdCopyBufferToImage(cmd, staging.handle(), image,
-						VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, regions);
-				}
-
-				// Mip cascade: blit i-1 → i, transitioning the source to
-				// SHADER_READ_ONLY once we're done reading it.
-				int srcW = LAYER_SIZE, srcH = LAYER_SIZE;
-				for (int level = 1; level < MIP_LEVELS; level++)
-				{
-					int dstW = Math.max(1, srcW >> 1);
-					int dstH = Math.max(1, srcH >> 1);
-
-					transitionAllLayers(cmd, level - 1, 1,
-						VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-						VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-						VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
-
-					try (MemoryStack blitStack = stackPush())
-					{
-						VkImageBlit.Buffer blits = VkImageBlit.calloc(layerCount, blitStack);
-						for (int layer = 0; layer < layerCount; layer++)
-						{
-							VkImageBlit b = blits.get(layer);
-							b.srcOffsets(0).set(0, 0, 0);
-							b.srcOffsets(1).set(srcW, srcH, 1);
-							b.srcSubresource()
-								.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
-								.mipLevel(level - 1)
-								.baseArrayLayer(layer).layerCount(1);
-							b.dstOffsets(0).set(0, 0, 0);
-							b.dstOffsets(1).set(dstW, dstH, 1);
-							b.dstSubresource()
-								.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
-								.mipLevel(level)
-								.baseArrayLayer(layer).layerCount(1);
-						}
-						vkCmdBlitImage(cmd,
-							image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-							image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-							blits, VK_FILTER_LINEAR);
-					}
-
-					transitionAllLayers(cmd, level - 1, 1,
-						VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-						VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-						VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT);
-
-					srcW = dstW;
-					srcH = dstH;
-				}
-
-				// Last mip is still TRANSFER_DST.
-				transitionAllLayers(cmd, MIP_LEVELS - 1, 1,
-					VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-					VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-					VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
-
-				Vk.check("vkEndCommandBuffer (textureArray upload)", vkEndCommandBuffer(cmd));
-
-				VkSubmitInfo submit = VkSubmitInfo.calloc(stack)
-					.sType$Default()
-					.pCommandBuffers(stack.pointers(cmd));
-				Vk.check("vkQueueSubmit (textureArray upload)",
-					vkQueueSubmit(device.graphicsQueue(), submit, VK_NULL_HANDLE));
-				Vk.check("vkQueueWaitIdle (textureArray upload)",
-					vkQueueWaitIdle(device.graphicsQueue()));
-
-				vkFreeCommandBuffers(device.handle(), commandPool, cmd);
-			}
+			submitLayerUpload(commandPool, staging);
 		}
 		finally
 		{
 			staging.close();
 		}
+	}
+
+	private void fillLayerStaging(ByteBuffer mapped, Texture[] osrsTextures, TextureProvider tp)
+	{
+		// Layer 0: solid white so untextured faces multiply through to HSL.
+		for (int i = 0; i < BYTES_PER_LAYER / 4; i++)
+		{
+			mapped.put((byte) 0xFF).put((byte) 0xFF).put((byte) 0xFF).put((byte) 0xFF);
+		}
+
+		for (int t = 0; t < osrsTextures.length; t++)
+		{
+			int[] argb = osrsTextures[t] == null ? null : tp.load(t);
+			if (argb == null || argb.length < LAYER_SIZE * LAYER_SIZE)
+			{
+				// Engine hasn't loaded this texture — grey fallback so the
+				// face doesn't render as a black hole.
+				for (int p = 0; p < LAYER_SIZE * LAYER_SIZE; p++)
+				{
+					mapped.put((byte) 0x80).put((byte) 0x80).put((byte) 0x80).put((byte) 0xFF);
+				}
+			}
+			if (argb != null && argb.length >= LAYER_SIZE * LAYER_SIZE)
+			{
+				// OSRS encodes transparency as rgb==0 → alpha 0; opaque
+				// otherwise. scene.frag uses an alpha-threshold discard.
+				for (int p = 0; p < LAYER_SIZE * LAYER_SIZE; p++)
+				{
+					int rgb = argb[p];
+					if (rgb == 0)
+					{
+						mapped.put((byte) 0).put((byte) 0).put((byte) 0).put((byte) 0);
+					}
+					else
+					{
+						mapped.put((byte) (rgb         & 0xFF))
+							  .put((byte) ((rgb >>  8) & 0xFF))
+							  .put((byte) ((rgb >> 16) & 0xFF))
+							  .put((byte) 0xFF);
+					}
+				}
+			}
+		}
+	}
+
+	// One-shot command buffer: copy all layers, build the mip cascade,
+	// leave every mip SHADER_READ_ONLY, wait for completion.
+	private void submitLayerUpload(long commandPool, Buffer staging)
+	{
+		try (MemoryStack stack = stackPush())
+		{
+			VkCommandBufferAllocateInfo cbInfo = VkCommandBufferAllocateInfo.calloc(stack)
+				.sType$Default()
+				.commandPool(commandPool)
+				.level(VK_COMMAND_BUFFER_LEVEL_PRIMARY)
+				.commandBufferCount(1);
+			PointerBuffer pCmd = stack.mallocPointer(1);
+			Vk.check("vkAllocateCommandBuffers (textureArray)", vkAllocateCommandBuffers(device.handle(), cbInfo, pCmd));
+			VkCommandBuffer cmd = new VkCommandBuffer(pCmd.get(0), device.handle());
+
+			VkCommandBufferBeginInfo begin = VkCommandBufferBeginInfo.calloc(stack)
+				.sType$Default()
+				.flags(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+			vkBeginCommandBuffer(cmd, begin);
+
+			// All mips → TRANSFER_DST. Base level gets memcpy'd; higher
+			// levels are blit destinations in the mip cascade.
+			transitionAllLayers(cmd, 0, MIP_LEVELS,
+				VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+				VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+				0, VK_ACCESS_TRANSFER_WRITE_BIT);
+			recordLayerCopies(cmd, staging);
+			recordMipCascade(cmd);
+
+			Vk.check("vkEndCommandBuffer (textureArray upload)", vkEndCommandBuffer(cmd));
+
+			VkSubmitInfo submit = VkSubmitInfo.calloc(stack)
+				.sType$Default()
+				.pCommandBuffers(stack.pointers(cmd));
+			Vk.check("vkQueueSubmit (textureArray upload)",
+				vkQueueSubmit(device.graphicsQueue(), submit, VK_NULL_HANDLE));
+			Vk.check("vkQueueWaitIdle (textureArray upload)",
+				vkQueueWaitIdle(device.graphicsQueue()));
+
+			vkFreeCommandBuffers(device.handle(), commandPool, cmd);
+		}
+	}
+
+	private void recordLayerCopies(VkCommandBuffer cmd, Buffer staging)
+	{
+		try (MemoryStack stack = stackPush())
+		{
+			VkBufferImageCopy.Buffer regions = VkBufferImageCopy.calloc(layerCount, stack);
+			for (int layer = 0; layer < layerCount; layer++)
+			{
+				regions.get(layer)
+					.bufferOffset((long) layer * BYTES_PER_LAYER)
+					.bufferRowLength(0)
+					.bufferImageHeight(0)
+					.imageOffset(o -> o.set(0, 0, 0))
+					.imageExtent(e -> e.width(LAYER_SIZE).height(LAYER_SIZE).depth(1));
+				regions.get(layer).imageSubresource()
+					.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
+					.mipLevel(0)
+					.baseArrayLayer(layer).layerCount(1);
+			}
+			vkCmdCopyBufferToImage(cmd, staging.handle(), image,
+				VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, regions);
+		}
+	}
+
+	// Blit mip i-1 → i, transitioning each source to SHADER_READ_ONLY once
+	// it has been read; the last mip transitions from TRANSFER_DST at the end.
+	private void recordMipCascade(VkCommandBuffer cmd)
+	{
+		int srcW = LAYER_SIZE, srcH = LAYER_SIZE;
+		for (int level = 1; level < MIP_LEVELS; level++)
+		{
+			int dstW = Math.max(1, srcW >> 1);
+			int dstH = Math.max(1, srcH >> 1);
+
+			transitionAllLayers(cmd, level - 1, 1,
+				VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+				VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+				VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+
+			try (MemoryStack stack = stackPush())
+			{
+				VkImageBlit.Buffer blits = VkImageBlit.calloc(layerCount, stack);
+				for (int layer = 0; layer < layerCount; layer++)
+				{
+					VkImageBlit b = blits.get(layer);
+					b.srcOffsets(0).set(0, 0, 0);
+					b.srcOffsets(1).set(srcW, srcH, 1);
+					b.srcSubresource()
+						.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
+						.mipLevel(level - 1)
+						.baseArrayLayer(layer).layerCount(1);
+					b.dstOffsets(0).set(0, 0, 0);
+					b.dstOffsets(1).set(dstW, dstH, 1);
+					b.dstSubresource()
+						.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT)
+						.mipLevel(level)
+						.baseArrayLayer(layer).layerCount(1);
+				}
+				vkCmdBlitImage(cmd,
+					image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+					image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+					blits, VK_FILTER_LINEAR);
+			}
+
+			transitionAllLayers(cmd, level - 1, 1,
+				VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+				VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+				VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT);
+
+			srcW = dstW;
+			srcH = dstH;
+		}
+
+		transitionAllLayers(cmd, MIP_LEVELS - 1, 1,
+			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+			VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+			VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
 	}
 
 	private void transitionAllLayers(VkCommandBuffer cmd, int baseMip, int levelCount,
