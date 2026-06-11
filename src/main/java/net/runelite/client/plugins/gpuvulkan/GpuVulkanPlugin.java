@@ -257,6 +257,20 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	private boolean createRenderer(boolean isMac)
 	{
 		TextureProvider textureProvider = client.getTextureProvider();
+		if (!startupPreconditionsMet(textureProvider))
+		{
+			return false;
+		}
+		prepareCanvas();
+		createCoreVulkanObjects(isMac);
+		createRenderTargets();
+		createSceneBackend(textureProvider);
+		publishAndAttach();
+		return true;
+	}
+
+	private boolean startupPreconditionsMet(TextureProvider textureProvider)
+	{
 		if (textureProvider == null)
 		{
 			log.debug("Deferring GPU (Vulkan) startup until the texture provider is available");
@@ -271,6 +285,11 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 				client.getGameState());
 			return false;
 		}
+		return true;
+	}
+
+	private void prepareCanvas()
+	{
 		canvas = client.getCanvas();
 		// X11: AWT's libawt_xawt resize path expects a live GLX
 		// context on the canvas's owning thread; without it, sidebar
@@ -295,7 +314,10 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		canvas.setIgnoreRepaint(true);
 		canvas.setFocusable(true);
 		canvas.requestFocusInWindow();
+	}
 
+	private void createCoreVulkanObjects(boolean isMac)
+	{
 		disposables = new Disposables();
 		// -Dvkgpu.validation=true overrides the stored config so devs
 		// don't have to toggle the UI to enable validation.
@@ -330,7 +352,10 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			installMacResizeWake();
 		}
 		sync.recreateRenderFinished(swapchain.imageCount());
+	}
 
+	private void createRenderTargets()
+	{
 		int samples = pickMsaaSamples();
 
 		depthBuffer = new DepthBuffer(device, swapchain.width(), swapchain.height(), samples);
@@ -350,7 +375,10 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 
 		gfx = Gfx.wrap(device, sync, renderPass, swapchain.imageFormat());
 		disposables.add(gfx);
+	}
 
+	private void createSceneBackend(TextureProvider textureProvider)
+	{
 		textureArray = new TextureArray(device, textureProvider,
 			config.anisotropicFilteringLevel());
 		disposables.add(textureArray);
@@ -383,7 +411,10 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			swapchain, depthBuffer, msaaColor, framebuffers, sync, stats, config, gfx);
 		renderer.setDrawManager(drawManager);
 		disposables.add(renderer);
+	}
 
+	private void publishAndAttach()
+	{
 		log.info("Vulkan ready: {} ({}x{}, {} swapchain images)",
 			device.deviceName(), swapchain.width(), swapchain.height(), swapchain.imageCount());
 
@@ -406,7 +437,6 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		{
 			captureSceneNow(currentScene);
 		}
-		return true;
 	}
 
 	private int pickMsaaSamples()
@@ -509,64 +539,68 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		// Unpublish first so a concurrent shutdown hook sees null and bails,
 		// avoiding double-destroy from two threads.
 		activeInstance = null;
-		clientThread.invoke(() ->
+		clientThread.invoke(this::teardownRendererOnClientThread);
+	}
+
+	/**
+	 * Teardown order: stop callbacks → drain GPU → close Disposables →
+	 * destroy AWTContext → resizeCanvas. resizeCanvas with an attached
+	 * AWTContext leaves JAWT state stale and the next plugin enable fails
+	 * JAWT_DrawingSurface_Lock.
+	 */
+	private void teardownRendererOnClientThread()
+	{
+		log.info("GPU (Vulkan) shutdown: detach draw callbacks");
+		client.setGpuFlags(0);
+		client.setDrawCallbacks(null);
+		restoreClientRuntimeConfig();
+
+		if (device != null)
 		{
-			log.info("GPU (Vulkan) shutdown: detach draw callbacks");
-			// Teardown order: stop callbacks → drain GPU → close Disposables
-			// → destroy AWTContext → resizeCanvas. resizeCanvas with an
-			// attached AWTContext leaves JAWT state stale and the next
-			// plugin enable fails JAWT_DrawingSurface_Lock.
-			client.setGpuFlags(0);
-			client.setDrawCallbacks(null);
-			restoreClientRuntimeConfig();
+			try
+			{
+				log.info("GPU (Vulkan) shutdown: vkDeviceWaitIdle begin");
+				org.lwjgl.vulkan.VK13.vkDeviceWaitIdle(device.handle());
+				log.info("GPU (Vulkan) shutdown: vkDeviceWaitIdle end");
+			}
+			catch (RuntimeException e)
+			{
+				log.warn("vkDeviceWaitIdle failed during shutdown: {}", e.getMessage());
+			}
+		}
 
-			if (device != null)
-			{
-				try
-				{
-					log.info("GPU (Vulkan) shutdown: vkDeviceWaitIdle begin");
-					org.lwjgl.vulkan.VK13.vkDeviceWaitIdle(device.handle());
-					log.info("GPU (Vulkan) shutdown: vkDeviceWaitIdle end");
-				}
-				catch (RuntimeException e)
-				{
-					log.warn("vkDeviceWaitIdle failed during shutdown: {}", e.getMessage());
-				}
-			}
+		if (disposables != null)
+		{
+			log.info("GPU (Vulkan) shutdown: close disposables begin");
+			disposables.close();
+			log.info("GPU (Vulkan) shutdown: close disposables end");
+			disposables = null;
+			markExtensionBackendDetached();
+		}
 
-			if (disposables != null)
-			{
-				log.info("GPU (Vulkan) shutdown: close disposables begin");
-				disposables.close();
-				log.info("GPU (Vulkan) shutdown: close disposables end");
-				disposables = null;
-				markExtensionBackendDetached();
-			}
+		if (awtContext != null)
+		{
+			log.info("GPU (Vulkan) shutdown: destroy AWT context begin");
+			awtContext.destroy();
+			log.info("GPU (Vulkan) shutdown: destroy AWT context end");
+			awtContext = null;
+		}
 
-			if (awtContext != null)
-			{
-				log.info("GPU (Vulkan) shutdown: destroy AWT context begin");
-				awtContext.destroy();
-				log.info("GPU (Vulkan) shutdown: destroy AWT context end");
-				awtContext = null;
-			}
-
-			if (platform instanceof MacOSPlatformSurface)
-			{
-				log.info("GPU (Vulkan) shutdown: detach Metal layer");
-				MacOSMetalHelper.detachMetalLayer();
-			}
-			if (canvas != null)
-			{
-				log.info("GPU (Vulkan) shutdown: restore canvas repaint");
-				canvas.setIgnoreRepaint(false);
-			}
-			log.info("GPU (Vulkan) shutdown: resize canvas begin");
-			client.resizeCanvas();
-			log.info("GPU (Vulkan) shutdown: resize canvas end");
-			clearRendererState();
-			recordCapturedSceneIdentity(null);
-		});
+		if (platform instanceof MacOSPlatformSurface)
+		{
+			log.info("GPU (Vulkan) shutdown: detach Metal layer");
+			MacOSMetalHelper.detachMetalLayer();
+		}
+		if (canvas != null)
+		{
+			log.info("GPU (Vulkan) shutdown: restore canvas repaint");
+			canvas.setIgnoreRepaint(false);
+		}
+		log.info("GPU (Vulkan) shutdown: resize canvas begin");
+		client.resizeCanvas();
+		log.info("GPU (Vulkan) shutdown: resize canvas end");
+		clearRendererState();
+		recordCapturedSceneIdentity(null);
 	}
 
 	@Subscribe
@@ -676,36 +710,12 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		{
 			return;
 		}
-		if (!canvas.isDisplayable() || !canvas.isValid())
-		{
-			renderer.markSwapchainStale();
-			sceneFramePrepared = false;
-			return;
-		}
 		int w = canvas.getWidth();
 		int h = canvas.getHeight();
-		ResizeTrace.frame(w + "x" + h);
-		if (!ensureNativeSurfaceCurrent(w, h))
+		if (!refreshSurfaceGeometry(w, h))
 		{
 			sceneFramePrepared = false;
 			return;
-		}
-		if (renderer.usesCustomPresent())
-		{
-			updateCustomPresentGeometry(w, h);
-		}
-		else
-		{
-			if (w != lastDrawCanvasWidth || h != lastDrawCanvasHeight)
-			{
-				lastDrawCanvasWidth = w;
-				lastDrawCanvasHeight = h;
-				renderer.markSwapchainStale();
-			}
-			if (w != swapchain.width() || h != swapchain.height())
-			{
-				renderer.markSwapchainStale();
-			}
 		}
 		stats.setDetailedModelStats(config.detailedModelStats());
 		BufferProvider bp = client.getBufferProvider();
@@ -747,6 +757,40 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			updateDebugOverlaySnapshot();
 		}
 		stats.maybeLog();
+	}
+
+	/** Tracks the canvas against the native surface and swapchain geometry;
+	 *  returns false when this frame must be skipped (surface not ready). */
+	private boolean refreshSurfaceGeometry(int w, int h)
+	{
+		if (!canvas.isDisplayable() || !canvas.isValid())
+		{
+			renderer.markSwapchainStale();
+			return false;
+		}
+		ResizeTrace.frame(w + "x" + h);
+		if (!ensureNativeSurfaceCurrent(w, h))
+		{
+			return false;
+		}
+		if (renderer.usesCustomPresent())
+		{
+			updateCustomPresentGeometry(w, h);
+		}
+		else
+		{
+			if (w != lastDrawCanvasWidth || h != lastDrawCanvasHeight)
+			{
+				lastDrawCanvasWidth = w;
+				lastDrawCanvasHeight = h;
+				renderer.markSwapchainStale();
+			}
+			if (w != swapchain.width() || h != swapchain.height())
+			{
+				renderer.markSwapchainStale();
+			}
+		}
+		return true;
 	}
 
 	private void updateCustomPresentGeometry(int width, int height)
