@@ -35,10 +35,12 @@ java {
 
 def runeLiteVersion = '1.12.28'
 def pluginMainClass = 'net.runelite.client.plugins.gpuvulkan.GpuVulkanPluginTest'
-// Keep core and vulkan on the SAME version — a 3.3.6/3.3.2 mix broke Windows
-// once already (45f09ed). 3.3.4+ is required for the finalized
-// (non-provisional) Vulkan video encode bindings the recorder uses.
-def lwjglVersion = '3.3.6'
+// LWJGL core comes from runelite-client at runtime (3.3.2 classes AND
+// natives; RuneLite's plugin classloader is child-first, so bundling a
+// different core would shadow the client's classes against its older
+// natives — the 45f09ed Windows failure). lwjgl-vulkan 3.3.6 is the hub's
+// whitelisted version; jdeps verifies it links cleanly against core 3.3.2.
+def lwjglCoreVersion = '3.3.2'
 def lwjglVulkanVersion = '3.3.6'
 def lombokVersion = '1.18.34'
 
@@ -46,9 +48,17 @@ dependencies {
 	compileOnly "net.runelite:client:${runeLiteVersion}"
 	compileOnly 'net.runelite:rlawt:1.8'
 
-	implementation "org.lwjgl:lwjgl:${lwjglVersion}"
-	implementation "org.lwjgl:lwjgl-vulkan:${lwjglVulkanVersion}"
-	implementation "org.lwjgl:lwjgl-jawt:${lwjglVulkanVersion}"
+	compileOnly "org.lwjgl:lwjgl:${lwjglCoreVersion}"
+	implementation("org.lwjgl:lwjgl-vulkan:${lwjglVulkanVersion}") {
+		exclude group: 'org.lwjgl', module: 'lwjgl'
+	}
+	implementation("org.lwjgl:lwjgl-jawt:${lwjglVulkanVersion}") {
+		exclude group: 'org.lwjgl', module: 'lwjgl'
+	}
+	// MoltenVK for Apple Silicon — the client ships no Vulkan natives.
+	runtimeOnly("org.lwjgl:lwjgl-vulkan:${lwjglVulkanVersion}:natives-macos-arm64") {
+		exclude group: 'org.lwjgl', module: 'lwjgl'
+	}
 
 	compileOnly "org.projectlombok:lombok:${lombokVersion}"
 	annotationProcessor "org.projectlombok:lombok:${lombokVersion}"
@@ -66,18 +76,19 @@ dependencies {
 		exclude group: 'org.lwjgl', module: 'lwjgl-opencl'
 	}
 	launcherRuntime "net.runelite:jshell:${runeLiteVersion}"
-	launcherRuntime "org.lwjgl:lwjgl:${lwjglVersion}:natives-linux"
-	launcherRuntime "org.lwjgl:lwjgl:${lwjglVersion}:natives-linux-arm64"
-	launcherRuntime "org.lwjgl:lwjgl:${lwjglVersion}:natives-windows"
-	launcherRuntime "org.lwjgl:lwjgl:${lwjglVersion}:natives-windows-arm64"
-	launcherRuntime "org.lwjgl:lwjgl:${lwjglVersion}:natives-macos"
-	launcherRuntime "org.lwjgl:lwjgl:${lwjglVersion}:natives-macos-arm64"
-	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglVersion}:natives-linux"
-	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglVersion}:natives-linux-arm64"
-	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglVersion}:natives-windows"
-	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglVersion}:natives-windows-arm64"
-	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglVersion}:natives-macos"
-	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglVersion}:natives-macos-arm64"
+	// Core/OpenGL natives match the client's transitive lwjgl version.
+	launcherRuntime "org.lwjgl:lwjgl:${lwjglCoreVersion}:natives-linux"
+	launcherRuntime "org.lwjgl:lwjgl:${lwjglCoreVersion}:natives-linux-arm64"
+	launcherRuntime "org.lwjgl:lwjgl:${lwjglCoreVersion}:natives-windows"
+	launcherRuntime "org.lwjgl:lwjgl:${lwjglCoreVersion}:natives-windows-arm64"
+	launcherRuntime "org.lwjgl:lwjgl:${lwjglCoreVersion}:natives-macos"
+	launcherRuntime "org.lwjgl:lwjgl:${lwjglCoreVersion}:natives-macos-arm64"
+	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglCoreVersion}:natives-linux"
+	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglCoreVersion}:natives-linux-arm64"
+	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglCoreVersion}:natives-windows"
+	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglCoreVersion}:natives-windows-arm64"
+	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglCoreVersion}:natives-macos"
+	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglCoreVersion}:natives-macos-arm64"
 	launcherRuntime "org.lwjgl:lwjgl-vulkan:${lwjglVulkanVersion}:natives-macos"
 	launcherRuntime "org.lwjgl:lwjgl-vulkan:${lwjglVulkanVersion}:natives-macos-arm64"
 }
