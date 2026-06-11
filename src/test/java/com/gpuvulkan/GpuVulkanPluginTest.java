@@ -25,17 +25,13 @@
 package com.gpuvulkan;
 
 import net.runelite.client.RuneLite;
+import net.runelite.client.externalplugins.ExternalPluginManager;
 
 /**
- * IDE entry point and shadowJar Main-Class. Just runs RuneLite — the
- * plugin loads itself because it lives in {@code net.runelite.client.plugins},
- * the package {@code PluginManager.loadCorePlugins} scans for
- * {@code @PluginDescriptor} classes.
- *
- * <p>NOT calling {@code ExternalPluginManager.loadBuiltin(...)} here is
- * deliberate: adding it would register the plugin a second time on top
- * of the classpath scan, producing two "GPU (Vulkan)" entries that fight
- * over the {@code setDrawCallbacks} slot and refuse to start.
+ * IDE entry point and shadowJar Main-Class. Registers the plugin
+ * explicitly: since the com.gpuvulkan move (the hub bans net.runelite
+ * packages), RuneLite's core-plugin classpath scan no longer finds it,
+ * so loadBuiltin is the only registration — no double-entry risk.
  */
 public class GpuVulkanPluginTest
 {
@@ -51,6 +47,7 @@ public class GpuVulkanPluginTest
 		{
 			System.setProperty("org.lwjgl.system.stackSize", "1024");
 		}
+		ExternalPluginManager.loadBuiltin(GpuVulkanPlugin.class);
 		RuneLite.main(args);
 	}
 }
