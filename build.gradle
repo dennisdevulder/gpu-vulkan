@@ -82,31 +82,38 @@ dependencies {
 	launcherRuntime "org.lwjgl:lwjgl-vulkan:${lwjglVulkanVersion}:natives-macos-arm64"
 }
 
+// Compiled artifacts (.spv, librlmtl.dylib) are COMMITTED under
+// src/main/resources so the Plugin Hub's builder — which has neither
+// glslangValidator nor clang — packages a working jar. With the toolchain
+// installed the tasks below regenerate them in place; without it they skip
+// and the committed binaries ship as-is.
 def gpuVulkanShaderSrc = file('src/main/shaders/gpuvulkan')
-def gpuVulkanShaderOut = layout.buildDirectory
-	.dir('generated/resources/net/runelite/client/plugins/gpuvulkan')
-	.get()
-	.asFile
+def gpuVulkanResourceOut = file('src/main/resources/net/runelite/client/plugins/gpuvulkan')
 def gpuVulkanNativeSrc = file('src/main/native/rlmtl.m')
-def gpuVulkanNativeOut = new File(gpuVulkanShaderOut, 'librlmtl.dylib')
+def gpuVulkanNativeOut = new File(gpuVulkanResourceOut, 'librlmtl.dylib')
 def glslangValidator = providers.environmentVariable('GLSLANG').getOrElse('glslangValidator')
+
+def toolOnPath = { tool ->
+	def path = System.getenv('PATH') ?: ''
+	new File(tool).isAbsolute()
+		? new File(tool).canExecute()
+		: path.split(File.pathSeparator).any { new File(it, tool).canExecute() }
+}
 
 def compileGpuVulkanShaders = tasks.register('compileGpuVulkanShaders') {
 	group = 'build'
-	description = 'Compile gpuvulkan GLSL shaders to SPIR-V'
+	description = 'Regenerate the committed SPIR-V from GLSL (needs glslangValidator)'
 
 	inputs.dir(gpuVulkanShaderSrc)
-	outputs.dir(gpuVulkanShaderOut)
+	outputs.dir(gpuVulkanResourceOut)
+	onlyIf { toolOnPath(glslangValidator) }
 
 	doLast {
-		gpuVulkanShaderOut.mkdirs()
-		delete fileTree(gpuVulkanShaderOut).matching {
-			include '**/*.spv'
-		}
+		gpuVulkanResourceOut.mkdirs()
 		fileTree(gpuVulkanShaderSrc).matching {
 			include '**/*.vert', '**/*.frag', '**/*.comp', '**/*.geom'
 		}.each { src ->
-			def outFile = new File(gpuVulkanShaderOut, "${src.name}.spv")
+			def outFile = new File(gpuVulkanResourceOut, "${src.name}.spv")
 			def result = providers.exec {
 				commandLine glslangValidator, '-V', src.absolutePath, '-o', outFile.absolutePath
 			}.result.get()
@@ -117,16 +124,37 @@ def compileGpuVulkanShaders = tasks.register('compileGpuVulkanShaders') {
 	}
 }
 
+// Guard against editing a shader without the toolchain: the committed .spv
+// would silently go stale and ship.
+def checkGpuVulkanShadersFresh = tasks.register('checkGpuVulkanShadersFresh') {
+	group = 'verification'
+	description = 'Fail when a shader source is newer than its committed .spv'
+
+	doLast {
+		fileTree(gpuVulkanShaderSrc).matching {
+			include '**/*.vert', '**/*.frag', '**/*.comp', '**/*.geom'
+		}.each { src ->
+			def spv = new File(gpuVulkanResourceOut, "${src.name}.spv")
+			if (!spv.exists() || src.lastModified() > spv.lastModified()) {
+				throw new GradleException("${src.name} is newer than its committed .spv — " +
+					"install glslangValidator and run compileGpuVulkanShaders")
+			}
+		}
+	}
+}
+
 def compileMacOSMetalHelper = tasks.register('compileMacOSMetalHelper') {
 	group = 'build'
-	description = 'Compile the macOS CAMetalLayer/JAWT helper used by Vulkan present.'
+	description = 'Regenerate the committed macOS CAMetalLayer/JAWT helper (needs clang, macOS)'
 
 	inputs.file(gpuVulkanNativeSrc)
 	outputs.file(gpuVulkanNativeOut)
-	onlyIf { System.getProperty('os.name', '').toLowerCase().contains('mac') }
+	onlyIf {
+		System.getProperty('os.name', '').toLowerCase().contains('mac') && toolOnPath('clang')
+	}
 
 	doLast {
-		gpuVulkanShaderOut.mkdirs()
+		gpuVulkanResourceOut.mkdirs()
 		def javaHome = System.getenv('JAVA_HOME') ?: System.getProperty('java.home')
 		exec {
 			commandLine 'clang',
@@ -150,20 +178,16 @@ def compileMacOSMetalHelper = tasks.register('compileMacOSMetalHelper') {
 	}
 }
 
-sourceSets {
-	main {
-		resources {
-			srcDir layout.buildDirectory.dir('generated/resources')
-		}
-	}
-}
-
 processResources {
 	dependsOn compileGpuVulkanShaders
 	dependsOn compileMacOSMetalHelper
+	dependsOn checkGpuVulkanShadersFresh
 	from(projectDir) {
 		include 'runelite-plugin.properties'
 	}
+}
+checkGpuVulkanShadersFresh.configure {
+	mustRunAfter compileGpuVulkanShaders
 }
 
 tasks.withType(JavaCompile).configureEach {
