@@ -224,6 +224,7 @@ build.gradle           Gradle build (shader compile task, deps)
 runelite-plugin.properties   plugin-hub-style descriptor
 docs/KNOWN_ISSUES.md         engineering notes; read before opening a PR
 docs/RENDERER_CONTRACT.md    invariants for extensions using raw handles
+docs/SOURCE_LAYOUT.md        source directory grouping and package-boundary notes
 docs/COMPATIBILITY_MATRIX.md plugin-by-plugin compatibility survey
 docs/RELEASE_CHECKLIST.md    production-readiness gates
 ```
