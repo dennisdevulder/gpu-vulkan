@@ -46,7 +46,7 @@ public interface GpuVulkanPluginConfig extends Config
 	@ConfigSection(
 		name = "Graphics",
 		description = "Scene rendering quality.",
-		position = 0,
+		position = 4,
 		closedByDefault = true
 	)
 	String GRAPHICS_SECTION = "graphics";
@@ -54,7 +54,7 @@ public interface GpuVulkanPluginConfig extends Config
 	@ConfigSection(
 		name = "Upscaling",
 		description = "Render the 3D scene at a lower internal resolution and upscale before drawing UI.",
-		position = 1,
+		position = 5,
 		closedByDefault = true
 	)
 	String UPSCALING_SECTION = "upscaling";
@@ -62,7 +62,7 @@ public interface GpuVulkanPluginConfig extends Config
 	@ConfigSection(
 		name = "Scene",
 		description = "What gets loaded and captured into the scene.",
-		position = 2,
+		position = 6,
 		closedByDefault = true
 	)
 	String SCENE_SECTION = "scene";
@@ -70,7 +70,7 @@ public interface GpuVulkanPluginConfig extends Config
 	@ConfigSection(
 		name = "Accessibility",
 		description = "Colour-vision correction.",
-		position = 3,
+		position = 7,
 		closedByDefault = true
 	)
 	String ACCESSIBILITY_SECTION = "accessibility";
@@ -78,7 +78,7 @@ public interface GpuVulkanPluginConfig extends Config
 	@ConfigSection(
 		name = "Debug",
 		description = "Runtime diagnostics for Vulkan memory and scene capture.",
-		position = 4,
+		position = 8,
 		closedByDefault = true
 	)
 	String DEBUG_SECTION = "debug";
@@ -86,7 +86,7 @@ public interface GpuVulkanPluginConfig extends Config
 	@ConfigSection(
 		name = "Benchmark",
 		description = "Temporary switches for isolating Vulkan CPU/GPU costs.",
-		position = 5,
+		position = 9,
 		closedByDefault = true
 	)
 	String BENCHMARK_SECTION = "benchmark";
