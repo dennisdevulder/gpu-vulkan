@@ -25,10 +25,8 @@
 package net.runelite.client.plugins.gpuvulkan;
 
 import java.awt.Image;
-import java.lang.reflect.Field;
 import java.nio.IntBuffer;
 import java.nio.LongBuffer;
-import java.util.Queue;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.client.ui.DrawManager;
 import net.runelite.client.plugins.gpuvulkan.gfx.Renderer;
@@ -80,8 +78,7 @@ final class VulkanRenderer implements AutoCloseable
 	private final ScreenshotReadback screenshotReadback;
 	private OffscreenSceneTarget customPresentTarget;
 	private DrawManager drawManager;
-	private Field drawManagerNextFrameField;
-	private boolean drawManagerNextFrameFieldFailed;
+	private DrawManagerScreenshotProbe screenshotProbe = new DrawManagerScreenshotProbe(null);
 	private boolean screenshotReadbackRequested;
 	/** macOS-only — custom-present path. Null on Linux (we use {@link #swapchain}). */
 	private final MetalDrawableSet metalDrawables;
@@ -181,6 +178,7 @@ final class VulkanRenderer implements AutoCloseable
 	void setDrawManager(DrawManager drawManager)
 	{
 		this.drawManager = drawManager;
+		this.screenshotProbe = new DrawManagerScreenshotProbe(drawManager);
 	}
 
 	void markSwapchainStale()
@@ -296,7 +294,7 @@ final class VulkanRenderer implements AutoCloseable
 		this.gameTick = gameTick;
 		this.smoothBanding = smoothBanding;
 		this.overlayColor = overlayColor;
-		this.screenshotReadbackRequested = !disableScreenshotReadback && hasPendingScreenshotRequest();
+		this.screenshotReadbackRequested = !disableScreenshotReadback && screenshotProbe.hasPendingRequest();
 	}
 
 	// Must complete before uploadPixels writes this slot's UI staging buffer,
@@ -590,33 +588,6 @@ final class VulkanRenderer implements AutoCloseable
 				vkWaitForFences(device.handle(), sync.inFlightFence(), true, Long.MAX_VALUE));
 		}
 		return screenshotReadback.toImage();
-	}
-
-	private boolean hasPendingScreenshotRequest()
-	{
-		DrawManager dm = drawManager;
-		if (dm == null || drawManagerNextFrameFieldFailed)
-		{
-			return false;
-		}
-		try
-		{
-			Field field = drawManagerNextFrameField;
-			if (field == null)
-			{
-				field = DrawManager.class.getDeclaredField("nextFrame");
-				field.setAccessible(true);
-				drawManagerNextFrameField = field;
-			}
-			Object value = field.get(dm);
-			return value instanceof Queue && !((Queue<?>) value).isEmpty();
-		}
-		catch (ReflectiveOperationException | RuntimeException e)
-		{
-			drawManagerNextFrameFieldFailed = true;
-			log.warn("Unable to inspect DrawManager screenshot queue; Vulkan screenshot readback disabled", e);
-			return false;
-		}
 	}
 
 	@Override
