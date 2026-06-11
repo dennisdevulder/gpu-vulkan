@@ -1666,17 +1666,51 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 
 		if (tiles == null)
 		{
+			// Sub-worldview scenes are worldview-sized (a ship is a few
+			// zones, stock sizes its context from worldView.getSizeX()>>3),
+			// so don't demand SCENE_SIZE coverage — capture whatever the
+			// array spans. Requiring 104 here silently skipped every ship
+			// hull while the engine-invoked dynamics (sails, crew) drew.
 			Tile[][][] regular = scene.getTiles();
-			if (canCoverScene(regular, 0, Constants.SCENE_SIZE))
+			int size = measuredTileSize(regular);
+			if (size > 0)
 			{
 				tiles = regular;
 				tileLookupOffset = 0;
 				capturedSceneOrigin = 0;
-				capturedSceneSize = Constants.SCENE_SIZE;
+				capturedSceneSize = Math.min(size, Constants.SCENE_SIZE);
 			}
 		}
 
 		return tiles;
+	}
+
+	/** Largest allocated tile-array span across planes (0 if unusable),
+	 *  tolerating null planes/rows mid-load like {@link #canCoverScene}. */
+	private static int measuredTileSize(Tile[][][] tiles)
+	{
+		if (tiles == null)
+		{
+			return 0;
+		}
+		int size = 0;
+		for (Tile[][] plane : tiles)
+		{
+			if (plane == null)
+			{
+				continue;
+			}
+			// Max span in either dimension: rectangular worldviews capture
+			// over a square loop with tileAt bounds-guarding the short axis.
+			for (Tile[] row : plane)
+			{
+				if (row != null)
+				{
+					size = Math.max(size, Math.max(plane.length, row.length));
+				}
+			}
+		}
+		return size;
 	}
 
 	private static boolean canCoverScene(Tile[][][] tiles, int offset, int size)
