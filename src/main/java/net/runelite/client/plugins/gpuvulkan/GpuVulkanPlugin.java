@@ -25,6 +25,9 @@
 package net.runelite.client.plugins.gpuvulkan;
 
 import com.google.inject.Provides;
+import static org.lwjgl.vulkan.VK13.VK_ERROR_DEVICE_LOST;
+import static org.lwjgl.vulkan.VK13.VK_ERROR_OUT_OF_DEVICE_MEMORY;
+import static org.lwjgl.vulkan.VK13.VK_ERROR_OUT_OF_HOST_MEMORY;
 import java.awt.Canvas;
 import java.awt.Container;
 import java.awt.IllegalComponentStateException;
@@ -133,6 +136,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	/** Set by the JVM shutdown hook so in-flight callbacks bail out before
 	 *  the disposables stack tears down Vulkan objects. */
 	private static volatile boolean shuttingDown;
+	/** Latched by {@link #handleIfFatalDeviceError}; never cleared until restart. */
+	private volatile boolean rendererFailed;
 
 	@Override
 	protected void startUp()
@@ -748,6 +753,13 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 				config.smoothBanding() ? 1f : 0f,
 				overlayColor);
 		}
+		catch (Vk.VulkanException e)
+		{
+			if (!handleIfFatalDeviceError(e))
+			{
+				throw e;
+			}
+		}
 		finally
 		{
 			sceneFramePrepared = false;
@@ -757,6 +769,45 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			updateDebugOverlaySnapshot();
 		}
 		stats.maybeLog();
+	}
+
+	/**
+	 * Device loss (GPU reset, driver crash) and out-of-memory are not
+	 * recoverable by retrying frames. Log once, stop submitting, and stop the
+	 * plugin through its normal lifecycle — no automatic restart, the user
+	 * re-enables after fixing the underlying problem. Returns false for
+	 * non-fatal codes so the caller rethrows.
+	 */
+	private boolean handleIfFatalDeviceError(Vk.VulkanException e)
+	{
+		int r = e.result();
+		if (r != VK_ERROR_DEVICE_LOST && r != VK_ERROR_OUT_OF_HOST_MEMORY && r != VK_ERROR_OUT_OF_DEVICE_MEMORY)
+		{
+			return false;
+		}
+		if (rendererFailed)
+		{
+			return true;
+		}
+		rendererFailed = true;
+		// Gate draw()/scene callbacks immediately; the plugin stop below runs
+		// the full teardown on its usual threads.
+		shuttingDown = true;
+		log.error("Fatal Vulkan error on {} — stopping GPU (Vulkan)",
+			device != null ? device.deviceName() : "unknown device", e);
+		SwingUtilities.invokeLater(() ->
+		{
+			try
+			{
+				pluginManager.setPluginEnabled(this, false);
+				pluginManager.stopPlugin(this);
+			}
+			catch (Exception ex)
+			{
+				log.warn("Failed to stop GPU (Vulkan) after fatal device error", ex);
+			}
+		});
+		return true;
 	}
 
 	/** Tracks the canvas against the native surface and swapchain geometry;
@@ -1130,7 +1181,18 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		long start = stats.isEnabled() ? System.nanoTime() : 0L;
 		log.info("Vulkan recapture: base=({}, {}) worldView={} instance={}",
 			scene.getBaseX(), scene.getBaseY(), scene.getWorldViewId(), scene.isInstance());
-		renderExtensions.captureScene(scene);
+		try
+		{
+			renderExtensions.captureScene(scene);
+		}
+		catch (Vk.VulkanException e)
+		{
+			if (!handleIfFatalDeviceError(e))
+			{
+				throw e;
+			}
+			return;
+		}
 		stats.addNanos(stats.sceneCaptureNanos, start);
 		recordCapturedSceneIdentity(scene);
 	}
