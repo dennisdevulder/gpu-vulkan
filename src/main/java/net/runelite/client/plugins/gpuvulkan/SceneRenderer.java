@@ -93,6 +93,15 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	 *  the per-pass frustum cull against the composed MVP is sufficient. */
 	private final boolean cameraRadiusCull;
 
+	/** Zone-cull window for the current record pass, written by
+	 *  {@link #computeZoneCullRange} and read by both phases. Client-thread
+	 *  scratch — record passes run sequentially within a frame. */
+	private boolean cullFullZoneRange;
+	private int cullMinZoneX;
+	private int cullMaxZoneX;
+	private int cullMinZoneZ;
+	private int cullMaxZoneZ;
+
 	private final VulkanDevice device;
 	private final FrameSync sync;
 	private final ScenePipeline fillPipeline;
@@ -1315,181 +1324,231 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		// visible geometry at hundreds-of-MB offsets on Apple Silicon.
 		final int slot = sync.currentFrame();
 		final int slotFirstVertex = maxStaticVertices + slot * maxFrameVertices - staticVertexCount();
-		final int staticFirstVertex = 0;
 		boundVertexBuffer = VK_NULL_HANDLE;
 		bindArena(cmd, vbuf.staticDrawHandle());
 		zoneDrawScheduler.setZoneVisibility(computeZoneFrustum(mvp));
 		try (MemoryStack stack = stackPush())
 		{
-
-			// Vertex push (96 bytes): mat4 mvp + vec4 fogVtx + ivec4 (tick, entity placement).
 			ByteBuffer vertPush = stack.malloc(96);
-			Mat4Ops.writeTo(vertPush, mvp);
-			vertPush.position(64);
-			vertPush.putFloat(cameraX);
-			vertPush.putFloat(cameraZ);
-			vertPush.putFloat(drawDistanceTiles * 128f);
-			vertPush.putFloat(fogDepthTiles * 128f);
-			vertPush.putInt(tick).putInt(entityTx).putInt(entityTz).putInt(entityYawJau);
-			vertPush.flip();
-
-			// Fragment push (32 bytes at offset 96):
-			//   vec4 fogFrag     = (fogR, fogG, fogB, brightness)
-			//   vec4 fragExtras  = (textureLightMode, colorBlindMode, colorBlindIntensity, smoothBanding)
+			fillSceneVertPush(vertPush, mvp, cameraX, cameraZ, drawDistanceTiles, fogDepthTiles,
+				tick, entityTx, entityTz, entityYawJau);
 			ByteBuffer fragPush = stack.malloc(32);
-			fragPush.putFloat(fogR).putFloat(fogG).putFloat(fogB).putFloat(brightness);
-			fragPush.putFloat(textureLightMode);
-			fragPush.putFloat((float) colorBlindMode);
-			fragPush.putFloat(colorBlindIntensity);
-			fragPush.putFloat(smoothBanding);
-			fragPush.flip();
+			fillSceneFragPush(fragPush, fogR, fogG, fogB, brightness,
+				textureLightMode, colorBlindMode, colorBlindIntensity, smoothBanding);
 
-			java.util.Set<Integer> hr = hideRoofIds;
-			if (skipScratch.length < roofRanges.requiredSkipPairCapacity())
-			{
-				skipScratch = java.util.Arrays.copyOf(skipScratch, roofRanges.requiredSkipPairCapacity());
-			}
-			int skipPairs = roofRanges.buildSkipPairs(hr, skipScratch);
+			int skipPairs = buildRoofSkipPairs();
 			if (stats.isEnabled())
 			{
 				stats.roofSkipPairs.addAndGet(skipPairs);
 				stats.overlayDirtyZones.addAndGet(overlaySlotHasZones[slot] ? countOverlayDirtyZones(slot) : 0);
 			}
 
-			ScenePipeline boundPipeline = null;
-			final int loMin = minPlane;
-			final int loCur = currentPlane;
-			final int loMax = maxPlane;
-			int radiusTiles = (int) Math.ceil(drawDistanceTiles + fogDepthTiles + 2f);
-			int radiusZones = Math.max(1, (radiusTiles + ZONE_SIZE - 1) / ZONE_SIZE);
-			// Zone-radius culling, matching stock (the engine only invokes
-			// zones inside the draw distance). A fully streamed extended
-			// scene captures ~8.6M verts in dense regions — drawing all of
-			// it every frame halves FPS vs the radius. The old "bad-tile
-			// black-scene" caution gets an escape hatch instead of a
-			// permanent full draw: -Dvkgpu.fullSceneDraw=true reverts.
-			boolean fullZoneRange = FULL_SCENE_DRAW || !cameraRadiusCull;
-			int sceneEnd = capturedSceneOrigin + capturedSceneSize;
-			int camTileX = clamp((int) Math.floor(cameraX / 128f), capturedSceneOrigin, sceneEnd - 1);
-			int camTileZ = clamp((int) Math.floor(cameraZ / 128f), capturedSceneOrigin, sceneEnd - 1);
-			int camZoneX = (camTileX - capturedSceneOrigin) / ZONE_SIZE;
-			int camZoneZ = (camTileZ - capturedSceneOrigin) / ZONE_SIZE;
-			int minZoneX = fullZoneRange ? 0 : Math.max(0, camZoneX - radiusZones);
-			int maxZoneX = fullZoneRange ? ZONES_PER_SIDE - 1 : Math.min(ZONES_PER_SIDE - 1, camZoneX + radiusZones);
-			int minZoneZ = fullZoneRange ? 0 : Math.max(0, camZoneZ - radiusZones);
-			int maxZoneZ = fullZoneRange ? ZONES_PER_SIDE - 1 : Math.min(ZONES_PER_SIDE - 1, camZoneZ + radiusZones);
-			int layerStart = skyboxEnd > skyboxStart ? skyboxEnd : 0;
-			for (int i = 0; i < LAYER_COUNT; i++)
-			{
-				int regionEnd = i == LAYER_COUNT - 1 ? vertexCount : regionEnds[i];
-				if (regionEnd <= layerStart)
-				{
-					layerStart = regionEnd;
-					continue;
-				}
-				// Translucent statics belong to the blended pass.
-				if (LAYERS[i] == Layer.STATIC_ALPHA)
-				{
-					layerStart = regionEnd;
-					continue;
-				}
-
-				ScenePipeline want = (wireframe[i] && linePipeline != null) ? linePipeline : fillPipeline;
-				if (want != boundPipeline)
-				{
-					vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, want.handle());
-					vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-						want.layout(), 0, stack.longs(descriptorSet), null);
-					if (!repushConstantsEveryDraw)
-					{
-						drawEmitter.pushConstants(cmd, want.layout(), vertPush, fragPush);
-					}
-					boundPipeline = want;
-				}
-
-				if (LAYERS[i] == Layer.DYNAMIC)
-				{
-					int dynamicStart = overlayNextVertex[slot];
-					int dynamicEnd = dynamicOpaqueEnd >= dynamicStart ? Math.min(dynamicOpaqueEnd, regionEnd) : regionEnd;
-					bindArena(cmd, vbuf.handle());
-					drawEmitter.drawRange(cmd, dynamicStart, dynamicEnd, priorityRanges.skipPairs(), priorityRanges.count(), priorityRanges.count() > 0, slotFirstVertex,
-						want.layout(), vertPush, fragPush);
-				}
-				else
-				{
-					// Static layers emit plane-major. Draw one plane at a time
-					// so roof skips only affect planes above the player; current
-					// and lower planes must remain intact or buildings get
-					// chopped when their roof id is hidden.
-					for (int p = loMin; p <= loMax; p++)
-					{
-						bindArena(cmd, vbuf.staticDrawHandle());
-						zoneDrawScheduler.drawStaticPlane(cmd, i, p, layerStart,
-							fullZoneRange, minZoneX, maxZoneX, minZoneZ, maxZoneZ,
-							skipScratch, skipPairs, p > loCur,
-							slot, staticFirstVertex, want.layout(), vertPush, fragPush);
-						bindArena(cmd, vbuf.handle());
-						zoneDrawScheduler.drawOverlayPlane(cmd, i, p, minZoneX, maxZoneX, minZoneZ, maxZoneZ,
-							skipScratch, skipPairs, p > loCur,
-							slot, slotFirstVertex, want.layout(), vertPush, fragPush);
-					}
-				}
-				layerStart = regionEnd;
-			}
-
-			if (priorityRanges.count() > 0)
-			{
-				bindArena(cmd, vbuf.handle());
-				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, priorityColorPipeline.handle());
-				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-					priorityColorPipeline.layout(), 0, stack.longs(descriptorSet), null);
-				if (!repushConstantsEveryDraw)
-				{
-					drawEmitter.pushConstants(cmd, priorityColorPipeline.layout(), vertPush, fragPush);
-				}
-				drawPriorityRanges(cmd, slotFirstVertex, priorityColorPipeline.layout(), vertPush, fragPush);
-
-				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, priorityDepthPipeline.handle());
-				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-					priorityDepthPipeline.layout(), 0, stack.longs(descriptorSet), null);
-				if (!repushConstantsEveryDraw)
-				{
-					drawEmitter.pushConstants(cmd, priorityDepthPipeline.layout(), vertPush, fragPush);
-				}
-				drawPriorityRanges(cmd, slotFirstVertex, priorityDepthPipeline.layout(), vertPush, fragPush);
-			}
-
-			// Skybox LAST: the dome covers the whole screen, so drawing it
-			// after the scene lets the depth test (write-off, test-on
-			// pipeline) kill every fragment terrain already covered instead
-			// of shading the full screen and overdrawing it.
-			if (skyboxEnd > skyboxStart)
-			{
-				float[] skyboxMvp = mvp.clone();
-				Mat4Ops.mul(skyboxMvp, Mat4Ops.translate(cameraX, cameraY, cameraZ));
-
-				ByteBuffer skyboxVertPush = stack.malloc(96);
-				Mat4Ops.writeTo(skyboxVertPush, skyboxMvp);
-				skyboxVertPush.position(64);
-				skyboxVertPush.putFloat(cameraX);
-				skyboxVertPush.putFloat(cameraZ);
-				skyboxVertPush.putFloat(drawDistanceTiles * 128f);
-				skyboxVertPush.putFloat(0f);
-				skyboxVertPush.putInt(tick).putInt(0).putInt(0).putInt(0);
-				skyboxVertPush.flip();
-
-				bindArena(cmd, vbuf.staticDrawHandle());
-				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipeline.handle());
-				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-					skyboxPipeline.layout(), 0, stack.longs(descriptorSet), null);
-				if (!repushConstantsEveryDraw)
-				{
-					drawEmitter.pushConstants(cmd, skyboxPipeline.layout(), skyboxVertPush, fragPush);
-				}
-				drawEmitter.drawRange(cmd, skyboxStart, skyboxEnd, skipScratch, 0, false,
-					staticFirstVertex, skyboxPipeline.layout(), skyboxVertPush, fragPush);
-			}
+			computeZoneCullRange(cameraX, cameraZ, drawDistanceTiles, fogDepthTiles);
+			recordLayerDraws(cmd, stack, vertPush, fragPush, slot, slotFirstVertex, skipPairs);
+			recordPriorityPasses(cmd, stack, vertPush, fragPush, slotFirstVertex);
+			recordSkybox(cmd, stack, mvp, cameraX, cameraY, cameraZ, drawDistanceTiles, tick, fragPush);
 		}
+	}
+
+	/** Vertex push (96 bytes): mat4 mvp + vec4 fogVtx + ivec4 (tick, entity placement). */
+	private void fillSceneVertPush(ByteBuffer buf, float[] mvp,
+		float cameraX, float cameraZ, float drawDistanceTiles, float fogDepthTiles,
+		int tick, int entityTx, int entityTz, int entityYawJau)
+	{
+		Mat4Ops.writeTo(buf, mvp);
+		buf.position(64);
+		buf.putFloat(cameraX);
+		buf.putFloat(cameraZ);
+		buf.putFloat(drawDistanceTiles * 128f);
+		buf.putFloat(fogDepthTiles * 128f);
+		buf.putInt(tick).putInt(entityTx).putInt(entityTz).putInt(entityYawJau);
+		buf.flip();
+	}
+
+	/**
+	 * Fragment push (32 bytes at offset 96):
+	 *   vec4 fogFrag    = (fogR, fogG, fogB, brightness)
+	 *   vec4 fragExtras = (textureLightMode, colorBlindMode, colorBlindIntensity, smoothBandingMode)
+	 * The alpha phase passes {@code 10 + smoothBanding} as the mode — the
+	 * shader decodes &ge;10 as "blended pass".
+	 */
+	private void fillSceneFragPush(ByteBuffer buf, float fogR, float fogG, float fogB, float brightness,
+		float textureLightMode, int colorBlindMode, float colorBlindIntensity, float smoothBandingMode)
+	{
+		buf.putFloat(fogR).putFloat(fogG).putFloat(fogB).putFloat(brightness);
+		buf.putFloat(textureLightMode);
+		buf.putFloat((float) colorBlindMode);
+		buf.putFloat(colorBlindIntensity);
+		buf.putFloat(smoothBandingMode);
+		buf.flip();
+	}
+
+	/** Grows {@link #skipScratch} to fit and fills it with the hidden-roof
+	 *  vertex ranges; returns the pair count. */
+	private int buildRoofSkipPairs()
+	{
+		if (skipScratch.length < roofRanges.requiredSkipPairCapacity())
+		{
+			skipScratch = java.util.Arrays.copyOf(skipScratch, roofRanges.requiredSkipPairCapacity());
+		}
+		return roofRanges.buildSkipPairs(hideRoofIds, skipScratch);
+	}
+
+	/**
+	 * Zone-radius culling, matching stock (the engine only invokes zones
+	 * inside the draw distance); writes the {@code cull*} window fields both
+	 * record phases draw from. Sub-worldview renderers receive the TOPLEVEL
+	 * camera, meaningless in their local zone grid, so they force the full
+	 * range ({@link #cameraRadiusCull} false) and rely on the frustum cull.
+	 * -Dvkgpu.fullSceneDraw=true is the escape hatch if a culling artifact
+	 * ever shows up.
+	 */
+	private void computeZoneCullRange(float cameraX, float cameraZ, float drawDistanceTiles, float fogDepthTiles)
+	{
+		int radiusTiles = (int) Math.ceil(drawDistanceTiles + fogDepthTiles + 2f);
+		int radiusZones = Math.max(1, (radiusTiles + ZONE_SIZE - 1) / ZONE_SIZE);
+		boolean fullZoneRange = FULL_SCENE_DRAW || !cameraRadiusCull;
+		int sceneEnd = capturedSceneOrigin + capturedSceneSize;
+		int camTileX = clamp((int) Math.floor(cameraX / 128f), capturedSceneOrigin, sceneEnd - 1);
+		int camTileZ = clamp((int) Math.floor(cameraZ / 128f), capturedSceneOrigin, sceneEnd - 1);
+		int camZoneX = (camTileX - capturedSceneOrigin) / ZONE_SIZE;
+		int camZoneZ = (camTileZ - capturedSceneOrigin) / ZONE_SIZE;
+		cullFullZoneRange = fullZoneRange;
+		cullMinZoneX = fullZoneRange ? 0 : Math.max(0, camZoneX - radiusZones);
+		cullMaxZoneX = fullZoneRange ? ZONES_PER_SIDE - 1 : Math.min(ZONES_PER_SIDE - 1, camZoneX + radiusZones);
+		cullMinZoneZ = fullZoneRange ? 0 : Math.max(0, camZoneZ - radiusZones);
+		cullMaxZoneZ = fullZoneRange ? ZONES_PER_SIDE - 1 : Math.min(ZONES_PER_SIDE - 1, camZoneZ + radiusZones);
+	}
+
+	private void recordLayerDraws(VkCommandBuffer cmd, MemoryStack stack,
+		ByteBuffer vertPush, ByteBuffer fragPush, int slot, int slotFirstVertex, int skipPairs)
+	{
+		ScenePipeline boundPipeline = null;
+		final int loMin = minPlane;
+		final int loCur = currentPlane;
+		final int loMax = maxPlane;
+		int layerStart = skyboxEnd > skyboxStart ? skyboxEnd : 0;
+		for (int i = 0; i < LAYER_COUNT; i++)
+		{
+			int regionEnd = i == LAYER_COUNT - 1 ? vertexCount : regionEnds[i];
+			if (regionEnd <= layerStart)
+			{
+				layerStart = regionEnd;
+				continue;
+			}
+			// Translucent statics belong to the blended pass.
+			if (LAYERS[i] == Layer.STATIC_ALPHA)
+			{
+				layerStart = regionEnd;
+				continue;
+			}
+
+			ScenePipeline want = (wireframe[i] && linePipeline != null) ? linePipeline : fillPipeline;
+			if (want != boundPipeline)
+			{
+				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, want.handle());
+				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+					want.layout(), 0, stack.longs(descriptorSet), null);
+				if (!repushConstantsEveryDraw)
+				{
+					drawEmitter.pushConstants(cmd, want.layout(), vertPush, fragPush);
+				}
+				boundPipeline = want;
+			}
+
+			if (LAYERS[i] == Layer.DYNAMIC)
+			{
+				int dynamicStart = overlayNextVertex[slot];
+				int dynamicEnd = dynamicOpaqueEnd >= dynamicStart ? Math.min(dynamicOpaqueEnd, regionEnd) : regionEnd;
+				bindArena(cmd, vbuf.handle());
+				drawEmitter.drawRange(cmd, dynamicStart, dynamicEnd, priorityRanges.skipPairs(), priorityRanges.count(), priorityRanges.count() > 0, slotFirstVertex,
+					want.layout(), vertPush, fragPush);
+			}
+			else
+			{
+				drawStaticLayerPlanes(cmd, i, layerStart, slot, slotFirstVertex, skipPairs,
+					loMin, loCur, loMax, want.layout(), vertPush, fragPush);
+			}
+			layerStart = regionEnd;
+		}
+	}
+
+	/** Static layers emit plane-major. Draw one plane at a time so roof
+	 *  skips only affect planes above the player; current and lower planes
+	 *  must remain intact or buildings get chopped when their roof id is
+	 *  hidden. */
+	private void drawStaticLayerPlanes(VkCommandBuffer cmd, int layer, int layerStart,
+		int slot, int slotFirstVertex, int skipPairs, int loMin, int loCur, int loMax,
+		long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
+	{
+		for (int p = loMin; p <= loMax; p++)
+		{
+			bindArena(cmd, vbuf.staticDrawHandle());
+			zoneDrawScheduler.drawStaticPlane(cmd, layer, p, layerStart,
+				cullFullZoneRange, cullMinZoneX, cullMaxZoneX, cullMinZoneZ, cullMaxZoneZ,
+				skipScratch, skipPairs, p > loCur,
+				slot, 0, pipelineLayout, vertPush, fragPush);
+			bindArena(cmd, vbuf.handle());
+			zoneDrawScheduler.drawOverlayPlane(cmd, layer, p, cullMinZoneX, cullMaxZoneX, cullMinZoneZ, cullMaxZoneZ,
+				skipScratch, skipPairs, p > loCur,
+				slot, slotFirstVertex, pipelineLayout, vertPush, fragPush);
+		}
+	}
+
+	/** Sorted-priority renderables draw twice: color with depth-test only,
+	 *  then a depth-only pass (mirrors stock's vaoPO ordering). */
+	private void recordPriorityPasses(VkCommandBuffer cmd, MemoryStack stack,
+		ByteBuffer vertPush, ByteBuffer fragPush, int slotFirstVertex)
+	{
+		if (priorityRanges.count() == 0)
+		{
+			return;
+		}
+		bindArena(cmd, vbuf.handle());
+		recordPriorityPass(cmd, stack, priorityColorPipeline, vertPush, fragPush, slotFirstVertex);
+		recordPriorityPass(cmd, stack, priorityDepthPipeline, vertPush, fragPush, slotFirstVertex);
+	}
+
+	private void recordPriorityPass(VkCommandBuffer cmd, MemoryStack stack, ScenePipeline pipeline,
+		ByteBuffer vertPush, ByteBuffer fragPush, int slotFirstVertex)
+	{
+		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.handle());
+		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+			pipeline.layout(), 0, stack.longs(descriptorSet), null);
+		if (!repushConstantsEveryDraw)
+		{
+			drawEmitter.pushConstants(cmd, pipeline.layout(), vertPush, fragPush);
+		}
+		drawPriorityRanges(cmd, slotFirstVertex, pipeline.layout(), vertPush, fragPush);
+	}
+
+	/** Skybox LAST: the dome covers the whole screen, so drawing it after the
+	 *  scene lets the depth test (write-off, test-on pipeline) kill every
+	 *  fragment terrain already covered instead of shading the full screen
+	 *  and overdrawing it. */
+	private void recordSkybox(VkCommandBuffer cmd, MemoryStack stack, float[] mvp,
+		float cameraX, float cameraY, float cameraZ, float drawDistanceTiles, int tick, ByteBuffer fragPush)
+	{
+		if (skyboxEnd <= skyboxStart)
+		{
+			return;
+		}
+		float[] skyboxMvp = mvp.clone();
+		Mat4Ops.mul(skyboxMvp, Mat4Ops.translate(cameraX, cameraY, cameraZ));
+
+		ByteBuffer skyboxVertPush = stack.malloc(96);
+		fillSceneVertPush(skyboxVertPush, skyboxMvp, cameraX, cameraZ, drawDistanceTiles, 0f, tick, 0, 0, 0);
+
+		bindArena(cmd, vbuf.staticDrawHandle());
+		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipeline.handle());
+		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+			skyboxPipeline.layout(), 0, stack.longs(descriptorSet), null);
+		if (!repushConstantsEveryDraw)
+		{
+			drawEmitter.pushConstants(cmd, skyboxPipeline.layout(), skyboxVertPush, fragPush);
+		}
+		drawEmitter.drawRange(cmd, skyboxStart, skyboxEnd, skipScratch, 0, false,
+			0, skyboxPipeline.layout(), skyboxVertPush, fragPush);
 	}
 
 	/**
@@ -1508,53 +1567,20 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		if (skipAlphaPass || vertexCount == 0) return;
 		final int slot = sync.currentFrame();
 		final int slotFirstVertex = maxStaticVertices + slot * maxFrameVertices - staticVertexCount();
-		final int staticFirstVertex = 0;
 		boundVertexBuffer = VK_NULL_HANDLE;
 		bindArena(cmd, vbuf.staticDrawHandle());
 		zoneDrawScheduler.setZoneVisibility(computeZoneFrustum(mvp));
 		try (MemoryStack stack = stackPush())
 		{
-
 			ByteBuffer vertPush = stack.malloc(96);
-			Mat4Ops.writeTo(vertPush, mvp);
-			vertPush.position(64);
-			vertPush.putFloat(cameraX);
-			vertPush.putFloat(cameraZ);
-			vertPush.putFloat(drawDistanceTiles * 128f);
-			vertPush.putFloat(fogDepthTiles * 128f);
-			vertPush.putInt(tick).putInt(entityTx).putInt(entityTz).putInt(entityYawJau);
-			vertPush.flip();
-
+			fillSceneVertPush(vertPush, mvp, cameraX, cameraZ, drawDistanceTiles, fogDepthTiles,
+				tick, entityTx, entityTz, entityYawJau);
 			ByteBuffer alphaFragPush = stack.malloc(32);
-			alphaFragPush.putFloat(fogR).putFloat(fogG).putFloat(fogB).putFloat(brightness);
-			alphaFragPush.putFloat(textureLightMode);
-			alphaFragPush.putFloat((float) colorBlindMode);
-			alphaFragPush.putFloat(colorBlindIntensity);
-			alphaFragPush.putFloat(10f + smoothBanding);
-			alphaFragPush.flip();
+			fillSceneFragPush(alphaFragPush, fogR, fogG, fogB, brightness,
+				textureLightMode, colorBlindMode, colorBlindIntensity, 10f + smoothBanding);
 
-			if (skipScratch.length < roofRanges.requiredSkipPairCapacity())
-			{
-				skipScratch = java.util.Arrays.copyOf(skipScratch, roofRanges.requiredSkipPairCapacity());
-			}
-			int skipPairs = roofRanges.buildSkipPairs(hideRoofIds, skipScratch);
-
-			final int loMin = minPlane;
-			final int loCur = currentPlane;
-			final int loMax = maxPlane;
-			// Mirrors recordOpaque's zone-radius culling.
-			int radiusTiles = (int) Math.ceil(drawDistanceTiles + fogDepthTiles + 2f);
-			int radiusZones = Math.max(1, (radiusTiles + ZONE_SIZE - 1) / ZONE_SIZE);
-			boolean fullZoneRange = FULL_SCENE_DRAW || !cameraRadiusCull;
-			int sceneEnd = capturedSceneOrigin + capturedSceneSize;
-			int camTileX = clamp((int) Math.floor(cameraX / 128f), capturedSceneOrigin, sceneEnd - 1);
-			int camTileZ = clamp((int) Math.floor(cameraZ / 128f), capturedSceneOrigin, sceneEnd - 1);
-			int camZoneX = (camTileX - capturedSceneOrigin) / ZONE_SIZE;
-			int camZoneZ = (camTileZ - capturedSceneOrigin) / ZONE_SIZE;
-			int minZoneX = fullZoneRange ? 0 : Math.max(0, camZoneX - radiusZones);
-			int maxZoneX = fullZoneRange ? ZONES_PER_SIDE - 1 : Math.min(ZONES_PER_SIDE - 1, camZoneX + radiusZones);
-			int minZoneZ = fullZoneRange ? 0 : Math.max(0, camZoneZ - radiusZones);
-			int maxZoneZ = fullZoneRange ? ZONES_PER_SIDE - 1 : Math.min(ZONES_PER_SIDE - 1, camZoneZ + radiusZones);
+			int skipPairs = buildRoofSkipPairs();
+			computeZoneCullRange(cameraX, cameraZ, drawDistanceTiles, fogDepthTiles);
 
 			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, alphaPipeline.handle());
 			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -1563,9 +1589,9 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			{
 				drawEmitter.pushConstants(cmd, alphaPipeline.layout(), vertPush, alphaFragPush);
 			}
-			drawAlphaPass(cmd, loMin, loMax, fullZoneRange, minZoneX, maxZoneX, minZoneZ, maxZoneZ,
-				skipScratch, skipPairs, loCur,
-				slot, staticFirstVertex, slotFirstVertex, alphaPipeline.layout(), vertPush, alphaFragPush);
+			drawAlphaPass(cmd, minPlane, maxPlane, cullFullZoneRange, cullMinZoneX, cullMaxZoneX, cullMinZoneZ, cullMaxZoneZ,
+				skipScratch, skipPairs, currentPlane,
+				slot, 0, slotFirstVertex, alphaPipeline.layout(), vertPush, alphaFragPush);
 		}
 	}
 
