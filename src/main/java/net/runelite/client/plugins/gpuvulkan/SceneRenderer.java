@@ -85,6 +85,13 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	private static final int SCENE_OFFSET = (Constants.EXTENDED_SCENE_SIZE - Constants.SCENE_SIZE) / 2;
 	/** False for sub-worldview renderers — only the top-level scene owns a skybox dome. */
 	private final boolean emitSkybox;
+	/** Zone-radius culling needs the camera in this renderer's zone space.
+	 *  Sub-worldview passes receive the TOPLEVEL camera (fog is computed in
+	 *  toplevel space), so a sub renderer centering its zone window on it
+	 *  culls arbitrary zones — ship hulls vanish while engine-invoked
+	 *  dynamics (sails, crew) keep drawing. Sub scenes are entity-sized;
+	 *  the per-pass frustum cull against the composed MVP is sufficient. */
+	private final boolean cameraRadiusCull;
 
 	private final VulkanDevice device;
 	private final FrameSync sync;
@@ -236,15 +243,18 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			DEFAULT_STATIC_VERTICES, DEFAULT_FRAME_VERTICES, true);
 	}
 
+	/** {@code topLevel} is false for sub-worldview renderers: no skybox
+	 *  emission and no camera-radius zone culling (see cameraRadiusCull). */
 	SceneRenderer(VulkanDevice device, FrameSync sync,
 		RenderPass renderPass, TextureArray textureArray,
 		DrawCallbackStats stats,
-		int maxStaticVertices, int maxFrameVertices, boolean emitSkybox)
+		int maxStaticVertices, int maxFrameVertices, boolean topLevel)
 	{
 		this.maxStaticVertices = maxStaticVertices;
 		this.maxFrameVertices = maxFrameVertices;
 		this.overlayHighWaterVertices = maxFrameVertices / 2;
-		this.emitSkybox = emitSkybox;
+		this.emitSkybox = topLevel;
+		this.cameraRadiusCull = topLevel;
 		this.writeVertexLimit = maxStaticVertices;
 		this.device = device;
 		this.sync = sync;
@@ -1358,7 +1368,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			// it every frame halves FPS vs the radius. The old "bad-tile
 			// black-scene" caution gets an escape hatch instead of a
 			// permanent full draw: -Dvkgpu.fullSceneDraw=true reverts.
-			boolean fullZoneRange = FULL_SCENE_DRAW;
+			boolean fullZoneRange = FULL_SCENE_DRAW || !cameraRadiusCull;
 			int sceneEnd = capturedSceneOrigin + capturedSceneSize;
 			int camTileX = clamp((int) Math.floor(cameraX / 128f), capturedSceneOrigin, sceneEnd - 1);
 			int camTileZ = clamp((int) Math.floor(cameraZ / 128f), capturedSceneOrigin, sceneEnd - 1);
@@ -1535,7 +1545,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			// Mirrors recordOpaque's zone-radius culling.
 			int radiusTiles = (int) Math.ceil(drawDistanceTiles + fogDepthTiles + 2f);
 			int radiusZones = Math.max(1, (radiusTiles + ZONE_SIZE - 1) / ZONE_SIZE);
-			boolean fullZoneRange = FULL_SCENE_DRAW;
+			boolean fullZoneRange = FULL_SCENE_DRAW || !cameraRadiusCull;
 			int sceneEnd = capturedSceneOrigin + capturedSceneSize;
 			int camTileX = clamp((int) Math.floor(cameraX / 128f), capturedSceneOrigin, sceneEnd - 1);
 			int camTileZ = clamp((int) Math.floor(cameraZ / 128f), capturedSceneOrigin, sceneEnd - 1);
