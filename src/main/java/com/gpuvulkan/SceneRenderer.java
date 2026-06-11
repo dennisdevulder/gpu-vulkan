@@ -607,10 +607,8 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 
 	void captureScene(Scene scene)
 	{
-		// Dense regions can exceed the static arena (observed: ~5.5M verts at
-		// Lumbridge with full extended load vs the 5M default — overflow
-		// silently dropped the trailing layers, so whole staircases and wall
-		// runs vanished). On overflow, grow to measured demand and recapture.
+		// Overflow silently truncates trailing layers — grow to measured
+		// demand and recapture instead.
 		for (int attempt = 0; ; attempt++)
 		{
 			captureSceneOnce(scene);
@@ -1403,13 +1401,9 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		buf.flip();
 	}
 
-	/**
-	 * Fragment push (32 bytes at offset 96):
-	 *   vec4 fogFrag    = (fogR, fogG, fogB, brightness)
-	 *   vec4 fragExtras = (textureLightMode, colorBlindMode, colorBlindIntensity, smoothBandingMode)
-	 * The alpha phase passes {@code 10 + smoothBanding} as the mode — the
-	 * shader decodes &ge;10 as "blended pass".
-	 */
+	// Fragment push (32 bytes at offset 96): fogFrag(rgb, brightness) +
+	// fragExtras(textureLightMode, colorBlind mode/intensity, banding mode;
+	// the alpha phase encodes its pass as 10+smoothBanding).
 	private void fillSceneFragPush(ByteBuffer buf, float fogR, float fogG, float fogB, float brightness,
 		float textureLightMode, int colorBlindMode, float colorBlindIntensity, float smoothBandingMode)
 	{
@@ -1432,15 +1426,10 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		return roofRanges.buildSkipPairs(hideRoofIds, skipScratch);
 	}
 
-	/**
-	 * Zone-radius culling, matching stock (the engine only invokes zones
-	 * inside the draw distance); writes the {@code cull*} window fields both
-	 * record phases draw from. Sub-worldview renderers receive the TOPLEVEL
-	 * camera, meaningless in their local zone grid, so they force the full
-	 * range ({@link #cameraRadiusCull} false) and rely on the frustum cull.
-	 * -Dvkgpu.fullSceneDraw=true is the escape hatch if a culling artifact
-	 * ever shows up.
-	 */
+	// Stock-matching zone-radius cull window (cull* fields). Sub-worldview
+	// renderers get the TOPLEVEL camera — meaningless in their local grid —
+	// so cameraRadiusCull=false forces the full range (frustum cull only).
+	// Escape hatch: -Dvkgpu.fullSceneDraw=true.
 	private void computeZoneCullRange(float cameraX, float cameraZ, float drawDistanceTiles, float fogDepthTiles)
 	{
 		int radiusTiles = (int) Math.ceil(drawDistanceTiles + fogDepthTiles + 2f);

@@ -89,15 +89,9 @@ final class MacOSPlatformSurface implements PlatformSurface
 		}
 		log.info("Attached CAMetalLayer 0x{}", Long.toHexString(caMetalLayer));
 
-		// Java-side nudge to trigger AWT's CALayer layout pass. Dispatching a
-		// synthetic COMPONENT_RESIZED to the canvas reuses the same code path
-		// a real window resize uses — AWT sizes our JAWT-installed CALayer to
-		// match the Canvas widget's bounds. Without this nudge, AWT defers
-		// layout against the freshly-installed layer until something else
-		// invalidates the canvas (which is why the user previously had to
-		// resize the window after enabling the plugin). No native code is
-		// touched here — only AWT's own event dispatch — so it can't trip
-		// MoltenVK the way directly setting CALayer.bounds did.
+		// Synthetic COMPONENT_RESIZED so AWT lays out the freshly-installed
+		// CALayer now instead of deferring until the next canvas invalidation.
+		// AWT-only dispatch — setting CALayer.bounds directly trips MoltenVK.
 		javax.swing.SwingUtilities.invokeLater(() ->
 		{
 			canvas.dispatchEvent(new java.awt.event.ComponentEvent(
