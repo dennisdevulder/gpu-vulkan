@@ -3,7 +3,7 @@
  *
  * Plain Java/Groovy Gradle build. Shaders compile at build time via
  * glslangValidator and are placed on the classpath at
- * /net/runelite/client/plugins/gpuvulkan/.
+ * /com/gpuvulkan/.
  */
 
 plugins {
@@ -25,7 +25,7 @@ repositories {
 	mavenCentral()
 }
 
-group = 'net.runelite.client.plugins.gpuvulkan'
+group = 'com.gpuvulkan'
 version = '0.1.0'
 
 java {
@@ -34,7 +34,7 @@ java {
 }
 
 def runeLiteVersion = '1.12.28'
-def pluginMainClass = 'net.runelite.client.plugins.gpuvulkan.GpuVulkanPluginTest'
+def pluginMainClass = 'com.gpuvulkan.GpuVulkanPluginTest'
 // LWJGL core comes from runelite-client at runtime (3.3.2 classes AND
 // natives; RuneLite's plugin classloader is child-first, so bundling a
 // different core would shadow the client's classes against its older
@@ -99,7 +99,7 @@ dependencies {
 // installed the tasks below regenerate them in place; without it they skip
 // and the committed binaries ship as-is.
 def gpuVulkanShaderSrc = file('src/main/shaders/gpuvulkan')
-def gpuVulkanResourceOut = file('src/main/resources/net/runelite/client/plugins/gpuvulkan')
+def gpuVulkanResourceOut = file('src/main/resources/com/gpuvulkan')
 def gpuVulkanNativeSrc = file('src/main/native/rlmtl.m')
 def gpuVulkanNativeOut = new File(gpuVulkanResourceOut, 'librlmtl.dylib')
 def glslangValidator = providers.environmentVariable('GLSLANG').getOrElse('glslangValidator')

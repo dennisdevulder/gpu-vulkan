@@ -131,14 +131,14 @@ static void rlmtlDetachMetalLayer(void)
 }
 
 JNIEXPORT void JNICALL
-Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nDetachMetalLayer(
+Java_com_gpuvulkan_MacOSMetalHelper_nDetachMetalLayer(
     JNIEnv* env, jclass cls)
 {
     rlmtlDetachMetalLayer();
 }
 
 JNIEXPORT void JNICALL
-Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nResizeMetalLayer(
+Java_com_gpuvulkan_MacOSMetalHelper_nResizeMetalLayer(
     JNIEnv* env, jclass cls, jint widthPoints, jint heightPoints, jdouble scaleHint)
 {
     CAMetalLayer* layer = gMetalLayer;
@@ -191,7 +191,7 @@ Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nResizeMetalLayer(
  * evicted (canvas resize) or the renderer is closed.
  */
 JNIEXPORT void JNICALL
-Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nRetainObject(
+Java_com_gpuvulkan_MacOSMetalHelper_nRetainObject(
     JNIEnv* env, jclass cls, jlong ptr)
 {
     id obj = (id)(uintptr_t) ptr;
@@ -199,7 +199,7 @@ Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nRetainObject(
 }
 
 JNIEXPORT void JNICALL
-Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nReleaseObject(
+Java_com_gpuvulkan_MacOSMetalHelper_nReleaseObject(
     JNIEnv* env, jclass cls, jlong ptr)
 {
     id obj = (id)(uintptr_t) ptr;
@@ -234,7 +234,7 @@ Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nReleaseObject(
  * 1-second internal timeout.
  */
 JNIEXPORT jlongArray JNICALL
-Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nNextDrawable(
+Java_com_gpuvulkan_MacOSMetalHelper_nNextDrawable(
     JNIEnv* env, jclass cls)
 {
     CAMetalLayer* layer = gMetalLayer;
@@ -290,7 +290,7 @@ Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nNextDrawable(
  * otherwise we'd present a half-rendered drawable.
  */
 JNIEXPORT void JNICALL
-Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nPresentDrawable(
+Java_com_gpuvulkan_MacOSMetalHelper_nPresentDrawable(
     JNIEnv* env, jclass cls, jlong drawableHandle, jlong mtlQueueHandle)
 {
     id<CAMetalDrawable> drawable = (id<CAMetalDrawable>) (uintptr_t) drawableHandle;
@@ -323,7 +323,7 @@ Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nPresentDrawable(
 }
 
 JNIEXPORT jlong JNICALL
-Java_net_runelite_client_plugins_gpuvulkan_MacOSMetalHelper_nAttachMetalLayer(
+Java_com_gpuvulkan_MacOSMetalHelper_nAttachMetalLayer(
     JNIEnv* env, jclass cls, jobject canvas, jboolean vsync,
     jint initialWidthPoints, jint initialHeightPoints, jdouble scaleHint)
 {
