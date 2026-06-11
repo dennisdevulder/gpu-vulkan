@@ -263,10 +263,11 @@ final class ScenePipeline implements AutoCloseable
 			.pPushConstantRanges(pc);
 
 		LongBuffer pLayout = stack.mallocLong(1);
-		if (vkCreatePipelineLayout(device.handle(), layoutInfo, null, pLayout) != VK_SUCCESS)
+		int layoutResult = vkCreatePipelineLayout(device.handle(), layoutInfo, null, pLayout);
+		if (layoutResult != VK_SUCCESS)
 		{
 			vkDestroyDescriptorSetLayout(device.handle(), descriptorSetLayout, null);
-			throw new RuntimeException("vkCreatePipelineLayout (scene) failed");
+			throw Vk.fail("vkCreatePipelineLayout (scene)", layoutResult);
 		}
 		return pLayout.get(0);
 	}
@@ -315,7 +316,7 @@ final class ScenePipeline implements AutoCloseable
 		{
 			vkDestroyPipelineLayout(device.handle(), pipelineLayout, null);
 			vkDestroyDescriptorSetLayout(device.handle(), descriptorSetLayout, null);
-			throw new RuntimeException("vkCreateGraphicsPipelines (scene) failed: " + r);
+			throw Vk.fail("vkCreateGraphicsPipelines (scene)", r);
 		}
 		return pPipe.get(0);
 	}

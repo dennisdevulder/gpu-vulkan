@@ -104,7 +104,7 @@ final class Buffer implements AutoCloseable
 			if (result != VK_SUCCESS)
 			{
 				vkDestroyBuffer(device.handle(), handle, null);
-				throw new RuntimeException("vkAllocateMemory failed: " + result);
+				throw Vk.fail("vkAllocateMemory", result);
 			}
 			memoryPropertyFlags = memoryTypeFlags(device, memType, stack);
 			memory = pMem.get(0);

@@ -209,10 +209,11 @@ final class MetalDrawableSet implements AutoCloseable
 				.baseMipLevel(0).levelCount(1)
 				.baseArrayLayer(0).layerCount(1));
 		LongBuffer pView = stack.mallocLong(1);
-		if (vkCreateImageView(device.handle(), viewInfo, null, pView) != VK_SUCCESS)
+		int viewResult = vkCreateImageView(device.handle(), viewInfo, null, pView);
+		if (viewResult != VK_SUCCESS)
 		{
 			vkDestroyImage(device.handle(), image, null);
-			throw new RuntimeException("vkCreateImageView (imported MTLTexture) failed");
+			throw Vk.fail("vkCreateImageView (imported MTLTexture)", viewResult);
 		}
 		return pView.get(0);
 	}
@@ -233,11 +234,12 @@ final class MetalDrawableSet implements AutoCloseable
 			.height(height)
 			.layers(1);
 		LongBuffer pFb = stack.mallocLong(1);
-		if (vkCreateFramebuffer(device.handle(), fbInfo, null, pFb) != VK_SUCCESS)
+		int fbResult = vkCreateFramebuffer(device.handle(), fbInfo, null, pFb);
+		if (fbResult != VK_SUCCESS)
 		{
 			vkDestroyImageView(device.handle(), view, null);
 			vkDestroyImage(device.handle(), image, null);
-			throw new RuntimeException("vkCreateFramebuffer (drawable) failed");
+			throw Vk.fail("vkCreateFramebuffer (drawable)", fbResult);
 		}
 		return pFb.get(0);
 	}

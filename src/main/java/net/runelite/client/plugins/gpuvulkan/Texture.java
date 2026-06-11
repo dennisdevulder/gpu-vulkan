@@ -106,10 +106,11 @@ final class Texture implements AutoCloseable
 			.memoryTypeIndex(memType);
 
 		LongBuffer pMem = stack.mallocLong(1);
-		if (vkAllocateMemory(device.handle(), alloc, null, pMem) != VK_SUCCESS)
+		int allocResult = vkAllocateMemory(device.handle(), alloc, null, pMem);
+		if (allocResult != VK_SUCCESS)
 		{
 			vkDestroyImage(device.handle(), image, null);
-			throw new RuntimeException("vkAllocateMemory failed (texture)");
+			throw Vk.fail("vkAllocateMemory (texture)", allocResult);
 		}
 		long mem = pMem.get(0);
 		Vk.check("vkBindImageMemory", vkBindImageMemory(device.handle(), image, mem, 0));

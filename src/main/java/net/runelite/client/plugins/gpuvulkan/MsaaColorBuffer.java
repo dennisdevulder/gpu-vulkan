@@ -114,10 +114,11 @@ final class MsaaColorBuffer implements AutoCloseable
 				.memoryTypeIndex(memType);
 
 			LongBuffer pMem = stack.mallocLong(1);
-			if (vkAllocateMemory(device.handle(), alloc, null, pMem) != VK_SUCCESS)
+			int allocResult = vkAllocateMemory(device.handle(), alloc, null, pMem);
+			if (allocResult != VK_SUCCESS)
 			{
 				vkDestroyImage(device.handle(), image, null);
-				throw new RuntimeException("vkAllocateMemory (msaa color) failed");
+				throw Vk.fail("vkAllocateMemory (msaa color)", allocResult);
 			}
 			memory = pMem.get(0);
 			Vk.check("vkBindImageMemory (msaa color)", vkBindImageMemory(device.handle(), image, memory, 0));

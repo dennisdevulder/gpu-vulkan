@@ -109,10 +109,11 @@ final class DepthBuffer implements AutoCloseable
 				.memoryTypeIndex(memType);
 
 			LongBuffer pMem = stack.mallocLong(1);
-			if (vkAllocateMemory(device.handle(), alloc, null, pMem) != VK_SUCCESS)
+			int allocResult = vkAllocateMemory(device.handle(), alloc, null, pMem);
+			if (allocResult != VK_SUCCESS)
 			{
 				vkDestroyImage(device.handle(), image, null);
-				throw new RuntimeException("vkAllocateMemory (depth) failed");
+				throw Vk.fail("vkAllocateMemory (depth)", allocResult);
 			}
 			memory = pMem.get(0);
 			Vk.check("vkBindImageMemory (depth)", vkBindImageMemory(device.handle(), image, memory, 0));

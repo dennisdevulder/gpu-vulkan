@@ -253,7 +253,7 @@ final class VulkanInstance implements AutoCloseable
 		if (r != VK_SUCCESS)
 		{
 			if (cb != null) cb.free();
-			throw new RuntimeException("vkCreateInstance failed: " + r);
+			throw Vk.fail("vkCreateInstance", r);
 		}
 		return new VkInstance(pInst.get(0), info);
 	}
