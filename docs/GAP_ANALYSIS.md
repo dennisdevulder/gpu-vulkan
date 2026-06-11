@@ -2,8 +2,8 @@
 
 Living document. Lists what stock OpenGL `GPU` does that we don't, with status.
 
-Last updated: 2026-06-10 (full re-audit against stock zone-based GpuPlugin;
-rows 4/5/8 corrected, rows 11-16 added).
+Last updated: 2026-06-11 (rows 13/14/15 closed; 14 had already landed in
+5fe860f half an hour after the previous doc update).
 
 ## Status
 
@@ -21,9 +21,9 @@ rows 4/5/8 corrected, rows 11-16 added).
 | 10| Exit-time Vulkan teardown                       | **Done** — JVM shutdown hook (`vkgpu-shutdown-watch`) now runs `vkDeviceWaitIdle` + `disposables.close()` against a static `activeInstance` reference. `draw()` gates on a `shuttingDown` flag to stop new frame submissions while the hook runs. Silences validation's "dispatch handle not found" at X-press. |
 | 11| Sub-worldview (WorldEntity) rendering           | **Implemented (untested in-game).** `SubWorldViewManager`: one small `SceneRenderer` per worldview (own vertex arena — the fbf75b8 clobber class is structurally impossible), entity placement from the engine's per-zone `FloatProjection`, clip via CPU-composed `world*entity` MVP, fog via shader-side world-XZ reconstruction (`scene.vert` misc.yzw). Dynamic models flow through the same `ModelSorter` path with the engine-composed projection. Draw order: all opaque (toplevel then subs), then all blended alpha. The `isTopLevelScene` checks remain as ROUTING (toplevel arena vs per-worldview renderer), not drops. Remaining: in-game verification on sailing content; scene-level `entityTint` (ghost ships) still unimplemented — no push-constant space, needs a different slot. |
 | 12| UI scaling filters                              | **Open.** Stock: NEAREST/LINEAR/MITCHELL/CATROM/XBR/HYBRID (`fragui.glsl`, `scale/*.glsl`). We always sample UI with LINEAR (`Texture.java:121-122`). Visible under stretched mode / HiDPI. |
-| 13| `hideUnrelatedMaps` is a dead toggle            | **Open.** Config item exists, `RegionManager` constructed but never invoked (`prepareScene` no-op, `GpuVulkanPlugin.java:1033-1039`). Wire it or hide the config item. |
-| 14| Draw distance doesn't cull geometry             | **Open (perf + visual delta).** `fullZoneRange = true` hardcoded (`SceneRenderer.java:1016`); drawDistance only drives fog + clickboxes. Stock never draws zones outside the radius. |
-| 15| Fog edge ignores expanded map chunks            | **Open (minor).** Stock scales `FOG_SCENE_EDGE_MIN/MAX` with `expandedMapLoadingChunks` (`vert.glsl:39-40`); we hardcode 1..103 (`scene.vert:51-52`), so expanded terrain past the core 104 tiles is fully fogged when fog is on. |
+| 13| `hideUnrelatedMaps` is a dead toggle            | **Done** — `prepareScene` now calls `RegionManager.prepare` (toplevel captures only, same as stock's `loadScene`). The old "too strong for a live Scene" caution was unfounded: stock runs the identical chunk math + identical `regions.txt` against the already-live scene at plugin start. Toggle takes effect on next scene load, matching stock (which has no config handler for it either). |
+| 14| Draw distance doesn't cull geometry             | **Done** (5fe860f) — both phases draw only zones within `drawDistance + fogDepth + 2` tiles of the camera; `-Dvkgpu.fullSceneDraw=true` restores the old full draw. This row was already closed when the 2026-06-10 re-audit was written; the commit landed 29 minutes after the doc update. |
+| 15| Fog edge ignores expanded map chunks            | **Done** — fog window edges now ride in a vec4 header prepended to the binding-1 UBO (`SceneUniforms.fogScene.xy`), written at scene capture from `client.getExpandedMapLoading()` with stock's formula `(-chunks*8+1)..(103+chunks*8)`. Header defaults to 1..103 before first capture. Sub-worldview captures don't touch it — fog is computed in toplevel space (scene.vert misc.yzw). |
 | 16| Static alpha not depth-sorted per frame         | **Open (minor/accepted).** Stock re-sorts zone alpha geometry every frame (`Zone.java:520`); we replay static layers in capture order and lean on alpha-to-coverage. Can mis-order overlapping transparent statics. |
 
 Minor shader deviations (footnote, not gaps): textured-face brightness applies
