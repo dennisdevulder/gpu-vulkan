@@ -45,13 +45,6 @@ public interface VulkanRenderContext
 
 	VulkanSceneRenderer createSceneRenderer();
 
-	/**
-	 * Vulkan video encode capability context. The context is always present,
-	 * but {@link VulkanEncodeContext#isAvailable()} may be false when the
-	 * current backend device was not created with encode queues/extensions.
-	 */
-	VulkanEncodeContext encode();
-
 	String deviceName();
 
 	long deviceHandle();

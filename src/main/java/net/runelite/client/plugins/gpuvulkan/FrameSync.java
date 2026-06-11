@@ -28,7 +28,6 @@ import java.nio.LongBuffer;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VkFenceCreateInfo;
 import org.lwjgl.vulkan.VkSemaphoreCreateInfo;
-import org.lwjgl.vulkan.VkSemaphoreTypeCreateInfo;
 
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK13.*;
@@ -56,12 +55,6 @@ final class FrameSync implements AutoCloseable
 	private final long[] inFlight = new long[FRAMES_IN_FLIGHT];
 	private long[] renderFinished;
 	private int currentFrame;
-	/** Timeline semaphore signalled with a monotonically increasing value on
-	 *  every graphics submit. Lets cross-queue consumers (video encode) order
-	 *  against a specific frame without touching the per-slot binary fences.
-	 *  VK_NULL_HANDLE unless the device was created with an encode queue. */
-	private long frameTimeline;
-	private long frameTimelineValue;
 
 	FrameSync(VulkanDevice device)
 	{
@@ -77,18 +70,6 @@ final class FrameSync implements AutoCloseable
 			{
 				imageAvailable[i] = createSemaphore(stack, semInfo);
 				inFlight[i] = createFence(stack, fenceInfo);
-			}
-
-			if (device.videoEncodeQueue() != null)
-			{
-				VkSemaphoreTypeCreateInfo type = VkSemaphoreTypeCreateInfo.calloc(stack)
-					.sType$Default()
-					.semaphoreType(VK_SEMAPHORE_TYPE_TIMELINE)
-					.initialValue(0);
-				VkSemaphoreCreateInfo timelineInfo = VkSemaphoreCreateInfo.calloc(stack)
-					.sType$Default()
-					.pNext(type.address());
-				frameTimeline = createSemaphore(stack, timelineInfo);
 			}
 		}
 		// renderFinished[] is per-swapchain-image and is sized via
@@ -150,22 +131,6 @@ final class FrameSync implements AutoCloseable
 		return currentFrame;
 	}
 
-	long frameTimeline()
-	{
-		return frameTimeline;
-	}
-
-	/** Value the NEXT graphics submit will signal on {@link #frameTimeline()}. */
-	long peekNextTimelineValue()
-	{
-		return frameTimelineValue + 1;
-	}
-
-	long advanceTimelineValue()
-	{
-		return ++frameTimelineValue;
-	}
-
 	void advance()
 	{
 		currentFrame = (currentFrame + 1) % FRAMES_IN_FLIGHT;
@@ -194,11 +159,6 @@ final class FrameSync implements AutoCloseable
 				if (s != VK_NULL_HANDLE) vkDestroySemaphore(device.handle(), s, null);
 			}
 			renderFinished = null;
-		}
-		if (frameTimeline != VK_NULL_HANDLE)
-		{
-			vkDestroySemaphore(device.handle(), frameTimeline, null);
-			frameTimeline = VK_NULL_HANDLE;
 		}
 	}
 
