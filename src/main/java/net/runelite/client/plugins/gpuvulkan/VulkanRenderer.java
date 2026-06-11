@@ -331,7 +331,7 @@ final class VulkanRenderer implements AutoCloseable
 		}
 		if (acq != VK_SUCCESS && acq != VK_SUBOPTIMAL_KHR)
 		{
-			throw new RuntimeException("vkAcquireNextImageKHR failed: " + acq);
+			throw Vk.fail("vkAcquireNextImageKHR", acq);
 		}
 		if (acq == VK_SUBOPTIMAL_KHR)
 		{
@@ -362,7 +362,7 @@ final class VulkanRenderer implements AutoCloseable
 		}
 		else if (present != VK_SUCCESS)
 		{
-			throw new RuntimeException("vkQueuePresentKHR failed: " + present);
+			throw Vk.fail("vkQueuePresentKHR", present);
 		}
 	}
 

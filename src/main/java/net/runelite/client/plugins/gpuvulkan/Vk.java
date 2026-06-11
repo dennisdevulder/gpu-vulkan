@@ -47,8 +47,15 @@ final class Vk
 	{
 		if (result != VK_SUCCESS)
 		{
-			throw new VulkanException(call + " failed: " + result);
+			throw fail(call, result);
 		}
+	}
+
+	/** Builds (without throwing) the failure for {@code call} — for sites
+	 *  that clean up partially created resources before throwing. */
+	static VulkanException fail(String call, int result)
+	{
+		return new VulkanException(call, result);
 	}
 
 	/** True iff {@code result == VK_SUCCESS}. */
@@ -66,10 +73,21 @@ final class Vk
 		}
 	}
 
-	/** Thrown by {@link #check(String, int)}. Plain {@code RuntimeException}
-	 *  subclass so callers can catch this specifically if they want to. */
+	/** Thrown by {@link #check(String, int)}; carries the raw {@code VK_*}
+	 *  code so callers can react to specific failures (device loss). */
 	static final class VulkanException extends RuntimeException
 	{
-		VulkanException(String message) { super(message); }
+		private final int result;
+
+		VulkanException(String call, int result)
+		{
+			super(call + " failed: " + result);
+			this.result = result;
+		}
+
+		int result()
+		{
+			return result;
+		}
 	}
 }
