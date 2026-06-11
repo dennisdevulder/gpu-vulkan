@@ -1238,7 +1238,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	 *  of the same tile — queuing again would double-emit once loaded. */
 	private void captureAlphaRenderable(Renderable r, int orient, int x, int y, int z)
 	{
-		if (r == null || r instanceof net.runelite.api.Actor) return;
+		if (r == null) return;
 		Model m = PendingRenderables.resolveModel(r);
 		if (m != null)
 		{
@@ -1249,13 +1249,16 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	private void captureRenderable(Renderable r, int orient, int x, int y, int z)
 	{
 		if (r == null) return;
-		if (r instanceof net.runelite.api.Actor) return;
 		Model m = PendingRenderables.resolveModel(r);
 		if (m == null)
 		{
-			// Model not streamed yet — retry until it can promote its zone
-			// through the per-slot overlay rebuild path.
-			pendingRenderables.add(r, orient, x, y, z, zoneForWorldPoint(x, z));
+			// DynamicObject whose animation pose isn't streamed yet — retry
+			// until it can promote its zone through the overlay rebuild path.
+			// Other model-less renderables are not zone-static; never queue.
+			if (r instanceof net.runelite.api.DynamicObject)
+			{
+				pendingRenderables.add(r, orient, x, y, z, zoneForWorldPoint(x, z));
+			}
 			return;
 		}
 		captureModel(m, orient, x, y, z);

@@ -44,11 +44,6 @@ final class PendingRenderables
 			Model model = entry.model;
 			if (model == null)
 			{
-				if (entry.renderable instanceof net.runelite.api.Actor)
-				{
-					i++;
-					continue;
-				}
 				model = resolveModel(entry.renderable);
 				if (model == null)
 				{
@@ -72,6 +67,11 @@ final class PendingRenderables
 		}
 	}
 
+	/** Stock's zone whitelist (SceneUploader.zoneRenderableSize): only Model
+	 *  and DynamicObject are zone-static. Anything else on a tile (Actor,
+	 *  Projectile, GraphicsObject) is engine-drawn per frame via
+	 *  drawDynamic/drawTemp — baking it into a zone freezes it at its
+	 *  capture pose until the next rebuild, which may never come. */
 	static Model resolveModel(Renderable renderable)
 	{
 		if (renderable instanceof Model)
@@ -82,7 +82,7 @@ final class PendingRenderables
 		{
 			return ((net.runelite.api.DynamicObject) renderable).getModelZbuf();
 		}
-		return renderable.getModel();
+		return null;
 	}
 
 	interface Sink
