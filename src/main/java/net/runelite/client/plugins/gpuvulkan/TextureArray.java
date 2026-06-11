@@ -193,21 +193,27 @@ final class TextureArray implements AutoCloseable
 	 *  out-of-range accesses, even with a runtime shader guard. */
 	private static final int ANIM_UBO_COUNT = 256;
 
+	/** std140 header preceding anim[]: vec4 fogScene (scene.vert). */
+	private static final int UBO_HEADER_BYTES = 16;
+
 	private Buffer buildAnimationUbo(Texture[] osrsTextures)
 	{
 		final int bytesPerEntry = 16; // std140: vec2 padded to vec4
-		long sizeBytes = (long) ANIM_UBO_COUNT * bytesPerEntry;
+		long sizeBytes = UBO_HEADER_BYTES + (long) ANIM_UBO_COUNT * bytesPerEntry;
 		Buffer ubo = new Buffer(device, sizeBytes,
 			VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
 			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 		ubo.mapPersistent();
 		ByteBuffer mapped = ubo.mappedByteBuffer().order(java.nio.ByteOrder.nativeOrder());
+		// fogScene header: default to the core-scene fog window (tiles 1..103);
+		// setFogSceneEdges widens it once the expanded-map extent is known.
+		mapped.putFloat(1f * 128f).putFloat(103f * 128f).putFloat(0).putFloat(0);
 		// Zero-fill so unused layers read (0,0,0,0).
 		for (int i = 0; i < ANIM_UBO_COUNT; i++)
 		{
 			mapped.putFloat(0).putFloat(0).putFloat(0).putFloat(0);
 		}
-		mapped.position(16); // skip layer 0 (white reserve)
+		mapped.position(UBO_HEADER_BYTES + 16); // skip layer 0 (white reserve)
 		int written = Math.min(osrsTextures.length, ANIM_UBO_COUNT - 1);
 		for (int i = 0; i < written; i++)
 		{
@@ -233,7 +239,19 @@ final class TextureArray implements AutoCloseable
 	}
 
 	long animationUboHandle() { return animationUbo.handle(); }
-	long animationUboSize()   { return (long) ANIM_UBO_COUNT * 16L; }
+	long animationUboSize()   { return UBO_HEADER_BYTES + (long) ANIM_UBO_COUNT * 16L; }
+
+	/** Fog window clamp edges in world units (scene.vert fogScene.xy),
+	 *  scaled with the engine's expanded-map-loading chunks like stock's
+	 *  FOG_SCENE_EDGE_MIN/MAX. Written at scene capture: an 8-byte coherent
+	 *  store of a value that only changes with the expanded-chunks config,
+	 *  so in-flight readers can't observe a meaningful mix. */
+	void setFogSceneEdges(float minWorld, float maxWorld)
+	{
+		ByteBuffer mapped = animationUbo.mappedByteBuffer().order(java.nio.ByteOrder.nativeOrder());
+		mapped.putFloat(0, minWorld);
+		mapped.putFloat(4, maxWorld);
+	}
 
 	long view() { return view; }
 	long sampler() { return sampler; }

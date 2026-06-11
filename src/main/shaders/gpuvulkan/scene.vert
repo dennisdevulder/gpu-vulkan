@@ -30,10 +30,15 @@ layout(push_constant) uniform PushConstants {
     ivec4 misc;
 } pc;
 
-// Per-texture-layer UV scroll vectors (texels per tick). Bound as set 0
-// binding 1, std140-padded to vec4 per entry. Layer 0 (white reserve) and
-// any non-animated texture have (0, 0).
-layout(set = 0, binding = 1, std140) uniform TextureAnimations {
+// Scene uniforms, set 0 binding 1.
+//   fogScene.xy = fog window clamp edges in world units: the scene-edge
+//                 rectangle scales with the engine's expanded-map-loading
+//                 chunks (stock vert.glsl FOG_SCENE_EDGE_MIN/MAX); .zw unused
+//   anim[]      = per-texture-layer UV scroll vectors (texels per tick),
+//                 std140-padded to vec4 per entry. Layer 0 (white reserve)
+//                 and any non-animated texture have (0, 0).
+layout(set = 0, binding = 1, std140) uniform SceneUniforms {
+    vec4 fogScene;
     vec4 anim[256];
 };
 
@@ -54,8 +59,6 @@ const float TILE_SIZE = 128.0;
 const float TEXTURE_ANIM_UNIT = 1.0 / 128.0;
 const float FOG_CORNER_ROUNDING = 1.5;
 const float FOG_CORNER_ROUNDING_SQUARED = FOG_CORNER_ROUNDING * FOG_CORNER_ROUNDING;
-const float FOG_SCENE_EDGE_MIN = 1.0 * TILE_SIZE;
-const float FOG_SCENE_EDGE_MAX = 103.0 * TILE_SIZE;
 
 float fogFactorLinear(float dist, float start, float end) {
     return 1.0 - clamp((dist - start) / (end - start), 0.0, 1.0);
@@ -134,10 +137,10 @@ void main() {
     float cameraZ = pc.fogVtx.y;
     float drawDistance = pc.fogVtx.z;
     float fogDepth = pc.fogVtx.w;
-    float fogWest  = max(FOG_SCENE_EDGE_MIN, cameraX - drawDistance);
-    float fogEast  = min(FOG_SCENE_EDGE_MAX, cameraX + drawDistance);
-    float fogSouth = max(FOG_SCENE_EDGE_MIN, cameraZ - drawDistance);
-    float fogNorth = min(FOG_SCENE_EDGE_MAX, cameraZ + drawDistance);
+    float fogWest  = max(fogScene.x, cameraX - drawDistance);
+    float fogEast  = min(fogScene.y, cameraX + drawDistance);
+    float fogSouth = max(fogScene.x, cameraZ - drawDistance);
+    float fogNorth = min(fogScene.y, cameraZ + drawDistance);
     float xDist = min(worldX - fogWest, fogEast - worldX);
     float zDist = min(worldZ - fogSouth, fogNorth - worldZ);
     float nearest = min(xDist, zDist);

@@ -1073,6 +1073,16 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			return;
 		}
 		prepareScene(scene);
+		if (textureArray != null)
+		{
+			// Stock scales the fog scene-edge window with the expanded-map
+			// extent (vert.glsl FOG_SCENE_EDGE_MIN/MAX); a fixed 1..103 window
+			// fogs all expanded terrain past the core scene.
+			int chunks = client.getExpandedMapLoading();
+			textureArray.setFogSceneEdges(
+				(-chunks * 8 + 1) * 128f,
+				(103 + chunks * 8) * 128f);
+		}
 		long start = stats.isEnabled() ? System.nanoTime() : 0L;
 		log.info("Vulkan recapture: base=({}, {}) worldView={} instance={}",
 			scene.getBaseX(), scene.getBaseY(), scene.getWorldViewId(), scene.isInstance());
