@@ -39,9 +39,8 @@ import org.lwjgl.vulkan.VkXlibSurfaceCreateInfoKHR;
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK13.VK_SUCCESS;
 
-/** Linux/X11 surface creation via {@code VK_KHR_xlib_surface}. JDKs running
- *  on Wayland sessions usually go through XWayland and present the canvas as
- *  an X window, so this path covers both. */
+/** Linux/X11 surface via {@code VK_KHR_xlib_surface}; Wayland JDKs go through
+ *  XWayland, so this covers both. */
 final class X11PlatformSurface implements PlatformSurface
 {
 	@Override

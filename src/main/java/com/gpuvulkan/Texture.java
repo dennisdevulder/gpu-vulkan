@@ -41,9 +41,6 @@ import static org.lwjgl.vulkan.VK13.*;
 /**
  * Device-local 2D texture with view + sampler. Tracks current image layout
  * so {@link #transitionLayout} can pick the correct stage/access masks.
- *
- * <p>M4 uses a single texture sized to the canvas, recreated when the canvas
- * resizes.
  */
 final class Texture implements AutoCloseable
 {
@@ -158,23 +155,8 @@ final class Texture implements AutoCloseable
 	int width() { return width; }
 	int height() { return height; }
 
-	/**
-	 * Layout-transition helper for the three transitions the UI texture cycle
-	 * needs:
-	 * <ol>
-	 *   <li>{@code UNDEFINED -> TRANSFER_DST_OPTIMAL} — initial upload.
-	 *       {@code TOP_OF_PIPE} as the src stage is correct for an initial
-	 *       transition: there are no prior writes to synchronise against,
-	 *       only the layout switch itself.</li>
-	 *   <li>{@code TRANSFER_DST_OPTIMAL -> SHADER_READ_ONLY_OPTIMAL} — after
-	 *       upload, before sampling.</li>
-	 *   <li>{@code SHADER_READ_ONLY_OPTIMAL -> TRANSFER_DST_OPTIMAL} — start of
-	 *       the next frame's upload cycle.</li>
-	 * </ol>
-	 * Any other (old, new) pair throws — the texture's usage pattern is
-	 * deliberately constrained and adding new transitions should be a
-	 * conscious change, not a silently-accepted one.
-	 */
+	/** Supports only the three transitions of the UI upload cycle; any other
+	 *  (old, new) pair throws deliberately. */
 	void transitionLayout(VkCommandBuffer cmd, int newLayout)
 	{
 		try (MemoryStack stack = stackPush())

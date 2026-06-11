@@ -40,26 +40,17 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK13.*;
 
 /**
- * Owns the scene's host-visible vertex buffer and its descriptor set. The
- * buffer contains one static scene arena followed by {@code framesInFlight}
- * dynamic/overlay arenas. The CPU can write the next frame's dynamic geometry
- * while the GPU is still reading the previous frame's arena. Static scene
- * geometry lives once at the start of the buffer and is drawn with a zero
- * first-vertex base.
- *
- * <p>The descriptor set has two bindings: 0 = OSRS texture array (combined
- * image sampler), 1 = texture-animation UBO. Both are static for the plugin
- * lifetime — animation parameters are written into the UBO each frame, but
- * the binding itself does not change.
+ * Host-visible vertex buffer (static arena + framesInFlight dynamic arenas)
+ * and its descriptor set. Per-frame arenas let the CPU write the next frame
+ * while the GPU reads the previous one.
  */
 @Slf4j
 final class SceneVertexBuffer implements AutoCloseable
 {
 	private final VulkanDevice device;
 	private final Buffer vertexBuffer;
-	/** Device-local mirror of the static region, uploaded after capture.
-	 *  Null when the host buffer already landed in device-local memory
-	 *  (UMA, ReBAR) — there a mirror would just duplicate VRAM. */
+	/** VRAM mirror of the static region; null when the host buffer is already
+	 *  device-local (UMA, ReBAR). */
 	private final Buffer staticMirror;
 	private final ByteBuffer mapped;
 	private final long slotBytes;
@@ -99,9 +90,8 @@ final class SceneVertexBuffer implements AutoCloseable
 		}
 	}
 
-	// Without ReBAR the big allocation falls back to plain host memory and
-	// the GPU would fetch every static vertex across PCIe each frame —
-	// mirror the static region into VRAM and draw statics from there.
+	// Without ReBAR the GPU would fetch every static vertex across PCIe each
+	// frame — mirror the static region into VRAM and draw statics from there.
 	private Buffer createStaticMirror(boolean hostIsDeviceLocal)
 	{
 		if (hostIsDeviceLocal)

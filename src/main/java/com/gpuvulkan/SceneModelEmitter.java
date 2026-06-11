@@ -35,10 +35,8 @@ final class SceneModelEmitter
 		this.sink = sink;
 	}
 
-	/** Face filters for the static capture sweeps. The blended alpha pass
-	 *  draws a dedicated STATIC_ALPHA region instead of replaying the whole
-	 *  scene, so statics are captured twice: once keeping only opaque faces,
-	 *  once keeping only translucent ones. Dynamics always use ALL. */
+	/** Statics are captured twice: opaque-only, then translucent-only
+	 *  (STATIC_ALPHA). Dynamics always use ALL. */
 	static final int FILTER_ALL = 0;
 	static final int FILTER_OPAQUE = 1;
 	static final int FILTER_ALPHA = 2;
@@ -530,9 +528,8 @@ final class SceneModelEmitter
 		return true;
 	}
 
-	// Rotates/translates every vertex into cullLocal* and projects it into
-	// cullProj*; false = a vertex landed inside the near plane (z < 50,
-	// stock's whole-model reject) and the caller must fall back.
+	// False = a vertex landed inside the near plane (z < 50); the caller
+	// must fall back.
 	private boolean transformVerticesFused(Projection proj, ModelArrays a, int modelVertexCount,
 		int orientation, int wx, int wy, int wz, boolean detailedStats)
 	{

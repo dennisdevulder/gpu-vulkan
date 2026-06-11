@@ -37,9 +37,8 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
 /**
- * Column-major 4x4 float matrix utilities. Factory methods return a fresh
- * float[16]; {@link #mul} multiplies {@code a *= b} in place. {@link #writeTo}
- * pushes the matrix into a Vulkan push-constant ByteBuffer.
+ * Column-major 4x4 float matrix utilities; {@link #mul} multiplies
+ * {@code a *= b} in place.
  */
 final class Mat4Ops
 {
@@ -104,14 +103,8 @@ final class Mat4Ops
 			};
 	}
 
-	/**
-	 * OSRS-engine perspective projection. {@code n} is a depth-scale, not a
-	 * near-plane: with this matrix, NDC.z = 1 / (2n·z_view), so larger {@code n}
-	 * compresses depth resolution close to the camera. Frustum near-clip
-	 * happens at z_view ≥ 1/(2n) — for n=50 that's ~0.01, effectively no
-	 * near-cull. Near-plane geometry rejection is done CPU-side per dynamic
-	 * model in {@code ModelSorter}.
-	 */
+	/** {@code n} is a depth-scale, NOT a near-plane: NDC.z = 1/(2n·z_view), so there
+	 *  is effectively no GPU near-cull — ModelSorter rejects near geometry CPU-side. */
 	static float[] projection(float w, float h, float n)
 	{
 		return new float[]

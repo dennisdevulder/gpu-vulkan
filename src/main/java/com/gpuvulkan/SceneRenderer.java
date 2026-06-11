@@ -35,18 +35,8 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK13.*;
 
 /**
- * Captures OSRS scene geometry into one host-visible vertex buffer with a
- * static arena followed by per-frame dynamic/overlay arenas. The five static
- * layers (TERRAIN..GAME_OBJECTS) are populated by {@link #captureScene} on
- * scene load; dirty static zones and the DYNAMIC layer are refilled in the
- * current frame arena.
- *
- * <p>{@link #recordDraw} issues one draw per non-empty layer, picking the fill
- * or line pipeline based on each layer's individual wireframe flag, and binds
- * the OSRS texture array as descriptor set 0.
- *
- * <p>Vertex layout (matches {@link ScenePipeline}):
- * {@code [float3 position, packed alpha/bias/HSL, packed texture/u/v]}.
+ * Captures OSRS scene geometry into one host-visible vertex buffer (static
+ * arena followed by per-frame dynamic/overlay arenas) and records the draws.
  */
 @Slf4j
 final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
@@ -55,9 +45,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	enum Layer
 	{
 		TERRAIN, WALLS, DECORATIVE, GROUND, GAME_OBJECTS,
-		/** Translucent faces of all static object classes, captured in a
-		 *  second filtered sweep. The blended alpha pass draws only this
-		 *  layer (plus dynamics) instead of replaying the whole scene. */
+		/** Translucent static faces; the blended pass draws only this layer plus dynamics. */
 		STATIC_ALPHA,
 		DYNAMIC;
 	}
@@ -65,8 +53,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	private static final int LAYER_COUNT = LAYERS.length;
 	private static final Layer LAST_STATIC = Layer.STATIC_ALPHA;
 
-	/** Default arena sizes for the top-level scene. Sub-worldview instances
-	 *  use much smaller arenas — see the capacity constructor. */
+	/** Top-level defaults; sub-worldview instances use much smaller arenas. */
 	static final int DEFAULT_STATIC_VERTICES = 5_000_000;
 	static final int DEFAULT_FRAME_VERTICES = 3_000_000;
 
@@ -85,17 +72,12 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	private static final int SCENE_OFFSET = (Constants.EXTENDED_SCENE_SIZE - Constants.SCENE_SIZE) / 2;
 	/** False for sub-worldview renderers — only the top-level scene owns a skybox dome. */
 	private final boolean emitSkybox;
-	/** Zone-radius culling needs the camera in this renderer's zone space.
-	 *  Sub-worldview passes receive the TOPLEVEL camera (fog is computed in
-	 *  toplevel space), so a sub renderer centering its zone window on it
-	 *  culls arbitrary zones — ship hulls vanish while engine-invoked
-	 *  dynamics (sails, crew) keep drawing. Sub scenes are entity-sized;
-	 *  the per-pass frustum cull against the composed MVP is sufficient. */
+	/** Sub-worldview passes get the TOPLEVEL camera, which is meaningless in their
+	 *  zone space — radius culling there culls arbitrary zones; frustum cull suffices. */
 	private final boolean cameraRadiusCull;
 
-	/** Zone-cull window for the current record pass, written by
-	 *  {@link #computeZoneCullRange} and read by both phases. Client-thread
-	 *  scratch — record passes run sequentially within a frame. */
+	/** Zone-cull window for the current record pass. Client-thread scratch —
+	 *  record passes run sequentially within a frame. */
 	private boolean cullFullZoneRange;
 	private int cullMinZoneX;
 	private int cullMaxZoneX;
@@ -119,9 +101,6 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	private final boolean repushConstantsEveryDraw;
 	private final SceneDrawEmitter drawEmitter;
 	private final SceneZoneDrawScheduler zoneDrawScheduler;
-	/** Benchmark-only: skip the blended alpha pass entirely (translucent
-	 *  statics and dynamics disappear). The single-pass-alpha MODE is gone —
-	 *  after the STATIC_ALPHA split it measured equal FPS with worse output. */
 	private long writePtr;
 	private long writeBasePtr;
 	private int writeBaseVertex;
@@ -139,14 +118,11 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	private int skyboxEnd = -1;
 	private int loggedSkyboxFaces = Integer.MIN_VALUE;
 	private int loggedSkyboxVertices = Integer.MIN_VALUE;
-	/** Per-layer, per-plane: vertex count after that plane's tiles emitted.
-	 *  Used to clip at {@code planeEnds[layer][maxPlane]} so upper-plane
-	 *  geometry is culled when the player is below. */
+	/** Per-layer, per-plane vertex count after that plane's tiles; draw clips at
+	 *  planeEnds[layer][maxPlane] to cull upper-plane geometry. */
 	private final int[][] planeEnds = new int[LAYER_COUNT][MAX_PLANES];
 
-	/** Per (layer, plane, zone) vertex ranges within the static region.
-	 *  Populated by {@link #captureScene}; used to avoid submitting static
-	 *  geometry outside the configured scene/fog radius. */
+	/** Per (layer, plane, zone) vertex ranges within the static region. */
 	private final int[][][] zoneVertexStart = new int[LAYER_COUNT][MAX_PLANES][ZONE_COUNT];
 	private final int[][][] zoneVertexCount = new int[LAYER_COUNT][MAX_PLANES][ZONE_COUNT];
 	private final int[][][][] overlayZoneStart =
@@ -160,21 +136,16 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	private final boolean[] wireframe = new boolean[LAYER_COUNT];
 	private final PriorityRangeSet priorityRanges = new PriorityRangeSet();
 	private int dynamicOpaqueEnd = -1;
-	/** Plane range to render this frame, forwarded from preSceneDraw's
-	 *  (minLevel, level, maxLevel). Roof hiding only applies above the
-	 *  current plane, matching the stock GPU plugin's zone renderer. */
+	/** Plane range from preSceneDraw; roof hiding only applies above the current plane. */
 	private volatile int minPlane = 0;
 	private volatile int currentPlane = 0;
 	private volatile int maxPlane = MAX_PLANES - 1;
 
-	/** Engine-supplied per-frame set of tile-roof IDs (NOT GameObject IDs,
-	 *  values come from {@link net.runelite.api.Scene#getRoofs()}) to hide
-	 *  above the player. */
+	/** Tile-roof IDs to hide (values from Scene.getRoofs(), NOT GameObject IDs). */
 	private volatile java.util.Set<Integer> hideRoofIds = java.util.Collections.emptySet();
 
-	/** Per-tile-range roof tags recorded during {@link #captureScene}.
-	 *  At draw time the layer is split into render/skip sub-ranges based
-	 *  on the current frame's {@link #hideRoofIds}. */
+	/** Roof tags per vertex range; draw time splits layers into render/skip
+	 *  sub-ranges from the current frame's hideRoofIds. */
 	private final RoofRangeSet roofRanges = new RoofRangeSet();
 	private boolean rebuildingOverlayZone;
 	/** Sorted [start, end) pairs of vertex sub-ranges to skip this frame. */
@@ -186,10 +157,8 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	/** Vertex buffer currently bound in the pass being recorded; statics draw
 	 *  from the VRAM mirror, frame arenas from the host buffer. */
 	private long boundVertexBuffer;
-	/** Per-zone frustum visibility, recomputed from each pass's MVP. The
-	 *  engine only invokes ~20 zones for stock GPU; without this we drew the
-	 *  whole radius square (~360 zones) and vertex-shaded everything behind
-	 *  the camera. -Dvkgpu.disableFrustumCull=true reverts. */
+	/** Per-zone frustum visibility, recomputed from each pass's MVP.
+	 *  -Dvkgpu.disableFrustumCull=true reverts. */
 	private final boolean[] zoneFrustumVisible = new boolean[ZONE_COUNT];
 	private static final boolean DISABLE_FRUSTUM_CULL = Boolean.getBoolean("vkgpu.disableFrustumCull");
 	private final DirtyZoneTracker dirtyZones = new DirtyZoneTracker(ZONE_COUNT);
@@ -204,14 +173,8 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 	private int capturedSceneOrigin;
 	private int capturedSceneSize = Constants.SCENE_SIZE;
 
-	/**
-	 * Drops the captured scene so {@link #recordDraw} skips its work on the
-	 * next frame. Called when {@code GameState} drops below {@code LOADING}
-	 * (logout, world hop, connection lost): without this the previously
-	 * captured terrain / walls / objects keep rendering behind the login
-	 * screen, leaking the prior world's view through the new state. Mirrors
-	 * stock GpuPlugin's {@code sceneFboValid = false} on the same event.
-	 */
+	/** Must be called when GameState drops below LOADING, or the old world
+	 *  keeps rendering behind the login screen. */
 	void invalidateCapturedScene()
 	{
 		vertexCount = 0;
@@ -380,13 +343,8 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		setWriteCursor(logicalVertex);
 	}
 
-	/**
-	 * Marks zones whose AABB intersects the view frustum of {@code m}
-	 * (Gribb-Hartmann plane extraction from the same column-major MVP the
-	 * vertices are transformed by, so it is exact for any projection,
-	 * including sub-worldview composed matrices). Y bounds are conservative
-	 * — OSRS heights are negative-up and bounded well inside this range.
-	 */
+	/** Marks zones whose AABB intersects the frustum of the column-major MVP
+	 *  {@code m}. Y bounds are conservative; OSRS heights are negative-up. */
 	private boolean[] computeZoneFrustum(float[] m)
 	{
 		if (DISABLE_FRUSTUM_CULL)
@@ -417,8 +375,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 				boolean visible = true;
 				for (float[] pl : planes)
 				{
-					// p-vertex: the AABB corner most positive along the
-					// plane normal. If even that is outside, the box is out.
+					// p-vertex: AABB corner most positive along the plane normal.
 					float px = pl[0] > 0 ? x1 : x0;
 					float py = pl[1] > 0 ? yMax : yMin;
 					float pz = pl[2] > 0 ? z1 : z0;
@@ -476,13 +433,8 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		return true;
 	}
 
-	/**
-	 * Drops the dynamic suffix; static layers preserved. Waits on this
-	 * slot's in-flight fence first — without it, CPU writes race the GPU
-	 * read from FRAMES_IN_FLIGHT frames ago, producing torn-vertex
-	 * flicker (especially on macOS where Metal keeps frames in flight
-	 * longer).
-	 */
+	/** Drops the dynamic suffix (statics preserved). Must wait this slot's in-flight
+	 *  fence first or CPU writes race the GPU read from FRAMES_IN_FLIGHT frames ago. */
 	void beginFrame()
 	{
 		try (MemoryStack stack = stackPush())
@@ -631,13 +583,8 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		}
 	}
 
-	/**
-	 * Copies the used static region from the host buffer into the VRAM
-	 * mirror (no-op on UMA/ReBAR systems where the host buffer is already
-	 * device-local). Runs on the client thread with the device idle —
-	 * captureScene drained before rewriting, and nothing has been submitted
-	 * since.
-	 */
+	/** Copies the used static region into the VRAM mirror (no-op on UMA/ReBAR).
+	 *  Caller guarantees the device is idle. */
 	private void uploadStaticMirror()
 	{
 		if (!vbuf.hasStaticMirror() || staticVertexCount() == 0)
@@ -756,22 +703,15 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		modelEmitter.clearCache();
 	}
 
-	/**
-	 * Pass order: emit each layer plane-by-plane so vertices are sorted
-	 * (layer-major, plane-minor). recordDraw clips per layer at
-	 * planeEnds[layer][visiblePlane] to hide roofs above the player.
-	 * Static object sweeps keep only opaque faces; translucent faces are
-	 * captured afterwards into STATIC_ALPHA so the blended pass doesn't
-	 * replay the whole scene. Tiles are always opaque (no trans byte).
-	 */
+	/** Emit order must stay layer-major, plane-minor: recordDraw clips per layer
+	 *  at planeEnds. Opaque sweeps first, then translucent faces into STATIC_ALPHA. */
 	private void captureStaticLayers(Scene scene, Tile[][][] tiles, int planes)
 	{
 		final int sceneOrigin = capturedSceneOrigin;
 		final int sceneSize = capturedSceneSize;
 
-		// Scene.getRoofs() dims are EXTENDED_SCENE_SIZE (184) on toplevel,
-		// not SCENE_SIZE (104) like scene.getTiles(). Instances aren't
-		// extended, so the offset is 0 there.
+		// Scene.getRoofs() is EXTENDED_SCENE_SIZE-dimensioned on toplevel (tiles
+		// are SCENE_SIZE); instances aren't extended, so offset 0 there.
 		final int[][][] roofs = scene.getRoofs();
 		final byte[][][] tileSettings = scene.getExtendedTileSettings();
 		final int roofOffset = scene.getWorldViewId() == net.runelite.api.WorldView.TOPLEVEL
@@ -1028,13 +968,8 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		}
 	}
 
-	/**
-	 * Walks every tile of {@code layer} in the same effective level order as
-	 * stock GPU's SceneUploader: level 0 contains normal level-0 geometry and
-	 * VIS_BELOW geometry from all upper levels; upper levels contain only their
-	 * non-VIS_BELOW source level. This keeps roof removal from behaving like a
-	 * flat world-space clipping plane.
-	 */
+	/** Level order matters: level 0 takes normal level-0 plus VIS_BELOW geometry
+	 *  from all upper levels; upper levels keep only their non-VIS_BELOW source. */
 	private void captureLayer(Layer layer,
 		Tile[][][] tiles, int planes, int sceneOrigin, int sceneSize,
 		int[][][] roofs, byte[][][] tileSettings, int roofOffset,
@@ -1109,9 +1044,8 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		}
 	}
 
-	/** GameObjects emit only on the sceneMinLocation tile (multi-tile
-	 *  objects naturally dedupe), and each gets its own roof-range entry
-	 *  instead of a merged-per-tile range. */
+	/** GameObjects emit only on the sceneMinLocation tile (multi-tile dedupe);
+	 *  each gets its own roof-range entry. */
 	private void captureGameObjectsLayer(Tile[][][] tiles, int planes, int sceneOrigin, int sceneSize,
 		int[][][] roofs, byte[][][] tileSettings, int roofOffset)
 	{
@@ -1192,11 +1126,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		}
 	}
 
-	/** Fused per-tile body for the STATIC_ALPHA sweep: every static object
-	 *  class in one walk so the layer gets a single coherent set of per-zone
-	 *  ranges. The model emitter's ALPHA filter (set by the caller) keeps
-	 *  only translucent faces; game objects dedupe on their min tile exactly
-	 *  like {@link #captureGameObjectsPass}. */
+	/** Fused per-tile STATIC_ALPHA sweep; caller must set the ALPHA face filter. */
 	private void captureStaticAlphaTile(Tile cur, int p, int sx, int sy)
 	{
 		WallObject w = cur.getWallObject();
@@ -1233,9 +1163,8 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		}
 	}
 
-	/** Alpha-sweep variant of {@link #captureRenderable}: unstreamed models
-	 *  were already queued on {@code pendingRenderables} by the opaque sweep
-	 *  of the same tile — queuing again would double-emit once loaded. */
+	/** Must NOT queue unstreamed models — the opaque sweep of the same tile
+	 *  already did; queuing again double-emits once loaded. */
 	private void captureAlphaRenderable(Renderable r, int orient, int x, int y, int z)
 	{
 		if (r == null) return;
@@ -1252,9 +1181,8 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		Model m = PendingRenderables.resolveModel(r);
 		if (m == null)
 		{
-			// DynamicObject whose animation pose isn't streamed yet — retry
-			// until it can promote its zone through the overlay rebuild path.
-			// Other model-less renderables are not zone-static; never queue.
+			// Only DynamicObjects queue for retry; other model-less
+			// renderables are not zone-static.
 			if (r instanceof net.runelite.api.DynamicObject)
 			{
 				pendingRenderables.add(r, orient, x, y, z, zoneForWorldPoint(x, z));
@@ -1264,13 +1192,8 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		captureModel(m, orient, x, y, z);
 	}
 
-	/**
-	 * Per-frame retry for renderables whose Model was null at capture
-	 * time. Emits any whose model has since loaded into the dynamic
-	 * suffix (same budget actors use); entries that are still null roll
-	 * forward unchanged. Reset on each {@link #captureScene} or
-	 * {@link #invalidateCapturedScene}.
-	 */
+	/** Per-frame retry for renderables whose Model was null at capture;
+	 *  loaded ones emit into the dynamic suffix. */
 	void captureDynamicPending()
 	{
 		pendingRenderables.captureLoaded(this);
@@ -1342,12 +1265,8 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			0, 0, 0);
 	}
 
-	/**
-	 * Opaque phase: skybox, static layers, dynamic layer, priority ranges.
-	 * {@code entityTx/entityTz/entityYawJau} are the sub-worldview placement
-	 * the shader uses to reconstruct toplevel-scene coordinates for fog —
-	 * zero for the top-level scene, where local == world (scene.vert misc.yzw).
-	 */
+	/** {@code entityTx/entityTz/entityYawJau}: sub-worldview placement the shader
+	 *  uses to rebuild toplevel coordinates for fog; zero for the top-level scene. */
 	void recordOpaque(VkCommandBuffer cmd, float[] mvp, float brightness,
 					float cameraX, float cameraY, float cameraZ, float drawDistanceTiles, float fogDepthTiles,
 					float fogR, float fogG, float fogB,
@@ -1404,9 +1323,8 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		buf.flip();
 	}
 
-	// Fragment push (32 bytes at offset 96): fogFrag(rgb, brightness) +
-	// fragExtras(textureLightMode, colorBlind mode/intensity, banding mode;
-	// the alpha phase encodes its pass as 10+smoothBanding).
+	// Fragment push (32 bytes at offset 96): fogFrag(rgb, brightness) + fragExtras;
+	// the alpha phase encodes its pass as 10+smoothBanding.
 	private void fillSceneFragPush(ByteBuffer buf, float fogR, float fogG, float fogB, float brightness,
 		float textureLightMode, int colorBlindMode, float colorBlindIntensity, float smoothBandingMode)
 	{
@@ -1418,8 +1336,6 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		buf.flip();
 	}
 
-	/** Grows {@link #skipScratch} to fit and fills it with the hidden-roof
-	 *  vertex ranges; returns the pair count. */
 	private int buildRoofSkipPairs()
 	{
 		if (skipScratch.length < roofRanges.requiredSkipPairCapacity())
@@ -1429,10 +1345,8 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		return roofRanges.buildSkipPairs(hideRoofIds, skipScratch);
 	}
 
-	// Stock-matching zone-radius cull window (cull* fields). Sub-worldview
-	// renderers get the TOPLEVEL camera — meaningless in their local grid —
-	// so cameraRadiusCull=false forces the full range (frustum cull only).
-	// Escape hatch: -Dvkgpu.fullSceneDraw=true.
+	// Sub-worldview renderers force the full range (cameraRadiusCull=false):
+	// they get the TOPLEVEL camera. Escape hatch: -Dvkgpu.fullSceneDraw=true.
 	private void computeZoneCullRange(float cameraX, float cameraZ, float drawDistanceTiles, float fogDepthTiles)
 	{
 		int radiusTiles = (int) Math.ceil(drawDistanceTiles + fogDepthTiles + 2f);
@@ -1503,10 +1417,8 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		}
 	}
 
-	/** Static layers emit plane-major. Draw one plane at a time so roof
-	 *  skips only affect planes above the player; current and lower planes
-	 *  must remain intact or buildings get chopped when their roof id is
-	 *  hidden. */
+	/** Draw one plane at a time: roof skips must only affect planes above the
+	 *  player or buildings get chopped when their roof id is hidden. */
 	private void drawStaticLayerPlanes(VkCommandBuffer cmd, int layer, int layerStart,
 		int slot, int slotFirstVertex, int skipPairs, int loMin, int loCur, int loMax,
 		long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
@@ -1525,8 +1437,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		}
 	}
 
-	/** Sorted-priority renderables draw twice: color with depth-test only,
-	 *  then a depth-only pass (mirrors stock's vaoPO ordering). */
+	/** Sorted-priority renderables draw twice: color with depth-test only, then depth-only. */
 	private void recordPriorityPasses(VkCommandBuffer cmd, MemoryStack stack,
 		ByteBuffer vertPush, ByteBuffer fragPush, int slotFirstVertex)
 	{
@@ -1552,10 +1463,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		drawPriorityRanges(cmd, slotFirstVertex, pipeline.layout(), vertPush, fragPush);
 	}
 
-	/** Skybox LAST: the dome covers the whole screen, so drawing it after the
-	 *  scene lets the depth test (write-off, test-on pipeline) kill every
-	 *  fragment terrain already covered instead of shading the full screen
-	 *  and overdrawing it. */
+	/** Skybox must draw LAST so the depth test kills fragments terrain already covers. */
 	private void recordSkybox(VkCommandBuffer cmd, MemoryStack stack, float[] mvp,
 		float cameraX, float cameraY, float cameraZ, float drawDistanceTiles, int tick, ByteBuffer fragPush)
 	{
@@ -1581,11 +1489,8 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			0, skyboxPipeline.layout(), skyboxVertPush, fragPush);
 	}
 
-	/**
-	 * Blended-alpha phase. Self-contained: rebinds this renderer's vertex
-	 * buffer and pushes, so phases of different renderers (toplevel +
-	 * sub-worldviews) can interleave in one command buffer.
-	 */
+	/** Self-contained (rebinds buffer and pushes) so phases of different
+	 *  renderers can interleave in one command buffer. */
 	void recordAlpha(VkCommandBuffer cmd, float[] mvp, float brightness,
 					float cameraX, float cameraY, float cameraZ, float drawDistanceTiles, float fogDepthTiles,
 					float fogR, float fogG, float fogB,
@@ -1722,11 +1627,8 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 
 		if (tiles == null)
 		{
-			// Sub-worldview scenes are worldview-sized (a ship is a few
-			// zones, stock sizes its context from worldView.getSizeX()>>3),
-			// so don't demand SCENE_SIZE coverage — capture whatever the
-			// array spans. Requiring 104 here silently skipped every ship
-			// hull while the engine-invoked dynamics (sails, crew) drew.
+			// Sub-worldview scenes are worldview-sized: don't demand SCENE_SIZE
+			// coverage or ship hulls get silently skipped.
 			Tile[][][] regular = scene.getTiles();
 			int size = measuredTileSize(regular);
 			if (size > 0)

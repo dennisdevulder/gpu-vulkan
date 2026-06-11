@@ -34,11 +34,8 @@ final class RegionManager
 		}
 	}
 
-	/**
-	 * Walks chunks within {@code EXTENDED_SCENE_SIZE / 16} of the player
-	 * and {@code removeTile}s any whose region ID differs from the
-	 * player's chunk. No-op on instances or when disabled.
-	 */
+	/** removeTile()s chunks whose region ID differs from the player's.
+	 *  No-op on instances or when disabled. */
 	void prepare(Scene scene, boolean hideUnrelatedMaps)
 	{
 		if (scene.isInstance() || !hideUnrelatedMaps)

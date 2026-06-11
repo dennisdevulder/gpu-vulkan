@@ -37,12 +37,8 @@ import static org.lwjgl.vulkan.VK13.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
 import static org.lwjgl.vulkan.VK13.vkDeviceWaitIdle;
 
 /**
- * Streaming 2D image — internally rings {@code FRAMES_IN_FLIGHT} textures
- * plus their staging buffers so the CPU write at frame N can't race the
- * GPU read at frame N-1. Wraps existing {@link Texture} and {@link Buffer}.
- *
- * <p>Format is fixed to {@code VK_FORMAT_B8G8R8A8_UNORM} — matches the
- * RuneLite BufferProvider's pixel layout and the only consumer today.
+ * Rings FRAMES_IN_FLIGHT textures + staging buffers so CPU writes can't race
+ * GPU reads. Format fixed to B8G8R8A8_UNORM (the BufferProvider pixel layout).
  */
 @Slf4j
 final class GfxStreamingImage implements StreamingImage
@@ -97,10 +93,8 @@ final class GfxStreamingImage implements StreamingImage
 		uploadedRows[slot] = rows;
 	}
 
-	/** Records the staging→image copy + the layout transitions around it,
-	 *  for the current frame's slot. Called by the consumer outside the
-	 *  render pass (Vulkan disallows {@code vkCmdCopyBufferToImage} inside
-	 *  one). */
+	/** Must be recorded OUTSIDE the render pass — vkCmdCopyBufferToImage is
+	 *  disallowed inside one. */
 	void recordCopyToImage(VkCommandBuffer cmd)
 	{
 		int slot = frameSync.currentFrame();

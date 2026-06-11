@@ -31,13 +31,8 @@ import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Model;
 
 /**
- * Flight recorder for the Vulkan draw path. The counters are deliberately
- * cheap and opt-in so renderer changes can explain which contract surface
- * changed: callbacks, CPU timings, draw submission shape, uploads, readbacks,
- * and model emission.
- *
- * <p>All counters are atomic because the OSRS scene renderer can spin up
- * {@code DrawCallbacks.RENDER_THREADS_MASK} threads.
+ * Flight recorder for the Vulkan draw path. Counters are atomic — the OSRS
+ * scene renderer can spin up {@code DrawCallbacks.RENDER_THREADS_MASK} threads.
  */
 @Slf4j
 final class DrawCallbackStats

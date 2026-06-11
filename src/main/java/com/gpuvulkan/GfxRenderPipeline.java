@@ -49,9 +49,8 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK13.*;
 
 /**
- * Constraints: single colour attachment, blend / depth presets matching
- * {@link RenderPipelineDesc.BlendMode} + {@link RenderPipelineDesc.DepthTest}.
- * No vertex-buffer declarations = no vertex input (vertex-pulling).
+ * Single colour attachment; no vertex-buffer declarations = no vertex input
+ * (vertex-pulling).
  */
 final class GfxRenderPipeline implements RenderPipeline
 {

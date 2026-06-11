@@ -281,9 +281,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			log.debug("Deferring GPU (Vulkan) startup until the texture provider is available");
 			return false;
 		}
-		// Defer attach until LOGGED_IN — attaching on the login screen
-		// leaves a blank canvas that's hard to distinguish from a
-		// broken surface, especially on macOS.
+		// Attach only at LOGGED_IN — attaching on the login screen leaves a
+		// blank canvas, especially on macOS.
 		if (client.getGameState() != GameState.LOGGED_IN)
 		{
 			log.debug("Deferring GPU (Vulkan) startup until game state is LOGGED_IN (currently {})",
@@ -296,12 +295,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	private void prepareCanvas()
 	{
 		canvas = client.getCanvas();
-		// X11: AWT's libawt_xawt resize path expects a live GLX
-		// context on the canvas's owning thread; without it, sidebar
-		// collapse exit_group(1)s the EDT mid-rebuild. We don't use
-		// the GL context for rendering, just keep it bound.
-		// Windows must not set an OpenGL pixel format on this HWND
-		// before Vulkan creates its swapchain.
+		// X11: keep a live GLX context bound or AWT's resize path exit_group(1)s
+		// the EDT. Windows must NOT set a GL pixel format on this HWND.
 		if (platform instanceof X11PlatformSurface)
 		{
 			net.runelite.rlawt.AWTContext.loadNatives();
@@ -390,9 +385,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 
 		regionManager = new RegionManager();
 
-		// Escape hatch while sub-worldview rendering is young: with the
-		// property set, BaseRenderer falls back to the single recordDraw
-		// path and all sub-scene callbacks drop like before.
+		// Escape hatch: BaseRenderer falls back to the single recordDraw path
+		// and sub-scene callbacks drop.
 		if (!Boolean.getBoolean("vkgpu.disableSubWorldViews"))
 		{
 			subWorldViews = new SubWorldViewManager(device, sync, renderPass, textureArray, stats);
@@ -433,9 +427,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		// channel; without it AWT paints opaque over our output.
 		client.resizeCanvas();
 
-		// Plugin enable mid-session: capture the already-loaded
-		// scene right away rather than waiting for the next chunk
-		// crossing.
+		// Mid-session enable: capture the already-loaded scene now.
 		Scene currentScene = client.getTopLevelWorldView() == null ? null
 			: client.getTopLevelWorldView().getScene();
 		if (currentScene != null)
@@ -468,12 +460,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	private void cleanupFailedStartup()
 	{
 		removeMacResizeWake();
-		// Mirror shutDown's order: drain Vulkan, undo any client-state
-		// flips, drop disposables, then unwind AWT/canvas. Without
-		// this, a mid-startup throw (device pick, swapchain, etc.)
-		// leaves the canvas with ignoreRepaint=true and an AWTContext
-		// still attached — JAWT lock then fails on the next plugin
-		// enable, looking like "plugin can't toggle back on".
+		// Must mirror shutDown's order, or a mid-startup throw leaves the canvas
+		// with an AWTContext attached and the next enable fails JAWT lock.
 		if (device != null)
 		{
 			try
@@ -547,12 +535,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		clientThread.invoke(this::teardownRendererOnClientThread);
 	}
 
-	/**
-	 * Teardown order: stop callbacks → drain GPU → close Disposables →
-	 * destroy AWTContext → resizeCanvas. resizeCanvas with an attached
-	 * AWTContext leaves JAWT state stale and the next plugin enable fails
-	 * JAWT_DrawingSurface_Lock.
-	 */
+	/** Order: stop callbacks → drain GPU → Disposables → destroy AWTContext →
+	 *  resizeCanvas; otherwise the next enable fails JAWT_DrawingSurface_Lock. */
 	private void teardownRendererOnClientThread()
 	{
 		log.info("GPU (Vulkan) shutdown: detach draw callbacks");
@@ -648,9 +632,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	@Subscribe
 	public void onGameStateChanged(net.runelite.api.events.GameStateChanged ev)
 	{
-		// Drop captured scene on logout / hop / connection-lost so the
-		// login screen doesn't render with the previous world bleeding
-		// through. LOADING is kept (next region is streaming in).
+		// Drop the captured scene on logout/hop so the login screen doesn't
+		// bleed the old world. LOADING is kept (next region streaming in).
 		if (renderExtensions == null) return;
 		net.runelite.api.GameState state = ev.getGameState();
 		if (state.getState() < net.runelite.api.GameState.LOADING.getState())
@@ -666,9 +649,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		}
 	}
 
-	/** Any other DrawCallbacks owner (stock GPU, 117HD, GPU forks) corrupts
-	 *  shared state if it runs alongside us — RuneLite has exactly one
-	 *  draw-callback slot. Returns the enabled plugin's name, or null. */
+	/** RuneLite has exactly one draw-callback slot; another owner corrupts
+	 *  shared state. Returns the enabled plugin's name, or null. */
 	private String isRendererPluginEnabled(String... names)
 	{
 		for (Plugin p : pluginManager.getPlugins())
@@ -771,13 +753,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		stats.maybeLog();
 	}
 
-	/**
-	 * Device loss (GPU reset, driver crash) and out-of-memory are not
-	 * recoverable by retrying frames. Log once, stop submitting, and stop the
-	 * plugin through its normal lifecycle — no automatic restart, the user
-	 * re-enables after fixing the underlying problem. Returns false for
-	 * non-fatal codes so the caller rethrows.
-	 */
+	/** Device loss / OOM are unrecoverable: latch off and stop the plugin.
+	 *  Returns false for non-fatal codes so the caller rethrows. */
 	private boolean handleIfFatalDeviceError(Vk.VulkanException e)
 	{
 		int r = e.result();
@@ -1028,9 +1005,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			stats.lastCamZ = cameraZ;
 			stats.lastCamPlane = plane;
 		}
-		// Camera doubles here come from a different reference frame than
-		// preSceneDraw's floats — we use preSceneDraw's exclusively for the
-		// projection MVP, so don't overwrite them here.
+		// Camera doubles here are a different reference frame than preSceneDraw's
+		// floats; the MVP uses preSceneDraw's exclusively — don't overwrite.
 		if (renderExtensions != null)
 		{
 			long start = statsEnabled ? System.nanoTime() : 0L;
@@ -1060,12 +1036,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		}
 	}
 
-	/** Identity of the scene captured into render extensions. swapScene /
-	 *  loadScene callbacks are unreliable in this engine version, so we
-	 *  detect scene transitions by reference plus map identity. The engine
-	 *  can reuse the same Scene object across boundary shifts while changing
-	 *  its base coordinates; reference-only detection leaves stale static
-	 *  terrain until the plugin is restarted. */
+	/** Scene transitions are detected by reference PLUS map identity: the engine
+	 *  reuses the same Scene object across boundary shifts with new base coords. */
 	private Scene capturedScene;
 	private int capturedSceneBaseX = Integer.MIN_VALUE;
 	private int capturedSceneBaseY = Integer.MIN_VALUE;
@@ -1084,18 +1056,15 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		}
 		if (!isTopLevelScene(scene))
 		{
-			// Sub-worldviews get their own renderer — never the toplevel
-			// capture path (fbf75b8 clobber class).
+			// Sub-worldviews get their own renderer — never the toplevel capture path.
 			if (subWorldViews != null && scene != null)
 			{
 				subWorldViews.preScene(scene, minLevel, level, maxLevel, hideRoofIds);
 			}
 			return;
 		}
-		// Scene lifecycle fallback: swapScene/loadScene callbacks don't fire
-		// reliably in this engine version. Re-capture when either the Scene
-		// object changes or the same object is reused with a different map
-		// identity after a boundary shift.
+		// swapScene/loadScene don't fire reliably; recapture when the Scene
+		// reference or its map identity changes.
 		if (renderExtensions != null && sceneIdentityChanged(scene))
 		{
 			pendingSceneIdentityRecapture = false;
@@ -1146,10 +1115,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 
 	private void prepareScene(Scene scene)
 	{
-		// removeTile() mutates the live Scene, but stock does the same to the
-		// already-live scene at plugin start (GpuPlugin.startUp -> loadScene),
-		// with identical chunk math and regions data — production-proven. The
-		// toggle takes effect on the next scene load, matching stock.
+		// The toggle takes effect on the next scene load.
 		if (regionManager != null)
 		{
 			regionManager.prepare(scene, config.hideUnrelatedMaps());
@@ -1170,9 +1136,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		prepareScene(scene);
 		if (textureArray != null)
 		{
-			// Stock scales the fog scene-edge window with the expanded-map
-			// extent (vert.glsl FOG_SCENE_EDGE_MIN/MAX); a fixed 1..103 window
-			// fogs all expanded terrain past the core scene.
+			// Fog scene-edge window must scale with the expanded-map extent;
+			// a fixed 1..103 window fogs all expanded terrain.
 			int chunks = client.getExpandedMapLoading();
 			textureArray.setFogSceneEdges(
 				(-chunks * 8 + 1) * 128f,
@@ -1453,10 +1418,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			stats.drawSingle.incrementAndGet();
 			if (renderable instanceof Model) stats.recordModel((Model) renderable);
 		}
-		// Don't delete the rest of this method. Projectiles, spell
-		// animations and the home-teleport graphic stop rendering without
-		// it — even though the stats counter above says this method never
-		// runs. We don't fully understand why yet; see issue #1.
+		// Don't delete the rest of this method: projectiles, spell animations and
+		// the home-teleport graphic stop rendering without it (see issue #1).
 		if (renderExtensions == null || !isTopLevelScene(scene)) return;
 		if (renderable instanceof net.runelite.api.Actor) return;
 		Model m = (renderable instanceof Model) ? (Model) renderable : renderable.getModel();

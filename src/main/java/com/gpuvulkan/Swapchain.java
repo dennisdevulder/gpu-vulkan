@@ -40,12 +40,8 @@ import static org.lwjgl.vulkan.KHRSwapchain.VK_ERROR_OUT_OF_DATE_KHR;
 import static org.lwjgl.vulkan.VK13.*;
 
 /**
- * VkSwapchainKHR + per-image VkImage / VkImageView. Picks BGRA8_SRGB (the
- * format basically every desktop GPU lists first) and FIFO present mode
- * (always available, V-synced — fine for an OSRS-like workload).
- *
- * <p>{@link #recreate(int, int)} tears down and rebuilds when the canvas
- * resizes or {@code vkAcquireNextImageKHR} returns {@code VK_ERROR_OUT_OF_DATE_KHR}.
+ * VkSwapchainKHR + per-image VkImage / VkImageView. {@link #recreate(int, int)}
+ * rebuilds on canvas resize or {@code VK_ERROR_OUT_OF_DATE_KHR}.
  */
 @lombok.extern.slf4j.Slf4j
 final class Swapchain implements AutoCloseable
@@ -108,9 +104,8 @@ final class Swapchain implements AutoCloseable
 
 	void recreate(int desiredWidth, int desiredHeight)
 	{
-		// vkDeviceWaitIdle drains queue submits but NOT the WSI present
-		// engine — so we pass the old VkSwapchainKHR via oldSwapchain
-		// (spec-clean handover, driver retires + releases WSI refs).
+		// vkDeviceWaitIdle does NOT drain the WSI present engine — hand the
+		// old swapchain over via oldSwapchain so the driver retires it.
 		Vk.check("vkDeviceWaitIdle", vkDeviceWaitIdle(device.handle()));
 		long retiringHandle = handle;
 		long[] retiringViews = imageViews;
@@ -174,9 +169,8 @@ final class Swapchain implements AutoCloseable
 			imageFormat = format.format();
 			int presentMode = pickPresentMode(stack);
 
-			// Triple-buffer pinned: MoltenVK's Runtime Guide recommends 3
-			// on Apple Silicon for Direct-to-Display; other platforms
-			// happen to land on 3 anyway via minImageCount+1.
+			// Triple-buffer pinned: MoltenVK recommends 3 on Apple Silicon
+			// for Direct-to-Display.
 			int imageCount = Math.max(3, caps.minImageCount());
 			if (caps.maxImageCount() > 0 && imageCount > caps.maxImageCount())
 			{

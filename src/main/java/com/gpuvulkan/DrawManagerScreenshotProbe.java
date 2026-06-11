@@ -30,21 +30,10 @@ import lombok.extern.slf4j.Slf4j;
 import net.runelite.client.ui.DrawManager;
 
 /**
- * Peeks at whether a screenshot consumer is waiting on {@link DrawManager},
- * so the renderer only records the GPU→CPU readback copy on frames that
- * actually need it.
- *
- * <p>This is the plugin's single use of reflection, and it reads a private
- * field ({@code DrawManager.nextFrame}). There is no public alternative:
- * the API exposes only {@code requestNextFrameListener} (registers a
- * consumer) and {@code processDrawComplete} (CONSUMES the queue — calling
- * it to test emptiness would eat pending requests with a frame we haven't
- * finished). A {@code DrawManager.hasNextFrameRequest()} accessor upstream
- * would make this class deletable.
- *
- * <p>Fail-safe: if the field disappears in a client update, the probe logs
- * one warning, latches off, and {@link #hasPendingRequest} returns false
- * forever — screenshots silently stop working but nothing else is affected.
+ * Reflectively peeks at {@code DrawManager.nextFrame} so the GPU→CPU readback
+ * only records on frames that need it. There is no public peek API —
+ * {@code processDrawComplete} CONSUMES the queue. Fails safe: if the field
+ * disappears, log once, latch off, and report no pending request forever.
  */
 @Slf4j
 final class DrawManagerScreenshotProbe

@@ -38,16 +38,8 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK13.VK_SUCCESS;
 
 /**
- * macOS surface creation via {@code VK_EXT_metal_surface}. Defers the JAWT
- * lock + {@code CAMetalLayer} attach to {@link MacOSMetalHelper} (a small
- * native helper modelled on rlawt's macOS path). Once the helper returns a
- * layer pointer, we wrap it in a {@code VkSurfaceKHR} via
- * {@code vkCreateMetalSurfaceEXT}.
- *
- * <p>Instance-side prereq: {@link #requiredInstanceExtensions()} requests
- * {@code VK_KHR_portability_enumeration}; {@link VulkanInstance} translates
- * that into the matching create-flag (MoltenVK requires it or instance
- * creation fails with {@code VK_ERROR_INCOMPATIBLE_DRIVER}).
+ * macOS surface via {@code VK_EXT_metal_surface}: {@link MacOSMetalHelper}
+ * attaches the CAMetalLayer, vkCreateMetalSurfaceEXT wraps the pointer.
  */
 @Slf4j
 final class MacOSPlatformSurface implements PlatformSurface
@@ -74,10 +66,8 @@ final class MacOSPlatformSurface implements PlatformSurface
 	@Override
 	public long createSurface(VulkanInstance instance, Canvas canvas)
 	{
-		// Hold the AWT tree lock across JAWT — same pattern the stock
-		// GpuPlugin uses when it calls rlawt. Without this, the canvas
-		// peer can mutate between lock and GetDrawingSurfaceInfo and the
-		// JDK crashes inside jni_GetObjectField.
+		// Hold the AWT tree lock across JAWT — the peer can mutate between
+		// lock and GetDrawingSurfaceInfo and crash in jni_GetObjectField.
 		long caMetalLayer;
 		synchronized (canvas.getTreeLock())
 		{
@@ -89,8 +79,7 @@ final class MacOSPlatformSurface implements PlatformSurface
 		}
 		log.info("Attached CAMetalLayer 0x{}", Long.toHexString(caMetalLayer));
 
-		// Synthetic COMPONENT_RESIZED so AWT lays out the freshly-installed
-		// CALayer now instead of deferring until the next canvas invalidation.
+		// Synthetic COMPONENT_RESIZED so AWT lays out the CALayer now.
 		// AWT-only dispatch — setting CALayer.bounds directly trips MoltenVK.
 		javax.swing.SwingUtilities.invokeLater(() ->
 		{
@@ -102,14 +91,8 @@ final class MacOSPlatformSurface implements PlatformSurface
 		{
 			VkMetalSurfaceCreateInfoEXT info = VkMetalSurfaceCreateInfoEXT.calloc(stack)
 				.sType$Default();
-			// LWJGL 3.3.6's generated binding only exposes pLayer(PointerBuffer)
-			// — its implementation writes the address of the PointerBuffer's
-			// backing storage into the struct field, instead of the contained
-			// pointer. MoltenVK then reads the storage as a CAMetalLayer and
-			// the first 8 bytes (our real layer pointer) get interpreted as
-			// the layer's isa, producing
-			//     objc[…]: Attempt to use unknown class 0x….
-			// Write the layer pointer directly to the field offset to bypass.
+			// LWJGL 3.3.6's pLayer(PointerBuffer) writes the buffer's address,
+			// not the contained pointer — write the field offset directly.
 			MemoryUtil.memPutAddress(
 				info.address() + VkMetalSurfaceCreateInfoEXT.PLAYER,
 				caMetalLayer);

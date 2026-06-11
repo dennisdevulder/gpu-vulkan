@@ -41,17 +41,8 @@ import org.lwjgl.system.MemoryStack;
 import org.lwjgl.vulkan.VkCommandBuffer;
 
 /**
- * AMD FSR 1.0 upscaling, implemented entirely against the public extension
- * API — the reference example for {@link ScenePassRedirect}:
- *
- * <ol>
- *   <li>The backend renders the 3D scene into a reduced-resolution
- *       {@link RenderTarget} this extension owns.</li>
- *   <li>{@link #recordAfterScene}: an EASU pass upscales it into a
- *       full-resolution intermediate target.</li>
- *   <li>{@link #recordResolve}: an RCAS sharpening pass draws the result
- *       into the on-screen pass, before the UI composite.</li>
- * </ol>
+ * AMD FSR 1.0 via the public extension API (the {@link ScenePassRedirect}
+ * reference example): scene renders reduced-res, EASU upscales, RCAS sharpens.
  */
 public final class FsrUpscalerExtension implements VulkanRenderExtension, ScenePassRedirect
 {

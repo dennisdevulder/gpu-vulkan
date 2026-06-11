@@ -25,12 +25,9 @@
 package com.gpuvulkan.gfx;
 
 /**
- * Offscreen color+depth render target. Render into it via
- * {@link RenderEncoder#beginPass}, then sample its color image from a later
- * pass after {@link RenderEncoder#prepareForSampling}. Pipelines that draw
- * into this target must be created from {@link #device()} — the target owns
- * its own render pass and pipelines are only compatible with the pass they
- * were built against.
+ * Offscreen color+depth render target. Render via {@link RenderEncoder#beginPass},
+ * sample after {@link RenderEncoder#prepareForSampling}. Pipelines that draw into
+ * this target MUST come from {@link #device()} — the target owns its render pass.
  */
 public interface RenderTarget extends AutoCloseable
 {
@@ -38,11 +35,8 @@ public interface RenderTarget extends AutoCloseable
 
 	int height();
 
-	/**
-	 * Resizes the target, waiting for all in-flight frames first. Returns
-	 * true when the target was actually recreated — bind groups referencing
-	 * its color image must then be recreated by the caller.
-	 */
+	/** Waits for in-flight frames first. True = recreated; bind groups
+	 *  referencing its color image must then be recreated by the caller. */
 	boolean resize(int width, int height);
 
 	/** Device whose pipelines render into this target. */

@@ -40,10 +40,8 @@ import org.lwjgl.vulkan.VkWin32SurfaceCreateInfoKHR;
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK13.VK_SUCCESS;
 
-/** Windows surface creation via {@code VK_KHR_win32_surface}. HWND comes from
- *  JAWT; HINSTANCE from {@code GetModuleHandle(NULL)} (the loader passes it
- *  through to the ICD verbatim — what actually matters for the surface
- *  identity is the HWND). */
+/** Windows surface via {@code VK_KHR_win32_surface}: HWND from JAWT,
+ *  HINSTANCE from {@code GetModuleHandle(NULL)}. */
 final class Win32PlatformSurface implements PlatformSurface
 {
 	@Override
@@ -121,9 +119,8 @@ final class Win32PlatformSurface implements PlatformSurface
 
 	private static long createWin32Surface(VulkanInstance instance, long hwnd)
 	{
-		// GetModuleHandle(NULL) → HMODULE of the process EXE. Single-arg
-		// overload only: the client provides lwjgl core 3.3.2 at runtime and
-		// the (debug, name) overload doesn't exist there.
+		// Single-arg overload only: the client ships lwjgl core 3.3.2, which
+		// lacks the (debug, name) overload.
 		long hinstance = WinBase.GetModuleHandle((java.nio.ByteBuffer) null);
 		try (MemoryStack stack = stackPush())
 		{

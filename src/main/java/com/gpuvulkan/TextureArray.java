@@ -48,10 +48,8 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK13.*;
 
 /**
- * Static 2D-array texture for the OSRS texture set. Layer 0 is a white
- * "no-texture" tile; OSRS texture id N goes into layer N+1. Built once
- * at startup; OSRS pixels may change (animated water) but slots are
- * stable.
+ * 2D-array texture for the OSRS texture set. Layer 0 is a white "no-texture"
+ * tile; OSRS texture id N goes into layer N+1. Slots are stable.
  */
 @lombok.extern.slf4j.Slf4j
 final class TextureArray implements AutoCloseable
@@ -194,9 +192,8 @@ final class TextureArray implements AutoCloseable
 			// null tp = empty texture set (layer 0 reserve only), nothing to upload.
 			if (tp != null)
 			{
-				// Load at brightness=1.0 so dark pixels don't clamp to 0x000000,
-				// which the alpha-from-zero encoding below would mark transparent.
-				// scene.frag re-applies brightness via push constant.
+				// Load at brightness=1.0: dark pixels clamping to 0x000000 would be
+				// marked transparent by the alpha-from-zero encoding below.
 				double savedBrightness = tp.getBrightness();
 				tp.setBrightness(1.0);
 				try
@@ -268,11 +265,8 @@ final class TextureArray implements AutoCloseable
 	long animationUboHandle() { return animationUbo.handle(); }
 	long animationUboSize()   { return UBO_HEADER_BYTES + (long) ANIM_UBO_COUNT * 16L; }
 
-	/** Fog window clamp edges in world units (scene.vert fogScene.xy),
-	 *  scaled with the engine's expanded-map-loading chunks like stock's
-	 *  FOG_SCENE_EDGE_MIN/MAX. Written at scene capture: an 8-byte coherent
-	 *  store of a value that only changes with the expanded-chunks config,
-	 *  so in-flight readers can't observe a meaningful mix. */
+	/** Fog clamp edges in world units (scene.vert fogScene.xy). 8-byte coherent
+	 *  store of a rarely-changing value — in-flight readers can't see a torn mix. */
 	void setFogSceneEdges(float minWorld, float maxWorld)
 	{
 		ByteBuffer mapped = animationUbo.mappedByteBuffer().order(java.nio.ByteOrder.nativeOrder());

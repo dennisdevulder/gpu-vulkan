@@ -39,11 +39,7 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.system.MemoryUtil.memByteBuffer;
 import static org.lwjgl.vulkan.VK13.*;
 
-/**
- * Generic {@code VkBuffer + VkDeviceMemory} wrapper. M4 uses it for host-visible
- * staging (UI pixel upload). Map persistently — saves the per-frame map/unmap
- * round-trip that {@code GpuPlugin}'s {@code glMapBuffer} suffers.
- */
+/** Generic {@code VkBuffer + VkDeviceMemory} wrapper, persistently mappable. */
 final class Buffer implements AutoCloseable
 {
 	private final VulkanDevice device;
@@ -52,10 +48,8 @@ final class Buffer implements AutoCloseable
 	private final long size;
 	private final int memoryPropertyFlags;
 	private long mappedAddress;
-	/** Cached ByteBuffer view over the mapped region. Allocated once in
-	 *  {@link #mapPersistent()} so we don't churn a fresh wrapper per write —
-	 *  and so callers can't race on the {@code position/limit} state of two
-	 *  independently-created views over the same memory. */
+	/** Single cached view over the mapped region — independent views over the
+	 *  same memory would race on position/limit state. */
 	private ByteBuffer mappedView;
 	private IntBuffer mappedIntView;
 
@@ -139,12 +133,8 @@ final class Buffer implements AutoCloseable
 		}
 	}
 
-	/**
-	 * The single cached ByteBuffer view over the mapped region. Callers must
-	 * not assume the {@code position/limit} state on entry — reset before
-	 * use ({@code rewind()}, {@code clear()}, or build a fresh view via
-	 * {@link ByteBuffer#duplicate()} if you need concurrent views).
-	 */
+	/** Callers must not assume position/limit on entry — rewind/clear before
+	 *  use, or duplicate() for concurrent views. */
 	ByteBuffer mappedByteBuffer()
 	{
 		if (mappedAddress == 0L) throw new IllegalStateException("buffer not mapped");

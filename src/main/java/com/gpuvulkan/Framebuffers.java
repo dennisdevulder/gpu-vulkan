@@ -32,13 +32,8 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK13.*;
 
 /**
- * One {@link org.lwjgl.vulkan.VK13#vkCreateFramebuffer VkFramebuffer} per
- * swapchain image, all sharing the same render pass. Each framebuffer pairs
- * the per-image colour view with the (single) depth view from
- * {@link DepthBuffer}.
- *
- * <p>{@link #recreate} rebuilds in-place on swapchain resize so any external
- * reference (e.g. a Disposables entry) stays valid.
+ * One VkFramebuffer per swapchain image, sharing the render pass and single
+ * depth view. {@link #recreate} rebuilds in place so external references stay valid.
  */
 final class Framebuffers implements AutoCloseable
 {
@@ -59,10 +54,8 @@ final class Framebuffers implements AutoCloseable
 		create(renderPass, swapchain, depthBuffer, msaaColor);
 	}
 
-	/** Destroy current framebuffers without recreating. Callers that need
-	 *  fine-grained ordering (e.g. {@code rebuildSwapchain} wants to drop
-	 *  framebuffers BEFORE the swapchain destroys the image views they
-	 *  reference) use this + {@link #recreate} explicitly. */
+	/** Framebuffers must drop BEFORE the swapchain destroys the image views
+	 *  they reference (rebuildSwapchain ordering). */
 	void destroyAll()
 	{
 		destroy();
@@ -88,9 +81,8 @@ final class Framebuffers implements AutoCloseable
 		{
 			for (int i = 0; i < views.length; i++)
 			{
-				// MSAA layout matches RenderPass: [msaaColor, depth, swapchain
-				// resolve target]. Without MSAA the renderpass declares only
-				// two attachments and the swapchain image IS the color target.
+				// Attachment order matches RenderPass: [msaaColor, depth, resolve];
+				// without MSAA the swapchain image IS the color target.
 				LongBuffer attachments = msaaColor != null
 					? stack.longs(msaaColor.view(), depthBuffer.view(), views[i])
 					: stack.longs(views[i], depthBuffer.view());

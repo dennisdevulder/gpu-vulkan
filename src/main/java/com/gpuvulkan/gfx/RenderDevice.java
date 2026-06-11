@@ -49,12 +49,8 @@ public interface RenderDevice
 
 	StreamingImage createStreamingImage(int width, int height);
 
-	/**
-	 * Offscreen color+depth target. {@code samples} is a
-	 * {@code VK_SAMPLE_COUNT_*} value; pass
-	 * {@code VulkanRenderContext.renderPassSamples()} to match the main
-	 * scene pass, or 1 for post-process targets.
-	 */
+	/** {@code samples} is a {@code VK_SAMPLE_COUNT_*} value — match the main
+	 *  scene pass via renderPassSamples(), or 1 for post-process targets. */
 	RenderTarget createRenderTarget(int width, int height, int samples);
 
 	int currentSlot();

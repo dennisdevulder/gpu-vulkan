@@ -25,13 +25,9 @@
 package com.gpuvulkan.gfx;
 
 /**
- * A baked graphics pipeline. Bound at draw time via
- * {@link RenderEncoder#bindPipeline(RenderPipeline)}.
- *
- * <p>Pipelines are tied to a specific render-pass shape. Recreating the
- * swapchain doesn't invalidate the pipeline as long as the attachment
- * formats and sample count don't change, which is the case for our
- * resize path today.
+ * A baked graphics pipeline, bound via {@link RenderEncoder#bindPipeline}.
+ * Tied to a render-pass shape: swapchain recreation doesn't invalidate it as
+ * long as attachment formats and sample count are unchanged.
  */
 public interface RenderPipeline extends AutoCloseable
 {

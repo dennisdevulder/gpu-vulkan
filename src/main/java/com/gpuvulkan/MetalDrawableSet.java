@@ -39,34 +39,13 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK13.*;
 
 /**
- * Per-CAMetalDrawable {@link org.lwjgl.vulkan.VK13#vkCreateImage VkImage} +
- * view + framebuffer cache for the macOS custom-present path. Replaces the
- * role of {@link Swapchain} on macOS.
- *
- * <p>{@code CAMetalLayer} recycles a small pool (≤ {@code maximumDrawableCount},
- * default 3) of drawables. Each recurrence brings the same
- * {@code id<MTLTexture>} pointer, so we key the cache by that pointer — first
- * sight: import the MTLTexture as a {@link org.lwjgl.vulkan.VK13#vkCreateImage
- * VkImage} via {@link VkImportMetalTextureInfoEXT}, build a colour view and a
- * framebuffer (MSAA layout: {@code [msaaColor, depth, this image]} matching
- * {@link RenderPass}); subsequent sights hit the cache.
- *
- * <p>The MoltenVK imports do NOT own the Metal texture's storage — we only
- * destroy the {@code VkImage} + view + framebuffer wrappers on close. The
- * underlying {@code id<MTLTexture>} belongs to its {@code CAMetalDrawable}.
- *
- * <p>Resize handling: when an entry's cached width/height no longer matches
- * the supplied dimensions (drawableSize changed on canvas resize), we drop
- * the entry and rebuild. Entries whose underlying MTLTexture has been
- * replaced will simply never be looked up again (new pointer ⇒ new entry);
- * the resize path explicitly flushes the map to free Vulkan-side wrappers.
+ * VkImage/view/framebuffer cache keyed by MTLTexture pointer (macOS custom
+ * present). Imports do NOT own the Metal storage — close only destroys wrappers.
  */
 @Slf4j
 final class MetalDrawableSet implements AutoCloseable
 {
-	/** Format must match the CAMetalLayer.pixelFormat we set in rlmtl.m
-	 *  (MTLPixelFormatBGRA8Unorm). The render pass + UI/scene pipelines
-	 *  already target this format on macOS. */
+	/** Must match the CAMetalLayer.pixelFormat set in rlmtl.m (MTLPixelFormatBGRA8Unorm). */
 	static final int IMAGE_FORMAT = VK_FORMAT_B8G8R8A8_UNORM;
 
 	private final VulkanDevice device;
@@ -89,14 +68,7 @@ final class MetalDrawableSet implements AutoCloseable
 		this.device = device;
 	}
 
-	/**
-	 * @param textureHandle {@code id<MTLTexture>} pointer from
-	 *                      {@link MacOSMetalHelper#nextDrawable()}'s
-	 *                      element [1]
-	 * @param width         drawable texture width in pixels
-	 * @param height        drawable texture height in pixels
-	 * @return cached or freshly-built entry for this texture
-	 */
+	/** {@code textureHandle} is the {@code id<MTLTexture>} pointer; dims in pixels. */
 	Entry acquire(long textureHandle, int width, int height,
 				  RenderPass renderPass, DepthBuffer depth, MsaaColorBuffer msaa)
 	{
@@ -107,8 +79,7 @@ final class MetalDrawableSet implements AutoCloseable
 		}
 		if (e != null)
 		{
-			// Drawable size changed under us. Free the stale wrappers and
-			// rebuild against the new dimensions.
+			// Drawable size changed; rebuild against the new dimensions.
 			destroyEntry(e);
 			byTextureHandle.remove(textureHandle);
 		}
@@ -118,9 +89,8 @@ final class MetalDrawableSet implements AutoCloseable
 		return e;
 	}
 
-	/** Flushes all cached entries. Call on canvas resize before the depth /
-	 *  MSAA buffers get rebuilt — the framebuffers reference those views, so
-	 *  they MUST be torn down first. */
+	/** Must run BEFORE depth/MSAA buffers rebuild on resize — the framebuffers
+	 *  reference those views. */
 	void flush()
 	{
 		for (Entry e : byTextureHandle.values())
@@ -143,9 +113,7 @@ final class MetalDrawableSet implements AutoCloseable
 		{
 			long image = importDrawableImage(stack, textureHandle, width, height);
 
-			// Imported images come pre-bound to the Metal storage. The spec
-			// note in VK_EXT_metal_objects: no vkBindImageMemory call —
-			// MoltenVK has already wired the MTLTexture as the backing.
+			// Imported images are pre-bound to the Metal storage: no vkBindImageMemory.
 
 			long view = createDrawableView(stack, image);
 			long framebuffer = createDrawableFramebuffer(stack, image, view, width, height, renderPass, depth, msaa);
@@ -166,11 +134,8 @@ final class MetalDrawableSet implements AutoCloseable
 
 	private long importDrawableImage(MemoryStack stack, long textureHandle, int width, int height)
 	{
-		// Import the MTLTexture as a VkImage. MoltenVK reads the pointer
-		// out of VkImportMetalTextureInfoEXT and binds it as the image's
-		// Metal backing — no Vulkan-side allocation happens for the
-		// storage. The plane (BGRA single plane = 0 / PLANE_0_BIT) is
-		// the only sensible value for a CAMetalDrawable's color texture.
+		// No Vulkan-side allocation: MoltenVK binds the MTLTexture as the
+		// image's backing. BGRA is single-plane, hence PLANE_0_BIT.
 		VkImportMetalTextureInfoEXT importInfo = VkImportMetalTextureInfoEXT.calloc(stack)
 			.sType$Default()
 			.plane(VK_IMAGE_ASPECT_PLANE_0_BIT)
@@ -268,8 +233,6 @@ final class MetalDrawableSet implements AutoCloseable
 		}
 	}
 
-	/** Accessors mirroring the {@link Swapchain#imageFormat()} hook so the
-	 *  rest of the pipeline doesn't need a special case. */
 	int imageFormat()
 	{
 		return IMAGE_FORMAT;

@@ -43,11 +43,8 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK13.*;
 
 /**
- * Stack lifetime: {@link #pushConstants} and {@link #setViewport} /
- * {@link #setScissor} stack-allocate their structs per call. Push-constants
- * are copied into the command buffer immediately; viewport/scissor structs
- * are read by {@code vkCmdSetViewport} / {@code vkCmdSetScissor} during the
- * call, both pure value semantics. No struct outlives its stack scope.
+ * Stack-allocates per-call structs; all are consumed during the vkCmd call,
+ * so no struct outlives its stack scope.
  */
 final class GfxRenderEncoder implements RenderEncoder
 {

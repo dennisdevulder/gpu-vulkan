@@ -35,15 +35,9 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK13.*;
 
 /**
- * Multi-sampled color attachment used as the renderpass's primary color
- * target. The renderpass resolves it down into the single-sampled swapchain
- * image as the resolve attachment, so the final presented frame is at 1×
- * sampling but edges have been MSAA-resolved.
- *
- * <p>Same lifecycle as {@link DepthBuffer}: created with the swapchain extent
- * + chosen sample count, rebuilt in place via {@link #recreate} on swapchain
- * resize. {@code TRANSIENT_ATTACHMENT} usage hints that the contents don't
- * need to persist past the renderpass — drivers can use tiled/lazy memory.
+ * Multi-sampled color target the render pass resolves into the final image.
+ * Rebuilt via {@link #recreate} on resize; TRANSIENT_ATTACHMENT lets drivers
+ * keep it in tiled/lazy memory.
  */
 final class MsaaColorBuffer implements AutoCloseable
 {

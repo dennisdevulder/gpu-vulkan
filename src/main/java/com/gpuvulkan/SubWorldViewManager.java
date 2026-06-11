@@ -36,21 +36,9 @@ import net.runelite.api.Scene;
 import org.lwjgl.vulkan.VkCommandBuffer;
 
 /**
- * Renders sub-worldview scenes (WorldEntity, e.g. sailing ships) with one
- * small {@link SceneRenderer} per worldview — its own vertex arena, so a
- * sub-scene can never clobber the top-level capture (the fbf75b8 bug class
- * this replaces the isTopLevelScene quarantine for).
- *
- * <p>Placement follows stock GPU's model: the engine hands each zone draw a
- * {@link FloatProjection} that maps sub-scene-local to toplevel-scene-local
- * coordinates. Clip positions use the CPU-composed {@code world * entity}
- * matrix; fog reconstructs world XZ in the shader from the entity translate
- * and yaw (scene.vert misc.yzw). Dynamic models arrive with an
- * engine-composed projection, so the CPU face sorter works unchanged.
- *
- * <p>Lifecycle mirrors the toplevel's: loadScene callbacks are unreliable in
- * this engine version, so capture keys off the first preSceneDraw sighting
- * plus identity changes, and {@code despawnWorldView} frees the renderer.
+ * One small {@link SceneRenderer} per sub-worldview (WorldEntity, e.g. ships) —
+ * separate vertex arenas so a sub-scene can never clobber the toplevel capture.
+ * Clip uses the CPU-composed world*entity matrix; fog reconstructs world XZ in-shader.
  */
 @Slf4j
 final class SubWorldViewManager implements AutoCloseable
@@ -136,12 +124,8 @@ final class SubWorldViewManager implements AutoCloseable
 		view.baseY = scene.getBaseY();
 	}
 
-	/**
-	 * Records the entity placement from any per-zone/pass callback carrying
-	 * the engine's sub-to-toplevel transform. The engine reuses one
-	 * Projection per worldview per frame, so overwriting per call is cheap
-	 * and avoids stock's stale reference-identity cache.
-	 */
+	/** Overwrite the placement on every callback — caching by Projection
+	 *  reference identity goes stale. */
 	void recordProjection(Projection entityProjection, Scene scene)
 	{
 		if (!(entityProjection instanceof FloatProjection))
@@ -159,10 +143,8 @@ final class SubWorldViewManager implements AutoCloseable
 			return;
 		}
 		System.arraycopy(m, 0, view.entityMatrix, 0, 16);
-		// Translate + yaw for the shader's fog-space reconstruction. Yaw from
-		// the rotY cells (column-major: m[0]=cos, m[8]=sin in the engine's
-		// orientation convention); pitch/roll, if the engine ever adds them,
-		// only perturb fog, never clip position.
+		// Yaw from the rotY cells (column-major: m[0]=cos, m[8]=sin); pitch/roll
+		// would only perturb fog, never clip position.
 		view.entityTx = Math.round(m[12]);
 		view.entityTz = Math.round(m[14]);
 		view.entityYawJau = (int) Math.round(Math.atan2(m[8], m[0]) * JAU_PER_RADIAN) & 2047;

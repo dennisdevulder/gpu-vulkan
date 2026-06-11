@@ -31,10 +31,8 @@ import net.runelite.client.config.ConfigSection;
 import net.runelite.client.config.Range;
 
 /**
- * Panel layout: the four day-to-day settings (draw distance, FPS mode,
- * FPS target, fog depth) sit at top level; everything else lives in a
- * collapsed section. Key names are persistent storage keys — never rename
- * one (saved settings die and the onConfigChanged handlers match on them).
+ * Key names are persistent storage keys — never rename one (saved settings
+ * die and the onConfigChanged handlers match on them).
  */
 @ConfigGroup(GpuVulkanPluginConfig.GROUP)
 public interface GpuVulkanPluginConfig extends Config
@@ -98,19 +96,12 @@ public interface GpuVulkanPluginConfig extends Config
 		/** Vsync — Vulkan FIFO present mode. Caps render at the display
 		 *  refresh rate. Most power-efficient, no tearing. */
 		VSYNC,
-		/** Adaptive vsync — Vulkan FIFO_RELAXED. Like VSYNC, but if a frame
-		 *  misses the refresh deadline it tears that one frame instead of
-		 *  doubling latency. Falls back to FIFO when the device lacks
-		 *  FIFO_RELAXED support. */
+		/** FIFO_RELAXED: a late frame tears instead of doubling latency.
+		 *  Falls back to FIFO when unsupported. */
 		ADAPTIVE_VSYNC,
-		/** Triple-buffer — Vulkan MAILBOX present mode. GPU can render
-		 *  faster than the refresh rate but only the latest frame is shown.
-		 *  Smooth, no tearing, low input latency. Reported FPS is still
-		 *  bounded by the refresh rate (the extra renders just get dropped). */
+		/** MAILBOX: latest frame wins; reported FPS still bounded by refresh. */
 		TRIPLE_BUFFER,
-		/** Uncapped — Vulkan IMMEDIATE present mode + engine FPS unlocked.
-		 *  GPU renders as fast as possible. Tearing visible. Use for
-		 *  benchmarking only — the reported FPS shows raw renderer capacity. */
+		/** IMMEDIATE + engine FPS unlocked. Tears; benchmarking only. */
 		UNCAPPED
 	}
 
@@ -299,9 +290,8 @@ public interface GpuVulkanPluginConfig extends Config
 	)
 	default boolean validation()
 	{
-		// Default off because the layer SIGSEGVs on plugin disable on
-		// Fedora 43/44 (vulkan-validation-layers 1.4.341). See docs/KNOWN_ISSUES.md
-		// issue #2. Opt in via -Dvkgpu.validation=true (vkdev script does this).
+		// Default off: the layer SIGSEGVs on plugin disable on some hosts
+		// (KNOWN_ISSUES #2). Opt in via -Dvkgpu.validation=true.
 		return Boolean.parseBoolean(System.getProperty("vkgpu.validation", "false"));
 	}
 

@@ -47,11 +47,8 @@ import static org.lwjgl.vulkan.KHRSurface.vkGetPhysicalDeviceSurfaceSupportKHR;
 import static org.lwjgl.vulkan.VK13.*;
 
 /**
- * Picks a physical device + queue family that supports both graphics and
- * present on the given {@link VulkanSurface}, and creates the matching
- * {@link VkDevice} with {@code VK_KHR_swapchain} enabled. We assume one
- * combined queue family — true on every consumer GPU; if a future device
- * splits them we'll widen to two queue indices.
+ * Picks a physical device + queue family (graphics and present must share one
+ * family) and creates the {@link VkDevice} with {@code VK_KHR_swapchain}.
  */
 @Slf4j
 final class VulkanDevice implements AutoCloseable
@@ -63,25 +60,16 @@ final class VulkanDevice implements AutoCloseable
 	private final String deviceName;
 	private final float maxSamplerAnisotropy;
 	private final int maxSampleCount;
-	/** Reflects the {@link VkPhysicalDeviceFeatures} bits the device actually
-	 *  reports — not what we'd like. Validation rejects {@code vkCreateDevice}
-	 *  if we request a feature the implementation says no to; downstream code
-	 *  (wireframe pipeline, anisotropic sampler) reads these and skips/clamps
-	 *  cleanly when unsupported. Both are universally available on desktop
-	 *  drivers but software/llvmpipe + a few embedded SoCs can be missing
-	 *  either one. */
+	/** What the device actually reports — llvmpipe and some embedded SoCs lack
+	 *  these; downstream code must skip/clamp when unsupported. */
 	private final boolean supportsFillModeNonSolid;
 	private final boolean supportsSamplerAnisotropy;
 	private final long nonCoherentAtomSize;
-	/** {@code true} when VK_EXT_metal_objects is enabled (macOS only).
-	 *  Populated at the device-extension-enable step. Other code branches
-	 *  on this to pick between the KHR_swapchain present path (Linux) and
-	 *  the custom MTLCommandQueue present path (macOS). */
+	/** VK_EXT_metal_objects enabled (macOS only); selects the custom
+	 *  MTLCommandQueue present path over KHR_swapchain. */
 	private final boolean supportsMetalObjects;
-	/** {@code id<MTLCommandQueue>} pointer the custom present path uses to
-	 *  schedule {@code [drawable present]} after our Vulkan render. Extracted
-	 *  via vkExportMetalObjectsEXT in {@link #extractMetalCommandQueue}.
-	 *  Zero when {@link #supportsMetalObjects} is false. */
+	/** {@code id<MTLCommandQueue>} for the custom present path; zero when
+	 *  {@link #supportsMetalObjects} is false. */
 	private long metalCommandQueue;
 
 	VulkanDevice(VulkanInstance instance, VulkanSurface surface)
@@ -97,9 +85,8 @@ final class VulkanDevice implements AutoCloseable
 			this.deviceName = props.deviceNameString();
 			this.nonCoherentAtomSize = props.limits().nonCoherentAtomSize();
 
-			// Query what the device actually offers BEFORE asking for any
-			// feature. Requesting an unsupported feature is a spec violation
-			// and most drivers fail vkCreateDevice with FEATURE_NOT_PRESENT.
+			// Query features BEFORE requesting any — asking for an unsupported
+			// one fails vkCreateDevice with FEATURE_NOT_PRESENT.
 			VkPhysicalDeviceFeatures supported = VkPhysicalDeviceFeatures.calloc(stack);
 			vkGetPhysicalDeviceFeatures(physicalDevice, supported);
 			this.supportsFillModeNonSolid  = supported.fillModeNonSolid();
@@ -109,17 +96,12 @@ final class VulkanDevice implements AutoCloseable
 			this.maxSamplerAnisotropy = clampMaxSamplerAnisotropy(props);
 			this.maxSampleCount = pickMaxSampleCount(props);
 
-			// Spec: if a device advertises VK_KHR_portability_subset, the app
-			// MUST enable it at vkCreateDevice or device creation fails with
-			// VK_ERROR_EXTENSION_NOT_PRESENT. MoltenVK always reports it.
-			// Stock desktop drivers (NVIDIA / AMD / Intel / Mesa) never do,
-			// so this is a no-op for them.
+			// Spec: a device advertising VK_KHR_portability_subset MUST have it
+			// enabled at vkCreateDevice (MoltenVK always advertises it).
 			Set<String> deviceExtensions = enumerateDeviceExtensions(stack, physicalDevice);
 			boolean hasPortabilitySubset = deviceExtensions.contains("VK_KHR_portability_subset");
-			// VK_EXT_metal_objects lets us extract the MTLCommandQueue our
-			// VkQueue maps to, so we can present CAMetalDrawables ourselves
-			// (bypassing MoltenVK's vkQueuePresentKHR — see MacOSMetalHelper
-			// + VulkanRenderer.drawFrame). macOS only; advertised by MoltenVK.
+			// VK_EXT_metal_objects exposes our VkQueue's MTLCommandQueue so we
+			// can present CAMetalDrawables ourselves (macOS only).
 			boolean hasMetalObjects = deviceExtensions.contains("VK_EXT_metal_objects")
 				&& !Boolean.getBoolean("vkgpu.disableCustomPresent");
 			this.supportsMetalObjects = hasMetalObjects;
@@ -148,11 +130,8 @@ final class VulkanDevice implements AutoCloseable
 
 	private float clampMaxSamplerAnisotropy(VkPhysicalDeviceProperties props)
 	{
-		// Some drivers report 0 if anisotropy isn't supported even though
-		// the feature bit says yes — clamp to 1 so disabled samplers don't
-		// trip validation. Otherwise we go up to whatever the device allows
-		// (usually 16 on modern hardware). If the feature itself isn't
-		// supported, force 1 regardless of the limit.
+		// Some drivers report a 0 limit; clamp to 1 so disabled samplers
+		// don't trip validation.
 		return supportsSamplerAnisotropy
 			? Math.max(1.0f, props.limits().maxSamplerAnisotropy())
 			: 1.0f;
@@ -160,9 +139,8 @@ final class VulkanDevice implements AutoCloseable
 
 	private static int pickMaxSampleCount(VkPhysicalDeviceProperties props)
 	{
-		// Sample counts the device supports for both color and depth
-		// attachments at once — this is what we can actually request for
-		// an MSAA renderpass. Pick the highest bit they share.
+		// MSAA needs the count supported for color AND depth at once;
+		// pick the highest bit they share.
 		int counts = props.limits().framebufferColorSampleCounts()
 			& props.limits().framebufferDepthSampleCounts();
 		return highestSampleBit(counts);
@@ -192,9 +170,7 @@ final class VulkanDevice implements AutoCloseable
 		}
 		devExtensions.flip();
 
-		// Enable only what's both wanted AND supported. Downstream code
-		// (ScenePipeline wireframe, TextureArray sampler) reads the
-		// corresponding supports* flag and degrades gracefully.
+		// Enable only what's both wanted AND supported.
 		VkPhysicalDeviceFeatures features = VkPhysicalDeviceFeatures.calloc(stack)
 			.fillModeNonSolid(supportsFillModeNonSolid)
 			.samplerAnisotropy(supportsSamplerAnisotropy);
@@ -222,13 +198,8 @@ final class VulkanDevice implements AutoCloseable
 		return queue;
 	}
 
-	/**
-	 * Calls {@code vkExportMetalObjectsEXT} with a
-	 * {@link org.lwjgl.vulkan.VkExportMetalCommandQueueInfoEXT} pNext chain to
-	 * pull out the {@code id<MTLCommandQueue>} MoltenVK created for our
-	 * {@link VkQueue}. The returned pointer is owned by MoltenVK; we don't
-	 * release it — the queue's lifetime is the device's lifetime.
-	 */
+	/** Returned pointer is owned by MoltenVK — never release it; its lifetime
+	 *  is the device's. */
 	private long extractMetalCommandQueue(MemoryStack stack)
 	{
 		org.lwjgl.vulkan.VkExportMetalCommandQueueInfoEXT qInfo =
@@ -302,17 +273,14 @@ final class VulkanDevice implements AutoCloseable
 		return nonCoherentAtomSize;
 	}
 
-	/** Highest {@code VK_SAMPLE_COUNT_*_BIT} the device supports for both
-	 *  color and depth attachments simultaneously. Use {@link #pickSampleCount}
-	 *  to clamp a desired value against this. */
+	/** Highest {@code VK_SAMPLE_COUNT_*_BIT} supported for color and depth
+	 *  attachments simultaneously. */
 	int maxSampleCount()
 	{
 		return maxSampleCount;
 	}
 
-	/** Returns the largest {@code VK_SAMPLE_COUNT_*_BIT} value &le; {@code desired}
-	 *  and &le; {@link #maxSampleCount()}. {@code desired} is the raw sample count
-	 *  (1, 2, 4, 8, …), not a bitmask. */
+	/** {@code desired} is the raw sample count (1, 2, 4, 8, …), not a bitmask. */
 	int pickSampleCount(int desired)
 	{
 		int wanted = highestSampleBit(desired);

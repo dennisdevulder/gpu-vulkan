@@ -206,9 +206,8 @@ final class BaseRenderer implements VulkanRenderExtension
 		{
 			return;
 		}
-		// Stock draw order across scenes: all opaque first, then blended
-		// alpha — a ship behind translucent toplevel geometry must already
-		// be in the depth buffer when that geometry blends.
+		// All opaque first across scenes, then blended alpha — a ship behind
+		// translucent geometry must already be in the depth buffer when it blends.
 		if (subWorldViews != null && sceneRenderer instanceof DefaultVulkanSceneRenderer)
 		{
 			DefaultVulkanSceneRenderer toplevel = (DefaultVulkanSceneRenderer) sceneRenderer;

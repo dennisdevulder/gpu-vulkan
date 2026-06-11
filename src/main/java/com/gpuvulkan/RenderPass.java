@@ -37,19 +37,9 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK13.*;
 
 /**
- * Single-subpass render pass with three attachments when MSAA is on:
- * <ul>
- *   <li>0: multi-sampled color (rendered into; not stored, drivers may keep
- *       it in tile memory).</li>
- *   <li>1: multi-sampled depth (rendered into; not stored).</li>
- *   <li>2: single-sampled resolve target = the final color image (driver
- *       writes the resolved color into this at end-of-subpass; stored and
- *       transitioned for either WSI present or custom Metal present).</li>
- * </ul>
- *
- * <p>When {@code samples == VK_SAMPLE_COUNT_1_BIT} we drop the resolve and
- * render directly into the final color image (attachment 0). Same renderpass
- * shape used by stock GpuPlugin's FBO path.
+ * Single-subpass render pass. MSAA: [msaa color, msaa depth, single-sample
+ * resolve = final image]; at 1x the resolve is dropped and attachment 0 is
+ * the final color image.
  */
 final class RenderPass implements AutoCloseable
 {
@@ -90,10 +80,8 @@ final class RenderPass implements AutoCloseable
 		int attachmentCount = msaa ? 3 : 2;
 		VkAttachmentDescription.Buffer attachments = VkAttachmentDescription.calloc(attachmentCount, stack);
 
-		// Attachment 0: color. With MSAA we render into the multi-sampled
-		// image then resolve out, so we don't need to store it. Without
-		// MSAA we render directly into the final color image so storeOp is
-		// STORE and finalLayout matches the presentation path.
+		// Attachment 0: color. MSAA resolves out (no store); without MSAA this
+		// IS the final image, so STORE + present-path finalLayout.
 		attachments.get(0)
 			.format(colorFormat)
 			.samples(samples)
@@ -161,21 +149,9 @@ final class RenderPass implements AutoCloseable
 
 	private static VkSubpassDependency.Buffer buildFrameDependency(MemoryStack stack, boolean swapchainPresent)
 	{
-		// Frame-to-frame sync. The color attachment for swapchain images
-		// is per-image (acquired via the semaphore — UNDEFINED initial
-		// layout absorbs that side). But the depth attachment is a single
-		// image reused across frames, so frame N+1's depth write hazards
-		// against frame N's LATE_FRAGMENT_TESTS write unless we declare
-		// the dependency here. srcAccessMask = 0 (the previous value)
-		// trips validation's WRITE_AFTER_WRITE check on every frame.
-		//
-		// Cover both attachments on the src side so the same dep works
-		// regardless of whether the swapchain image happens to be the
-		// same one we used a few frames ago (UNDEFINED handles the
-		// content-discard half; this handles the write-ordering half).
-		// Offscreen targets are shared across frames in flight and read
-		// after the pass by blits/FSR sampling — the next frame's
-		// clear/draw must wait for those reads (WAR, execution-only).
+		// Frame-to-frame sync: the depth image is reused across frames, so frame
+		// N+1's depth write hazards frame N's LATE_FRAGMENT_TESTS write
+		// (WRITE_AFTER_WRITE) unless declared here. Offscreen adds WAR vs post-pass reads.
 		int srcStages = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
 			| VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
 		if (!swapchainPresent)

@@ -35,11 +35,8 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK13.*;
 
 /**
- * Single-mip 2D depth attachment matching the swapchain extent.
- * VK_FORMAT_D32_SFLOAT — broadly supported, no stencil. Sample count must
- * match whatever the renderpass expects (1 for non-MSAA, 4/8/etc. for MSAA).
- * {@link #recreate} rebuilds in-place on swapchain resize so any reference
- * (e.g. a Disposables entry) stays valid.
+ * D32_SFLOAT depth attachment at swapchain extent; sample count must match
+ * the render pass. {@link #recreate} rebuilds in place on resize.
  */
 final class DepthBuffer implements AutoCloseable
 {

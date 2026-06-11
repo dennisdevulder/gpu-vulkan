@@ -41,11 +41,8 @@ import com.gpuvulkan.gfx.StreamingImage;
 import org.lwjgl.vulkan.VkCommandBuffer;
 
 /**
- * UI overlay renderer. Owns a {@link StreamingImage} that rings textures
- * across FRAMES_IN_FLIGHT slots, one bind group pointed at it, and a
- * single pipeline. Entry points: {@code uploadPixels} (host-side memcpy),
- * {@code recordCopyToImage} (transfer), {@code recordDraw} (fullscreen
- * quad).
+ * UI overlay renderer: a {@link StreamingImage} ringed across FRAMES_IN_FLIGHT
+ * slots, one bind group, one fullscreen-quad pipeline.
  */
 final class InterfaceRenderer implements AutoCloseable
 {
@@ -142,9 +139,8 @@ final class InterfaceRenderer implements AutoCloseable
 		{
 			return;
 		}
-		// Bind group has the texture handles baked in, so it can't survive
-		// streaming-image teardown — recreate both on resize. Image closes
-		// first: its waitIdle must precede the descriptor pool destroy.
+		// Bind group bakes texture handles in — recreate both on resize. Image
+		// closes first: its waitIdle must precede the descriptor pool destroy.
 		if (uiImage != null)
 		{
 			uiImage.close();

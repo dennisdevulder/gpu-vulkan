@@ -50,19 +50,8 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK13.*;
 
 /**
- * Wraps {@link VkInstance} creation. Optionally enables
- * {@code VK_LAYER_KHRONOS_validation} when validation is on, but only if the
- * layer is actually installed — silently falls back to no validation if the
- * SDK isn't on the host.
- *
- * <p>When validation is enabled, also wires up {@code VK_EXT_debug_utils} +
- * a {@link VkDebugUtilsMessengerEXT} so the layer has a real callback to
- * route messages through. Without a registered messenger the layer falls
- * back to its stderr-only code paths, which on plugin disable can hit a
- * use-after-free in the layer's own object-lifetime tracker (SIGSEGV in
- * {@code libVkLayer_khronos_validation.so}). Giving the layer a proper
- * callback keeps it on the well-tested message path AND surfaces any
- * actual VUID violations we have via slf4j so we can fix them.
+ * Wraps {@link VkInstance} creation. Validation requires a registered debug
+ * messenger — without one the layer's stderr path can SIGSEGV on disable.
  */
 @Slf4j
 final class VulkanInstance implements AutoCloseable
@@ -70,11 +59,8 @@ final class VulkanInstance implements AutoCloseable
 	private static final String VALIDATION_LAYER = "VK_LAYER_KHRONOS_validation";
 
 	private final VkInstance handle;
-	/** Non-null only when validation+debug messenger are active. Held so we
-	 *  can {@link VkDebugUtilsMessengerCallbackEXT#free()} the JNI-side
-	 *  function-pointer wrapper at close time — otherwise the native callback
-	 *  shim leaks across plugin enable/disable cycles, which is one of the
-	 *  things the validation layer's tracker eventually trips over. */
+	/** Held so the JNI callback shim can be free()'d at close — it leaks
+	 *  across enable/disable cycles otherwise. */
 	private final VkDebugUtilsMessengerCallbackEXT debugCallback;
 	/** {@code VK_NULL_HANDLE} when validation is off OR the messenger create
 	 *  call failed. Must be destroyed BEFORE {@link #handle} per the spec. */
@@ -102,13 +88,8 @@ final class VulkanInstance implements AutoCloseable
 
 				cb = createDebugCallback();
 
-				// Deliberately NOT chaining a pNext create-info onto
-				// vkCreateInstance. That trick catches messages from inside
-				// the create/destroy-instance calls themselves, but it creates
-				// an implicit messenger that some layer builds have known
-				// problems unwinding cleanly across multiple instance lifecycles.
-				// The persistent messenger created post-instance below covers
-				// everything else.
+				// Deliberately NOT chaining a pNext messenger onto vkCreateInstance:
+				// some layer builds can't unwind it across multiple instance lifecycles.
 			}
 
 			this.handle = createInstance(stack, info, cb);
@@ -119,14 +100,8 @@ final class VulkanInstance implements AutoCloseable
 
 	private static String[] filterSurfaceExtensions(MemoryStack stack, String[] requestedExts)
 	{
-		// Filter against what the implementation actually exposes.
-		// VK_KHR_portability_enumeration is a loader-level extension: with
-		// the official Vulkan SDK loader on macOS it IS advertised, but
-		// when LWJGL bundles MoltenVK directly there's no loader in the
-		// picture and the extension is missing. Requesting an extension
-		// the impl doesn't advertise → vkCreateInstance returns
-		// VK_ERROR_EXTENSION_NOT_PRESENT (-7). The matching create-flag
-		// is also skipped in that case (set further down).
+		// Filter against what the impl exposes: VK_KHR_portability_enumeration is
+		// missing when LWJGL bundles MoltenVK directly (no loader in the picture).
 		Set<String> available = enumerateInstanceExtensions(stack);
 		java.util.ArrayList<String> surfaceExtList = new java.util.ArrayList<>(requestedExts.length);
 		for (String e : requestedExts)
@@ -160,12 +135,8 @@ final class VulkanInstance implements AutoCloseable
 			.pApplicationInfo(app)
 			.ppEnabledExtensionNames(buildExtensionNames(stack, surfaceExts, validationOn));
 
-		// Opt into synchronization validation. The validation layer's default
-		// checks catch API misuse (wrong types, bad handles, etc.) but NOT
-		// missing barriers or CPU↔GPU host-memory races on persistently-mapped
-		// buffers — exactly the bug class we're hunting. The extra cost is
-		// fine for a development run; we leave it off in production by virtue
-		// of validation being opt-in via -Dvkgpu.validation=true.
+		// Sync validation: default checks don't catch missing barriers or
+		// CPU/GPU races on persistently-mapped buffers.
 		if (validationOn)
 		{
 			IntBuffer enables = stack.ints(
@@ -180,13 +151,6 @@ final class VulkanInstance implements AutoCloseable
 
 	private static PointerBuffer buildExtensionNames(MemoryStack stack, String[] surfaceExts, boolean validationOn)
 	{
-		// Surface extensions come from the platform layer (VK_KHR_surface
-		// + the right platform-specific surface extension for X11 / Win32
-		// / Metal). VK_EXT_debug_utils is added when validation is on so
-		// we can register a messenger callback. VK_EXT_validation_features
-		// is added so we can opt into synchronization validation, which is
-		// the layer's race-condition / missing-barrier detector — off by
-		// default because it's expensive at runtime.
 		int validationExtCount = validationOn ? 2 : 0;
 		int extCount = surfaceExts.length + validationExtCount;
 		PointerBuffer extNames = stack.mallocPointer(extCount);
@@ -205,11 +169,8 @@ final class VulkanInstance implements AutoCloseable
 
 	private static int portabilityInstanceFlags(String[] surfaceExts)
 	{
-		// VK_KHR_portability_enumeration is requested on platforms that run
-		// on top of a portability-subset implementation (MoltenVK on macOS).
-		// When the extension is present in the list, also set the matching
-		// instance-create flag — without it MoltenVK refuses to enumerate
-		// and vkCreateInstance returns VK_ERROR_INCOMPATIBLE_DRIVER.
+		// The extension needs its matching instance-create flag, or MoltenVK
+		// fails vkCreateInstance with VK_ERROR_INCOMPATIBLE_DRIVER.
 		int instanceFlags = 0;
 		for (String name : surfaceExts)
 		{
@@ -280,9 +241,8 @@ final class VulkanInstance implements AutoCloseable
 	@Override
 	public void close()
 	{
-		// Order matters: messenger before instance (spec), callback shim
-		// free()'d after the messenger is gone (otherwise the JNI dispatch
-		// could still be invoked into a freed shim during teardown).
+		// Order: messenger before instance (spec); callback shim free()'d
+		// only after the messenger is gone.
 		if (debugMessenger != VK_NULL_HANDLE)
 		{
 			EXTDebugUtils.vkDestroyDebugUtilsMessengerEXT(handle, debugMessenger, null);

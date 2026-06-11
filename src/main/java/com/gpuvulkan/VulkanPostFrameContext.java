@@ -27,16 +27,10 @@ package com.gpuvulkan;
 import org.lwjgl.vulkan.VkCommandBuffer;
 
 /**
- * The fully composited frame (scene + UI), handed to
- * {@link VulkanRenderExtension#recordAfterComposite} after the final render
- * pass has ended and before the frame is presented.
- *
- * <p>{@link #colorImage()} is backend-owned and was created with
- * {@code VK_IMAGE_USAGE_TRANSFER_SRC_BIT}; it is in {@link #imageLayout()}
- * when the hook runs and must be back in that layout when the hook returns.
- * Recorded commands execute on the graphics queue and are fenced by the
- * frame's in-flight fence — use {@link #frameIndex()} to cycle per-frame
- * resources sized to {@link VulkanRenderContext#framesInFlight()}.
+ * The composited frame (scene + UI) handed to recordAfterComposite before
+ * present. {@link #colorImage()} has TRANSFER_SRC usage, is in
+ * {@link #imageLayout()} at entry and must be restored on return. Commands are
+ * fenced by the frame's in-flight fence — cycle resources by {@link #frameIndex()}.
  */
 public interface VulkanPostFrameContext
 {

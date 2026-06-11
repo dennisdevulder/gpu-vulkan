@@ -31,16 +31,7 @@ public interface VulkanRenderBackend
 {
 	boolean isReady();
 
-	/**
-	 * Register a render extension. If the backend is not ready yet, the
-	 * extension is attached during the next successful startup.
-	 *
-	 * <p>Registration is serialized with render-extension callbacks. Calling
-	 * this or closing the returned handle from another thread is allowed, but it
-	 * may block until the current callback finishes.
-	 *
-	 * @return registration handle; closing it unregisters and closes the
-	 * extension.
-	 */
+	/** Thread-safe but may block until the current callback finishes; attaches at
+	 *  next startup if not ready. Closing the handle unregisters and closes the extension. */
 	AutoCloseable registerExtension(VulkanRenderExtension extension);
 }

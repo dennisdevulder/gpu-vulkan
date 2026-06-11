@@ -32,12 +32,9 @@ import net.runelite.client.events.ConfigChanged;
 import org.lwjgl.vulkan.VkCommandBuffer;
 
 /**
- * Extension point for renderers that want to share the GPU Vulkan backend.
- *
- * <p>The backend owns RuneLite's {@code DrawCallbacks} slot and fans scene,
- * model, config and command-recording events out through this interface. This
- * keeps platform setup, swapchain handling and frame sync in one place while
- * allowing renderer modules to provide their own pipelines.
+ * Extension point for renderers sharing the GPU Vulkan backend. The backend
+ * owns RuneLite's {@code DrawCallbacks} slot and fans scene, model, config and
+ * command-recording events out through this interface.
  */
 public interface VulkanRenderExtension extends AutoCloseable
 {
@@ -92,17 +89,12 @@ public interface VulkanRenderExtension extends AutoCloseable
 
 	default void uploadUiPixels(int[] pixels, int width, int height) {}
 
-	/**
-	 * Record commands that must happen before {@code vkCmdBeginRenderPass}.
-	 * Typical use: staging-buffer copies and image layout transitions.
-	 */
+	/** Record commands that must precede {@code vkCmdBeginRenderPass}
+	 *  (staging copies, layout transitions). */
 	default void recordBeforeRenderPass(VkCommandBuffer commandBuffer) {}
 
-	/**
-	 * Non-null to redirect the scene pass into an extension-owned target
-	 * this frame (upscaling, full-scene post-processing). The first
-	 * registered extension returning non-null wins.
-	 */
+	/** Non-null redirects the scene pass into an extension-owned target this
+	 *  frame; the first registered extension returning non-null wins. */
 	default ScenePassRedirect scenePassRedirect() { return null; }
 
 	default void recordScenePass(VulkanFrameContext frame) {}
@@ -111,12 +103,8 @@ public interface VulkanRenderExtension extends AutoCloseable
 
 	default void recordRenderPass(VulkanFrameContext frame) {}
 
-	/**
-	 * Record commands against the final composited frame (scene + UI), after
-	 * the last render pass has ended and before present. Typical use: copying
-	 * the frame out for capture or video encode. See
-	 * {@link VulkanPostFrameContext} for the layout contract.
-	 */
+	/** Record against the composited frame after the last render pass, before
+	 *  present. See {@link VulkanPostFrameContext} for the layout contract. */
 	default void recordAfterComposite(VulkanPostFrameContext frame) {}
 
 	@Override

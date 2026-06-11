@@ -35,14 +35,9 @@ import java.nio.file.StandardCopyOption;
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * macOS-only native bridge that attaches a {@code CAMetalLayer} to an AWT
- * {@link Canvas} via JAWT and returns the layer's pointer for use with
- * {@code vkCreateMetalSurfaceEXT}.
- *
- * <p>The actual JAWT work lives in {@code rlmtl.m}, built into
- * {@code librlmtl.dylib} by the {@code vkdev} dev script and staged as a
- * classpath resource. Pure-Java JAWT bindings don't work on macOS — same
- * reason rlawt is native.
+ * macOS-only native bridge (rlmtl.m / librlmtl.dylib) that attaches a
+ * CAMetalLayer to the AWT Canvas via JAWT. Pure-Java JAWT bindings don't
+ * work on macOS.
  */
 @Slf4j
 final class MacOSMetalHelper
@@ -58,12 +53,8 @@ final class MacOSMetalHelper
 		{
 			return;
 		}
-		// libjawt isn't auto-loaded by the JVM on macOS — it's only pulled
-		// in by code that calls into it. Our native helper links the JAWT
-		// symbols with -Wl,-undefined,dynamic_lookup, so they need to
-		// resolve from a libjawt that's already in the process. Force-load
-		// it first; otherwise JAWT_GetAWT resolves to NULL and the first
-		// call crashes with SIGSEGV at PC=0.
+		// Force-load libjawt first: the helper links JAWT symbols with
+		// dynamic_lookup, and without it the first call SIGSEGVs at PC=0.
 		try
 		{
 			System.loadLibrary("jawt");
@@ -107,10 +98,8 @@ final class MacOSMetalHelper
 	static long attachMetalLayer(Canvas canvas, boolean vsync)
 	{
 		ensureLoaded();
-		// Pass current Canvas size so the native side can initialize the
-		// metal layer's frame + drawableSize without depending on AWT to
-		// lay it out (LWAWT defers that, leading to the "must resize to
-		// start rendering" symptom).
+		// Pass the Canvas size: LWAWT defers layout, and an unsized layer
+		// doesn't render until the first resize.
 		int w = Math.max(canvas.getWidth(), 1);
 		int h = Math.max(canvas.getHeight(), 1);
 		layerScale = canvasScale(canvas);
@@ -175,21 +164,8 @@ final class MacOSMetalHelper
 		return Math.max(transform.getScaleX(), transform.getScaleY());
 	}
 
-	/**
-	 * Acquires the next {@code CAMetalDrawable} from the attached
-	 * {@code CAMetalLayer}. Returns an array of four longs:
-	 * <ol>
-	 *   <li>{@code id<CAMetalDrawable>} pointer (must be passed to
-	 *       {@link #presentDrawable} eventually, even on failure paths —
-	 *       otherwise the drawable leaks and {@code nextDrawable} stalls)</li>
-	 *   <li>{@code id<MTLTexture>} pointer for the drawable's color texture</li>
-	 *   <li>Texture width in pixels</li>
-	 *   <li>Texture height in pixels</li>
-	 * </ol>
-	 * Returns {@code null} if no drawable is available before
-	 * {@code CAMetalLayer}'s internal 1-second timeout (treat the same as a
-	 * dropped frame on Linux's {@code VK_NOT_READY}).
-	 */
+	/** Returns [drawable, MTLTexture, width, height] or null on timeout. The drawable
+	 *  MUST reach {@link #presentDrawable} even on failure paths, or nextDrawable stalls. */
 	static long[] nextDrawable()
 	{
 		ensureLoaded();
@@ -201,13 +177,9 @@ final class MacOSMetalHelper
 		return drawable;
 	}
 
-	/**
-	 * Schedules {@code [drawable present]} on a tiny one-shot
-	 * {@code MTLCommandBuffer} built from {@code mtlQueue}, and releases
-	 * the retain held by {@link #nextDrawable}. Must run AFTER the Vulkan
-	 * render's {@code vkQueueSubmit} for this drawable has been queued —
-	 * otherwise the present scheduling races our render writes.
-	 */
+	/** Schedules [drawable present] on mtlQueue and drops nextDrawable's retain.
+	 *  Must run AFTER the render's vkQueueSubmit on the same queue — Metal's
+	 *  in-queue ordering is what sequences the present behind the render. */
 	static void presentDrawable(long drawable, long mtlQueue)
 	{
 		long start = System.nanoTime();

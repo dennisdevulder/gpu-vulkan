@@ -33,18 +33,8 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK13.*;
 
 /**
- * Per-frame and per-image synchronisation primitives.
- *
- * <p>Two-tier synchronisation, the standard Vulkan pattern:
- * <ul>
- * <li>Per-frame (FRAMES_IN_FLIGHT slots): {@code imageAvailable} semaphore and
- * {@code inFlight} fence — both tied to the CPU's frame slot, signalled by
- * vkAcquireNextImageKHR / vkQueueSubmit and waited on at the start of the
- * next iteration of that slot.</li>
- * <li>Per-image: {@code renderFinished} semaphore — tied to the swapchain
- * image, signalled by vkQueueSubmit and consumed by vkQueuePresentKHR.
- * Lives this long because present's wait can span frames.</li>
- * </ul>
+ * Per-frame (imageAvailable semaphore + inFlight fence, FRAMES_IN_FLIGHT slots)
+ * and per-swapchain-image (renderFinished semaphore) sync primitives.
  */
 final class FrameSync implements AutoCloseable
 {
@@ -72,13 +62,9 @@ final class FrameSync implements AutoCloseable
 				inFlight[i] = createFence(stack, fenceInfo);
 			}
 		}
-		// renderFinished[] is per-swapchain-image and is sized via
-		// recreateRenderFinished(...) once the Swapchain exists. We deliberately
-		// don't take swapchainImageCount in the ctor: it lets us register this
-		// disposable BEFORE the Swapchain so the LIFO close-stack destroys the
-		// Swapchain first (releasing WSI engine references to renderFinished[*])
-		// and only then destroys the semaphores. Reverse order hangs AMD/RADV
-		// in vkDestroySemaphore waiting for the WSI present to complete.
+		// renderFinished[] is sized later via recreateRenderFinished so this
+		// disposable registers BEFORE the Swapchain: the LIFO close-stack must
+		// destroy the Swapchain first (WSI holds refs) or AMD/RADV hangs.
 	}
 
 	void recreateRenderFinished(int imageCount)

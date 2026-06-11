@@ -32,17 +32,8 @@ package com.gpuvulkan.gfx;
  */
 public interface StreamingImage extends AutoCloseable
 {
-	/**
-	 * Upload {@code pixels} into the current frame's slot. Caller can re-use
-	 * the same array next frame; bytes are memcpy'd into a host-visible
-	 * staging region immediately, and the GPU copy is queued by the next
-	 * {@link RenderEncoder} that references the bind group containing this
-	 * image.
-	 *
-	 * @param pixels  4-byte-per-pixel data laid out as {@code width * height}
-	 *                ints. Caller is responsible for matching the image's
-	 *                {@code width}/{@code height} at creation time.
-	 */
+	/** {@code pixels} is width*height ints (one int per pixel), memcpy'd
+	 *  immediately — the caller may reuse the array next frame. */
 	void uploadPixels(int[] pixels);
 
 	int width();

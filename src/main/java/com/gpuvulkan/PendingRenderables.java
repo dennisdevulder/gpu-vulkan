@@ -67,11 +67,8 @@ final class PendingRenderables
 		}
 	}
 
-	/** Stock's zone whitelist (SceneUploader.zoneRenderableSize): only Model
-	 *  and DynamicObject are zone-static. Anything else on a tile (Actor,
-	 *  Projectile, GraphicsObject) is engine-drawn per frame via
-	 *  drawDynamic/drawTemp — baking it into a zone freezes it at its
-	 *  capture pose until the next rebuild, which may never come. */
+	/** Only Model and DynamicObject are zone-static; baking engine-drawn
+	 *  renderables into a zone freezes them at their capture pose. */
 	static Model resolveModel(Renderable renderable)
 	{
 		if (renderable instanceof Model)

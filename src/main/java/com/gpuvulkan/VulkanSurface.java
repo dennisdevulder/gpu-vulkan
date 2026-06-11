@@ -29,9 +29,8 @@ import java.awt.Canvas;
 import static org.lwjgl.vulkan.KHRSurface.vkDestroySurfaceKHR;
 
 /**
- * Wraps a {@code VkSurfaceKHR} created from an AWT canvas via JAWT. Surface
- * creation is delegated to a {@link PlatformSurface} that knows the right
- * Vulkan extension + JAWT layout for the current OS.
+ * Wraps a {@code VkSurfaceKHR} created from the AWT canvas; creation is
+ * delegated to the per-OS {@link PlatformSurface}.
  */
 final class VulkanSurface implements AutoCloseable
 {

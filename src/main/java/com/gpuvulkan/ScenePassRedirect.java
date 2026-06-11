@@ -28,23 +28,10 @@ import com.gpuvulkan.gfx.RenderTarget;
 import org.lwjgl.vulkan.VkCommandBuffer;
 
 /**
- * Redirects the scene pass into an extension-owned {@link RenderTarget} —
- * the hook for upscalers and other full-scene post-processors.
- *
- * <p>Per-frame sequence when an extension's
- * {@link VulkanRenderExtension#scenePassRedirect()} returns non-null:
- * <ol>
- *   <li>{@link #sceneTarget} — supply (and resize) the target the backend
- *       renders the 3D scene into.</li>
- *   <li>The backend records the scene pass into that target and ends it.
- *       The target is NOT yet transitioned for sampling — call
- *       {@code prepareForSampling} first.</li>
- *   <li>{@link #recordAfterScene} — record intermediate passes against your
- *       own targets; no pass is open on entry or may be left open.</li>
- *   <li>The backend begins the final on-screen pass.
- *       {@link #recordResolve} — draw your full-screen resolve; the UI pass
- *       follows in the same render pass.</li>
- * </ol>
+ * Redirects the scene pass into an extension-owned {@link RenderTarget} (the
+ * upscaler hook). {@link #sceneTarget} supplies the target — call
+ * {@code prepareForSampling} before sampling it. {@link #recordAfterScene} runs
+ * with no pass open; {@link #recordResolve} draws in the on-screen pass before the UI.
  */
 public interface ScenePassRedirect
 {

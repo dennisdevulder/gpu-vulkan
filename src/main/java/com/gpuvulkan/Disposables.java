@@ -29,9 +29,8 @@ import java.util.Deque;
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * LIFO teardown stack. Each Vulkan resource registers itself here at creation
- * time; {@link #close()} runs them in reverse order. Mirrors what try-with-
- * resources would give us if the plugin's lifetime were a single scope.
+ * LIFO teardown stack: resources register at creation, {@link #close()} runs
+ * them in reverse order.
  */
 @Slf4j
 final class Disposables implements AutoCloseable

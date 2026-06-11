@@ -84,25 +84,8 @@ final class ModelSorter
 	private int dynDistance;
 	private int outCursor;
 
-	/**
-	 * Project the model, bucket its faces by camera depth, and write the
-	 * back-to-front face order into {@link #sortedFaces} (length
-	 * {@link #sortedCount}). After a successful call, {@link #localX} /
-	 * {@link #localY} / {@link #localZ} hold each vertex's world-space
-	 * position with orientation already applied.
-	 *
-	 * <p>Returns {@code false} when stock would have skipped the model:
-	 * <ul>
-	 *   <li>any vertex projects to z &lt; 50 (camera near-clip — same value
-	 *       stock uses; gives us the near-plane geometry cull listed as
-	 *       gap #7 for free);</li>
-	 *   <li>{@code model.getDiameter() >= MAX_DIAMETER};</li>
-	 *   <li>{@code model.getVerticesCount() > MAX_VERTEX_COUNT}.</li>
-	 * </ul>
-	 *
-	 * <p>Faces with {@code faceColors3[f] == -2} (engine "skip" sentinel)
-	 * and back-face-culled faces are dropped here.
-	 */
+	/** Writes back-to-front face order into {@link #sortedFaces}. False = skip
+	 *  the model (a vertex projected to z < 50 near-plane, or it's too large). */
 	boolean sort(Projection proj, Model m, int orientation, int wx, int wy, int wz)
 	{
 		return sort(proj, m, orientation, wx, wy, wz, false);
@@ -166,9 +149,7 @@ final class ModelSorter
 		return true;
 	}
 
-	// Rotates each vertex by orientation, translates to world, fills local*/
-	// proj*/distances. False = a vertex projects to z < 50 and stock drops
-	// the whole model — mirror that (this is also the near-plane cull).
+	// False = a vertex projects to z < 50; drop the whole model (near-plane cull).
 	private boolean transformAndProject(Projection proj, float[] vxs, float[] vys, float[] vzs,
 		int vertexCount, int orientation, int wx, int wy, int wz)
 	{
@@ -295,9 +276,8 @@ final class ModelSorter
 		sortedCount = out;
 	}
 
-	// Stock's 12-bucket priority interleave: priorities 0-9 emit in order
-	// with the priority-10/11 "dynamic" faces drained in front of buckets
-	// 0/3/5 based on the avg12/avg34/avg68 depth averages.
+	// 12-bucket priority interleave: 0-9 emit in order; 10/11 drain in front
+	// of buckets 0/3/5 based on the avg12/avg34/avg68 depth averages.
 	private boolean writePriorityOrder(byte[] faceRenderPriorities, int stamp, int minFz, int maxFz)
 	{
 		if (!binFacesByPriority(faceRenderPriorities, stamp, minFz, maxFz))

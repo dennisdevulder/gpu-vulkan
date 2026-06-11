@@ -56,20 +56,11 @@ import static org.lwjgl.vulkan.VK13.*;
 /**
  * Pipeline for captured scene geometry. Vertex layout is 24 bytes:
  * {@code float3 position + uint alpha/bias/hsl + short4 texture/u/v}.
- *
- * <p>Bindings:
- * <ul>
- *   <li>Push constant: 64-byte mat4 MVP at the vertex stage.</li>
- *   <li>Descriptor set 0, binding 0: combined image sampler (the OSRS
- *       texture array — {@link TextureArray}).</li>
- * </ul>
  */
 final class ScenePipeline implements AutoCloseable
 {
-	// Stock GPU-style scene vertex, with float positions for dynamic models.
-	// Stock GPU uploads temp/animated models with putfff4(); keeping position
-	// as float here avoids reintroducing close-zoom vertex snapping jitter.
-	//   float3 position, uint [alpha:8 | bias:8 | hsl:16], short4 texture/u/v.
+	// float3 position, uint [alpha:8 | bias:8 | hsl:16], short4 texture/u/v.
+	// Positions stay float — packing reintroduces close-zoom vertex snapping.
 	static final int VERTEX_STRIDE = 24;
 	static final int OFFSET_POS      = 0;
 	static final int OFFSET_ABHSL    = 12;
@@ -110,9 +101,8 @@ final class ScenePipeline implements AutoCloseable
 			VkPipelineRasterizationStateCreateInfo raster = buildRasterizationState(stack, polygonMode, forceBlend);
 			VkPipelineMultisampleStateCreateInfo multisample = buildMultisampleState(stack, samples, alphaToCoverage);
 
-			// The dedicated alpha pass forces standard src-over blending with
-			// depth writes off, matching stock GPU's transparent-face rule. The
-			// normal fill pipeline keeps its historical single-sample fallback.
+			// The alpha pass forces src-over blending with depth writes off; the
+			// normal fill pipeline keeps its single-sample fallback.
 			boolean blendFallback = forceBlend || samples == VK_SAMPLE_COUNT_1_BIT;
 			VkPipelineColorBlendStateCreateInfo colorBlend = buildColorBlendState(stack, colorWrite, blendFallback);
 			VkPipelineDepthStencilStateCreateInfo depth = buildDepthStencilState(stack, depthTest, depthWrite);
@@ -170,17 +160,8 @@ final class ScenePipeline implements AutoCloseable
 		return VkPipelineMultisampleStateCreateInfo.calloc(stack).sType$Default()
 			.rasterizationSamples(samples)
 			.minSampleShading(1.0f)
-			// Alpha-to-coverage: the GPU emits subsamples in proportion
-			// to the fragment's output alpha, so faces with low alpha
-			// (high faceTransparencies) effectively dissolve into the
-			// background WITHOUT needing a sorted alpha-blend pass.
-			// Stock GpuPlugin sorts and blends them in a separate pass;
-			// we get a close approximation by writing alpha=1-trans/255
-			// from the frag shader and letting MSAA's coverage hardware
-			// translate that into per-sample visibility. Stops fire
-			// "glow tip" faces (transparency 252+) from rendering as
-			// opaque red blobs while still keeping translucent geometry
-			// (tent drapes, banners, water surfaces) visible.
+			// Alpha-to-coverage approximates sorted alpha blending via MSAA coverage;
+			// keeps high-transparency "glow tip" faces from rendering opaque.
 			.alphaToCoverageEnable(alphaToCoverage && samples != VK_SAMPLE_COUNT_1_BIT);
 	}
 
@@ -221,10 +202,8 @@ final class ScenePipeline implements AutoCloseable
 
 	private long createDescriptorSetLayout(MemoryStack stack)
 	{
-		// Descriptor set 0:
-		//   binding 0 = combined image sampler (OSRS texture array, frag)
-		//   binding 1 = UBO of per-layer texture-animation vec2's (vert) —
-		//               vert shader looks them up to scroll UV per game tick.
+		// Set 0: binding 0 = texture-array sampler (frag);
+		// binding 1 = per-layer UV-scroll UBO (vert).
 		VkDescriptorSetLayoutBinding.Buffer dsBindings = VkDescriptorSetLayoutBinding.calloc(2, stack);
 		dsBindings.get(0)
 			.binding(0)
@@ -246,13 +225,10 @@ final class ScenePipeline implements AutoCloseable
 
 	private long createPipelineLayout(MemoryStack stack)
 	{
-		// Push constant layout (128 bytes total — at Vulkan's guaranteed minimum):
-		//   Vertex   0..63   : mat4 mvp
-		//   Vertex   64..79  : vec4 (cameraX, cameraZ, drawDistance, fogDepth)
-		//   Vertex   80..95  : ivec4 misc (.x = tick, rest unused/padding for vec4 alignment)
-		//   Fragment 96..111 : vec4 (fogR, fogG, fogB, brightness)
-		//   Fragment 112..127: vec4 (textureLightMode, _, _, _) — first slot in use,
-		//                      rest reserved for future scene-frag uniforms.
+		// Push constant layout (128 bytes total — Vulkan's guaranteed minimum):
+		//   Vertex   0..63 mat4 mvp; 64..79 vec4 (cameraX, cameraZ, drawDistance, fogDepth);
+		//   Vertex   80..95 ivec4 misc (.x = tick); Fragment 96..111 vec4 (fogRGB, brightness);
+		//   Fragment 112..127 vec4 (textureLightMode, _, _, _).
 		VkPushConstantRange.Buffer pc = VkPushConstantRange.calloc(2, stack);
 		pc.get(0).stageFlags(VK_SHADER_STAGE_VERTEX_BIT)  .offset(0) .size(96);
 		pc.get(1).stageFlags(VK_SHADER_STAGE_FRAGMENT_BIT).offset(96).size(32);

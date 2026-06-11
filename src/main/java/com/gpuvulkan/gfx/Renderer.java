@@ -25,12 +25,9 @@
 package com.gpuvulkan.gfx;
 
 /**
- * Top-level entry point for the rendering device layer. Wraps a Vulkan
- * device + swapchain + per-frame command buffers; provides factory methods
- * for resources and pipelines.
- *
- * <p>Resources returned by {@code create*} are owned by the caller and must
- * be {@code close()}-ed when no longer needed.
+ * Top-level entry point for the rendering device layer: device + swapchain +
+ * per-frame command buffers, plus resource/pipeline factories. Resources
+ * returned by {@code create*} are owned by the caller and must be closed.
  */
 public interface Renderer extends RenderDevice, AutoCloseable
 {

@@ -52,11 +52,8 @@ import static org.lwjgl.vulkan.KHRSwapchain.VK_SUBOPTIMAL_KHR;
 import static org.lwjgl.vulkan.VK13.*;
 
 /**
- * Per-frame command record + submit + present. M2 records a single clear-pass
- * (no draws) — visible result is the dark blue clear colour filling the canvas.
- *
- * <p>Driven by {@code GpuVulkanPlugin.draw(overlayColor)}, which runs on
- * RuneLite's client thread one call per frame. No separate render thread.
+ * Per-frame command record + submit + present. Runs on RuneLite's client
+ * thread, one call per frame; no separate render thread.
  */
 @Slf4j
 final class VulkanRenderer implements AutoCloseable
@@ -139,10 +136,8 @@ final class VulkanRenderer implements AutoCloseable
 		this.config = config;
 		this.gfx = gfx;
 		this.screenshotReadback = new ScreenshotReadback(device);
-		// On macOS the swapchain is still created (we need its surface
-		// capabilities for format selection and its initial extent), but
-		// vkAcquireNextImageKHR / vkQueuePresentKHR are bypassed — we
-		// acquire the CAMetalDrawable ourselves and present via Metal.
+		// macOS keeps the swapchain (format/extent source) but bypasses
+		// acquire/present — we acquire the CAMetalDrawable and present via Metal.
 		this.useCustomPresent = device.supportsMetalObjects();
 		this.metalDrawables = useCustomPresent ? new MetalDrawableSet(device) : null;
 		this.customPresentWidth = swapchain.width();
@@ -310,10 +305,7 @@ final class VulkanRenderer implements AutoCloseable
 		}
 	}
 
-	/**
-	 * Linux path: standard {@code KHRSwapchain.vkAcquireNextImageKHR}
-	 * + render + {@code vkQueuePresentKHR}.
-	 */
+	/** Linux path: vkAcquireNextImageKHR + render + vkQueuePresentKHR. */
 	private void drawFrameSwapchain(MemoryStack stack, int desiredWidth, int desiredHeight)
 	{
 		IntBuffer pImageIdx = stack.mallocInt(1);
@@ -364,20 +356,8 @@ final class VulkanRenderer implements AutoCloseable
 		}
 	}
 
-	/**
-	 * macOS path: acquire {@code CAMetalDrawable} directly, import its
-	 * {@code MTLTexture} as a {@code VkImage}, render, then present via a
-	 * Metal command buffer we own (bypassing
-	 * {@code vkQueuePresentKHR}).
-	 *
-	 * <p>Ordering: {@code vkQueueSubmit} writes render commands into the
-	 * MTLCommandQueue MoltenVK manages for our VkQueue. The subsequent
-	 * {@code [drawable present]} call in {@link MacOSMetalHelper#presentDrawable}
-	 * runs on that SAME MTLCommandQueue (we extracted it via
-	 * {@code vkExportMetalObjectsEXT}), so Metal's in-queue ordering
-	 * guarantees the present is scheduled after the render. No cross-queue
-	 * semaphore needed.
-	 */
+	/** macOS path: acquire the CAMetalDrawable directly; present on the SAME
+	 *  MTLCommandQueue — Metal's in-queue ordering replaces the semaphore. */
 	private void drawFrameCustomPresent(MemoryStack stack, int desiredWidth, int desiredHeight)
 	{
 		long now = System.nanoTime();
@@ -604,12 +584,8 @@ final class VulkanRenderer implements AutoCloseable
 			customPresentTarget = null;
 		}
 		screenshotReadback.close();
-		// vkDestroyCommandPool implicitly frees all command buffers allocated
-		// from it (per spec). Don't pre-reset them: that was added as a
-		// defensive measure for the validation layer's tracking, but with
-		// validation off it's just an extra Vulkan call that has been
-		// observed to trip something in RADV's destroy path (process exits
-		// silently between "disposing: VulkanRenderer" and the next dispose).
+		// vkDestroyCommandPool frees its command buffers. Do NOT pre-reset
+		// them — that trips RADV's destroy path and silently exits the process.
 		if (commandPool != VK_NULL_HANDLE)
 		{
 			vkDestroyCommandPool(device.handle(), commandPool, null);
@@ -658,9 +634,8 @@ final class VulkanRenderer implements AutoCloseable
 
 		beginClearedRenderPass(stack, cmd, renderPass.handle(), framebuffer, targetWidth, targetHeight);
 
-		// Scene draws use the OSRS viewport rect — the area inside the canvas
-		// where the UI texture is transparent. The UI quad draws under its own
-		// full-canvas viewport (InterfaceRenderer.recordDraw).
+		// Scene draws use the OSRS viewport rect; the UI quad draws under its
+		// own full-canvas viewport.
 		VulkanFrameContext frame = setupSceneViewportAndFrame(stack, cmd, targetWidth, targetHeight);
 		start = stats.startNanos();
 		renderExtensions.recordRenderPass(frame);
@@ -738,9 +713,8 @@ final class VulkanRenderer implements AutoCloseable
 		vkCmdEndRenderPass(cmd);
 	}
 
-	// DPI from CANVAS dims, not viewport dims (stock's derivation): viewport
-	// insets would skew X/Y ratios and shift clickboxes. Y-flip lives in the
-	// matrix, not a negative-height viewport (runtime ignored it).
+	// DPI from CANVAS dims, not viewport dims — insets would shift clickboxes.
+	// Y-flip lives in the matrix, not a negative-height viewport.
 	private VulkanFrameContext setupSceneViewportAndFrame(MemoryStack stack, VkCommandBuffer cmd,
 														  int targetWidth, int targetHeight)
 	{
@@ -853,15 +827,8 @@ final class VulkanRenderer implements AutoCloseable
 		Vk.check("vkQueueSubmit", vkQueueSubmit(device.graphicsQueue(), submit, sync.inFlightFence()));
 	}
 
-	/**
-	 * Submit for the macOS custom-present path: no semaphore wait (we
-	 * acquired the drawable directly from CAMetalLayer, not via
-	 * vkAcquireNextImageKHR's signal-semaphore handshake), no signal
-	 * semaphore (the subsequent {@code [presentDrawable]} on the same
-	 * MTLCommandQueue is implicitly ordered after our render commands
-	 * by Metal). The inFlightFence still gates the slot for command-buffer
-	 * reuse on the next iteration.
-	 */
+	/** No semaphores: same-queue ordering covers the present and the drawable
+	 *  wasn't acquired via vkAcquireNextImageKHR. inFlightFence still gates slot reuse. */
 	private void submitNoSemaphores(MemoryStack stack, VkCommandBuffer cmd, VkCommandBuffer presentCmd)
 	{
 		PointerBuffer cmdBuf = presentCmd == null

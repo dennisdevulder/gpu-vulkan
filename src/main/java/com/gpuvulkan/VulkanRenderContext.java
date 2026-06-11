@@ -28,12 +28,9 @@ import net.runelite.api.Client;
 import com.gpuvulkan.gfx.RenderDevice;
 
 /**
- * Stable host context exposed to Vulkan render extensions.
- *
- * <p>The backend still owns the Vulkan instance, device, surface, swapchain and
- * frame lifecycle. Extensions can inspect handles when they need to allocate
- * their own Vulkan resources, but they should not destroy backend-owned
- * objects.
+ * Stable host context exposed to Vulkan render extensions. The backend owns
+ * the instance/device/swapchain/frame lifecycle — extensions may inspect
+ * handles but must not destroy backend-owned objects.
  */
 public interface VulkanRenderContext
 {

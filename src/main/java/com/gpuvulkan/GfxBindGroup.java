@@ -40,12 +40,8 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK13.*;
 
 /**
- * Concrete bind group. Holds {@code FRAMES_IN_FLIGHT} VkDescriptorSets
- * (one per ring slot) so that a single logical {@code BindGroup}
- * referencing a {@link GfxStreamingImage} dispatches to the right slot's
- * texture automatically. For non-streaming resources every slot would
- * have the same descriptor write — wasteful, but the layer's only
- * resource kind today IS streaming, so the cost is paid where it matters.
+ * Holds FRAMES_IN_FLIGHT VkDescriptorSets so a single logical BindGroup over a
+ * {@link GfxStreamingImage} dispatches to the right ring slot automatically.
  */
 final class GfxBindGroup implements BindGroup
 {
@@ -123,10 +119,7 @@ final class GfxBindGroup implements BindGroup
 	{
 		if (desc.streamingImages().isEmpty()) return;
 
-		// One descriptor write per (slot, streaming-image entry). Each
-		// slot's set points at the corresponding slot's texture in the
-		// streaming image's ring, so binding the current-frame set
-		// transparently samples from the right slot.
+		// Each slot's set points at that slot's texture in the streaming ring.
 		int total = desc.streamingImages().size() * FrameSync.FRAMES_IN_FLIGHT;
 		VkWriteDescriptorSet.Buffer writes = VkWriteDescriptorSet.calloc(total, stack);
 		int w = 0;
