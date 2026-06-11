@@ -117,6 +117,17 @@ invisible login screen — check config before suspecting commits.
 
 First live validation 2026-06-10 (Linux, sailing hub plugin, Port Sarim): worldviews 11 and 2830 created/freed cleanly, ship sails visible on water. Static arena growth fix (42a2c69) and zone culling (5fe860f) also on this branch and confirmed working in the same session. 2026-06-11: the "sails without hulls" detail was real, and had TWO causes. (1) 5fe860f's radius cull centered the zone window on the toplevel camera inside sub renderers' local zone grids — fixed in 0ab7ed93 (sub renderers skip radius cull, frustum cull suffices). (2) The actual root cause: sub-worldview tile arrays are worldview-sized (stock sizes its context from `worldView.getSizeX()>>3`), so `captureTiles`'s `canCoverScene(regular, 0, 104)` check always failed for ship scenes and `captureSceneOnce` silently returned — sub statics were NEVER captured; only dynamics (sails/crew) drew. CAUTION on validation evidence: the first "hull renders fine" confirmation was taken while stock GPU was co-running and rendering the hull itself. Hull confirmed rendering 2026-06-11 (d6234ae5, retested with gpu-vulkan as sole renderer).
 
+**LIKELY ROOT CAUSE FOUND 2026-06-11 (61f7c6ac7), on Linux this time:** frozen
+projectiles/gas/floor artifacts reproduced on Linux during boss fights. Static
+and overlay-zone capture accepted ANY tile renderable via a `getModel()`
+catch-all; stock whitelists only Model + DynamicObject
+(`SceneUploader.zoneRenderableSize`). Transients crossing a zone mid-rebuild
+(fights invalidate zones constantly) were baked frozen into the overlay
+capture and persisted until the next rebuild — possibly never after the fight.
+`resolveModel` now mirrors stock's whitelist. This is symptom-identical to the
+Olm report; the Windows/NVIDIA retest should re-run on a build with 61f7c6ac7.
+Earlier ranked suspects below kept for history:
+
 Symptom: projectiles/ground items persist in Olm arena on Windows/NVIDIA, not on Linux/Mesa. Ranked code-cited suspects:
 1. `draw()` without `drawScene` replays stale dynamic ranges from rotated frame slots (`GpuVulkanPlugin.java:859` sole `beginFrame` site; `SceneRenderer.java:1052-1057`). Fix existed in 8c01644, reverted wholesale by 8220142 (revert coupled it to the broken 6085067 zone change — they were independent). NVIDIA visibility: unlocked FPS + IMMEDIATE/MAILBOX emits many stale presents; Mesa FIFO blocks, hides it. Confirm via existing `DrawCallbackStats`: `frames > drawScene`.
 2. `SceneZoneDrawScheduler.hasOverlayRange` (:295-299) requires per-layer `count > 0` — zone rebuilt to *empty* layer never masks static range → despawned objects draw forever. Platform-independent, deterministic.
