@@ -370,8 +370,12 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 
 	private void useFrameWriteArena(int slot, int logicalVertex)
 	{
+		Vk.require(slot >= 0 && slot < FrameSync.FRAMES_IN_FLIGHT,
+			"frame arena slot out of range: " + slot);
 		writeBaseVertex = staticVertexCount();
 		writeVertexLimit = writeBaseVertex + maxFrameVertices;
+		Vk.require(logicalVertex >= writeBaseVertex && logicalVertex <= writeVertexLimit,
+			"frame arena cursor out of range: " + logicalVertex);
 		writeBasePtr = MemoryUtil.memAddress(mapped) + staticBufferBytes() + (long) slot * slotBytes;
 		setWriteCursor(logicalVertex);
 	}
