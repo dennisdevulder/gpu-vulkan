@@ -83,14 +83,6 @@ public interface GpuVulkanPluginConfig extends Config
 	)
 	String DEBUG_SECTION = "debug";
 
-	@ConfigSection(
-		name = "Benchmark",
-		description = "Temporary switches for isolating Vulkan CPU/GPU costs.",
-		position = 9,
-		closedByDefault = true
-	)
-	String BENCHMARK_SECTION = "benchmark";
-
 	// --------------------------------------------------------------- top level
 
 	@ConfigItem(
@@ -367,32 +359,4 @@ public interface GpuVulkanPluginConfig extends Config
 	)
 	default boolean wireframeDynamic() { return false; }
 
-	// --------------------------------------------------------------- Benchmark
-
-	@ConfigItem(
-		keyName = "benchmarkSkipUi",
-		name = "Skip UI upload",
-		description = "Benchmark only: skip UI texture upload/draw to isolate scene renderer cost.",
-		section = BENCHMARK_SECTION,
-		position = 0
-	)
-	default boolean benchmarkSkipUi() { return false; }
-
-	@ConfigItem(
-		keyName = "benchmarkSkipScene",
-		name = "Skip scene draw",
-		description = "Benchmark only: skip 3D scene draw to isolate UI and present cost.",
-		section = BENCHMARK_SECTION,
-		position = 1
-	)
-	default boolean benchmarkSkipScene() { return false; }
-
-	@ConfigItem(
-		keyName = "benchmarkSkipDynamicCapture",
-		name = "Skip dynamic capture",
-		description = "Benchmark only: skip dynamic model capture while keeping static scene/UI.",
-		section = BENCHMARK_SECTION,
-		position = 2
-	)
-	default boolean benchmarkSkipDynamicCapture() { return false; }
 }
