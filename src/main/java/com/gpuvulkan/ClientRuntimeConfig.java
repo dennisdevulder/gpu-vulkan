@@ -29,13 +29,10 @@ final class ClientRuntimeConfig
 		client.setGpuFlags(gpuFlags);
 		client.setExpandedMapLoading(config.expandedMapLoadingChunks());
 
-		boolean unlockFps = config.fpsMode() == GpuVulkanPluginConfig.FpsMode.UNCAPPED;
-		client.setUnlockedFps(unlockFps);
-		if (unlockFps)
-		{
-			client.setUnlockedFpsTarget(Math.max(0, config.fpsTarget()));
-		}
-		fpsTouched = unlockFps;
+		int fpsTarget = Math.max(0, config.fpsTarget());
+		client.setUnlockedFps(true);
+		client.setUnlockedFpsTarget(fpsTarget);
+		fpsTouched = true;
 	}
 
 	void restoreFpsIfTouched()
