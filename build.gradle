@@ -46,7 +46,6 @@ def lombokVersion = '1.18.34'
 
 dependencies {
 	compileOnly "net.runelite:client:${runeLiteVersion}"
-	compileOnly 'net.runelite:rlawt:1.8'
 
 	compileOnly "org.lwjgl:lwjgl:${lwjglCoreVersion}"
 	implementation("org.lwjgl:lwjgl-vulkan:${lwjglVulkanVersion}") {

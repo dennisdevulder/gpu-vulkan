@@ -141,7 +141,7 @@ public interface GpuVulkanPluginConfig extends Config
 		section = GRAPHICS_SECTION,
 		position = 0
 	)
-	default AntiAliasingMode antiAliasingMode() { return AntiAliasingMode.MSAA_2; }
+	default AntiAliasingMode antiAliasingMode() { return AntiAliasingMode.DISABLED; }
 
 	@ConfigItem(
 		keyName = "anisotropicFilteringLevel",

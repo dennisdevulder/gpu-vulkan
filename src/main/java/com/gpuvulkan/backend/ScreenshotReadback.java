@@ -35,9 +35,9 @@ final class ScreenshotReadback implements AutoCloseable
 	{
 		ensureBuffer(width, height, slot);
 		lastSlot = slot;
-		int presentLayout = device.supportsMetalObjects()
-			? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-			: KHRSwapchain.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+		// Final layout is PRESENT_SRC_KHR on every platform — we render into the
+		// swapchain image and present it via vkQueuePresentKHR.
+		int presentLayout = KHRSwapchain.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 		try (MemoryStack stack = stackPush())
 		{
 			transition(stack, cmd, image,
@@ -86,6 +86,76 @@ final class ScreenshotReadback implements AutoCloseable
 		bytes.clear();
 		bytes.order(ByteOrder.LITTLE_ENDIAN).asIntBuffer().get(dst, 0, width * height);
 		return image;
+	}
+
+	String samplePixels()
+	{
+		if (lastSlot < 0 || buffers[lastSlot] == null || width <= 0 || height <= 0)
+		{
+			return "none";
+		}
+		Buffer buffer = buffers[lastSlot];
+		buffer.invalidateIfNeeded();
+		ByteBuffer bytes = buffer.mappedByteBuffer().duplicate();
+		bytes.clear();
+		java.nio.IntBuffer ints = bytes.order(ByteOrder.LITTLE_ENDIAN).asIntBuffer();
+		int count = Math.min(ints.remaining(), width * height);
+		int step = Math.max(1, count / 4096);
+		int scanned = 0;
+		int nonzero = 0;
+		int nonzeroRgbTotal = 0;
+		int nonzeroAlphaTotal = 0;
+		for (int i = 0; i < count; i += step)
+		{
+			int p = ints.get(i);
+			scanned++;
+			if (p != 0)
+			{
+				nonzero++;
+			}
+			if ((p & 0x00ffffff) != 0)
+			{
+				nonzeroRgbTotal++;
+			}
+			if ((p >>> 24) != 0)
+			{
+				nonzeroAlphaTotal++;
+			}
+		}
+		int[] indexes = {
+			0,
+			Math.max(0, width / 2),
+			Math.max(0, (height / 2) * width + width / 2),
+			Math.max(0, count - 1),
+		};
+		int nonzeroRgb = 0;
+		int nonzeroAlpha = 0;
+		StringBuilder sb = new StringBuilder(80);
+		for (int i = 0; i < indexes.length; i++)
+		{
+			int idx = Math.min(indexes[i], count - 1);
+			int p = ints.get(idx);
+			if ((p & 0x00ffffff) != 0)
+			{
+				nonzeroRgb++;
+			}
+			if ((p >>> 24) != 0)
+			{
+				nonzeroAlpha++;
+			}
+			if (i > 0)
+			{
+				sb.append(',');
+			}
+			sb.append(Integer.toHexString(p));
+		}
+		return sb.append(" rgb=").append(nonzeroRgb)
+			.append(" a=").append(nonzeroAlpha)
+			.append(" scan=").append(nonzero)
+			.append('/').append(scanned)
+			.append(" scanRgb=").append(nonzeroRgbTotal)
+			.append(" scanA=").append(nonzeroAlphaTotal)
+			.toString();
 	}
 
 	private void ensureBuffer(int width, int height, int slot)

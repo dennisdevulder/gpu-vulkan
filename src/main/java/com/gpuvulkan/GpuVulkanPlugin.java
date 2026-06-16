@@ -104,7 +104,6 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	private TextureArray textureArray;
 	private RenderExtensions renderExtensions;
 	private com.gpuvulkan.gfx.Renderer gfx;
-	private net.runelite.rlawt.AWTContext awtContext;
 	private Framebuffers framebuffers;
 	private FrameSync sync;
 	private VulkanRenderer renderer;
@@ -145,8 +144,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		log.info("Starting GPU (Vulkan)");
 		shuttingDown = false;
 		runtimeConfig = new ClientRuntimeConfig(client, config);
-		// Refuse to coexist with stock GPU — two owners of the rlawt context
-		// corrupt JAWT state and crash the JVM on disable.
+		// Refuse to coexist with stock GPU — two renderer plugins owning the
+		// same AWT surface corrupt JAWT state and crash the JVM on disable.
 		String otherRenderer = isRendererPluginEnabled("GPU", "117 HD");
 		if (otherRenderer != null)
 		{
@@ -166,7 +165,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		boolean wantVsync = config.fpsMode() != GpuVulkanPluginConfig.FpsMode.UNCAPPED;
 		platform = PlatformSurface.current(wantVsync);
 		// macOS owns its CAMetalLayer attach via JAWT_SurfaceLayers in
-		// MacOSPlatformSurface, and rlawt's CAOpenGLLayer would conflict.
+		// MacOSPlatformSurface.
 		final boolean isMac = platform instanceof MacOSPlatformSurface;
 		registerShutdownHook();
 		clientThread.invoke(() ->
@@ -295,22 +294,6 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	private void prepareCanvas()
 	{
 		canvas = client.getCanvas();
-		// X11: keep a live GLX context bound or AWT's resize path exit_group(1)s
-		// the EDT. Windows must NOT set a GL pixel format on this HWND.
-		if (platform instanceof X11PlatformSurface)
-		{
-			net.runelite.rlawt.AWTContext.loadNatives();
-			synchronized (canvas.getTreeLock())
-			{
-				if (!canvas.isValid())
-				{
-					throw new RuntimeException("Canvas not valid at plugin start");
-				}
-				awtContext = new net.runelite.rlawt.AWTContext(canvas);
-				awtContext.configurePixelFormat(0, 0, 0);
-			}
-			awtContext.createGLContext();
-		}
 		canvas.setIgnoreRepaint(true);
 		canvas.setFocusable(true);
 		canvas.requestFocusInWindow();
@@ -460,8 +443,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	private void cleanupFailedStartup()
 	{
 		removeMacResizeWake();
-		// Must mirror shutDown's order, or a mid-startup throw leaves the canvas
-		// with an AWTContext attached and the next enable fails JAWT lock.
+		// Mirror shutDown's order: drain Vulkan, undo any client-state
+		// flips, drop disposables, then unwind AWT/canvas. Without
+		// this, a mid-startup throw leaves the canvas with ignoreRepaint=true.
 		if (device != null)
 		{
 			try
@@ -481,11 +465,6 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			disposables.close();
 			disposables = null;
 			markExtensionBackendDetached();
-		}
-		if (awtContext != null)
-		{
-			awtContext.destroy();
-			awtContext = null;
 		}
 		if (canvas != null)
 		{
@@ -535,8 +514,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		clientThread.invoke(this::teardownRendererOnClientThread);
 	}
 
-	/** Order: stop callbacks → drain GPU → Disposables → destroy AWTContext →
-	 *  resizeCanvas; otherwise the next enable fails JAWT_DrawingSurface_Lock. */
+	/** Order: stop callbacks -> drain GPU -> Disposables -> detach native
+	 *  surface -> resizeCanvas. */
 	private void teardownRendererOnClientThread()
 	{
 		log.info("GPU (Vulkan) shutdown: detach draw callbacks");
@@ -565,14 +544,6 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			log.info("GPU (Vulkan) shutdown: close disposables end");
 			disposables = null;
 			markExtensionBackendDetached();
-		}
-
-		if (awtContext != null)
-		{
-			log.info("GPU (Vulkan) shutdown: destroy AWT context begin");
-			awtContext.destroy();
-			log.info("GPU (Vulkan) shutdown: destroy AWT context end");
-			awtContext = null;
 		}
 
 		if (platform instanceof MacOSPlatformSurface)
