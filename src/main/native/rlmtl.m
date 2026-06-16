@@ -4,10 +4,10 @@
  *
  * Approach: walk JAWT to reach the canvas's CALayer + the NSWindow's
  * contentView (AWTView, the single NSView holding all of RuneLite's UI on
- * macOS JDK). Add an NSView whose backing layer is a CAMetalLayer as a
- * subview of AWTView, sized to the canvas's frame. Drive AppKit's compose
- * tick via NSView's CADisplayLink + [CATransaction flush] so MoltenVK's
- * async drawable presents actually reach the screen.
+ * macOS JDK). Assign a CAMetalLayer through JAWT_SurfaceLayers so AWT owns
+ * the layer placement. Drive AppKit's compose tick with a main-run-loop
+ * NSTimer + [CATransaction flush] so MoltenVK's async drawable presents
+ * actually reach the screen.
  *
  * Build (vkdev does this automatically):
  *   clang -fno-objc-arc -shared -dynamiclib \
@@ -24,11 +24,7 @@
 #import <Metal/Metal.h>
 
 static CAMetalLayer* gMetalLayer = nil;
-/* CADisplayLink replaces the deprecated CVDisplayLink (macOS 15+).
- * NSScreen exposes -displayLinkWithTarget:selector: since macOS 14, so we
- * no longer need an NSView host. The DisplayLinkTicker object below
- * exists solely to receive the selector callback. */
-static CADisplayLink* gDisplayLink = nil;
+static NSTimer* gFlushTimer = nil;
 
 /* JAWT_SurfaceLayers integration: the protocol has a `layer` SETTER —
  * the application assigns its CALayer; AWT then incorporates that layer
@@ -46,11 +42,11 @@ static CADisplayLink* gDisplayLink = nil;
  * to flush CATransaction so MoltenVK's async-presented drawables actually
  * reach the compositor each refresh. */
 @interface DisplayLinkTicker : NSObject
-- (void)displayLinkTick:(CADisplayLink*)link;
+- (void)displayLinkTick:(NSTimer*)timer;
 @end
 
 @implementation DisplayLinkTicker
-- (void)displayLinkTick:(CADisplayLink*)link
+- (void)displayLinkTick:(NSTimer*)timer
 {
     CAMetalLayer* mtl = gMetalLayer;
     if (mtl) {
@@ -91,10 +87,10 @@ static void rlmtlFlushCoreAnimationAsync(void)
 
 static void rlmtlStopDisplayLink(void)
 {
-    if (gDisplayLink) {
-        [gDisplayLink invalidate];
-        [gDisplayLink release];
-        gDisplayLink = nil;
+    if (gFlushTimer) {
+        [gFlushTimer invalidate];
+        [gFlushTimer release];
+        gFlushTimer = nil;
     }
 }
 
@@ -449,14 +445,16 @@ Java_com_gpuvulkan_MacOSMetalHelper_nAttachMetalLayer(
     /* AppKit doesn't tick a CAMetalLayer's compose loop on its own when
      * MoltenVK presents drawables asynchronously — without the periodic
      * flush in the tick handler, drawables get queued but never displayed.
-     * NSScreen.displayLinkWithTarget:selector: (macOS 14+) gives us a
-     * CADisplayLink without needing an NSView host. */
+     * NSTimer keeps this bridge compatible with pre-Sonoma macOS; exact
+     * display cadence is not required because Vulkan still drives frames. */
     dispatch_sync(dispatch_get_main_queue(), ^{
         gTicker = [[DisplayLinkTicker alloc] init];
-        gDisplayLink = [[[NSScreen mainScreen] displayLinkWithTarget: gTicker
-                                                            selector: @selector(displayLinkTick:)] retain];
-        [gDisplayLink addToRunLoop: [NSRunLoop mainRunLoop]
-                           forMode: NSRunLoopCommonModes];
+        gFlushTimer = [[NSTimer timerWithTimeInterval: (1.0 / 120.0)
+                                               target: gTicker
+                                             selector: @selector(displayLinkTick:)
+                                             userInfo: nil
+                                              repeats: YES] retain];
+        [[NSRunLoop mainRunLoop] addTimer: gFlushTimer forMode: NSRunLoopCommonModes];
     });
 
     return (jlong)(uintptr_t) metalLayer;

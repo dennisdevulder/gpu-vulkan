@@ -171,6 +171,7 @@ def compileMacOSMetalHelper = tasks.register('compileMacOSMetalHelper') {
 				'-fno-objc-arc',
 				'-shared',
 				'-dynamiclib',
+				'-mmacosx-version-min=11.0',
 				'-arch', 'arm64',
 				'-arch', 'x86_64',
 				'-framework', 'Cocoa',
