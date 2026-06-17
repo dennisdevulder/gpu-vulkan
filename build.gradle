@@ -234,7 +234,9 @@ tasks.withType(Test).configureEach {
 tasks.register('run', JavaExec) {
 	classpath = sourceSets.main.runtimeClasspath + sourceSets.test.output + configurations.launcherRuntime
 	mainClass = pluginMainClass
-	jvmArgs '-ea', '--add-exports=java.desktop/com.apple.eawt=ALL-UNNAMED'
+	jvmArgs '-ea',
+		'--add-exports=java.desktop/com.apple.eawt=ALL-UNNAMED',
+		'--add-opens=java.base/java.lang.reflect=ALL-UNNAMED'
 	args '--developer-mode', '--debug'
 }
 
@@ -244,7 +246,8 @@ tasks.register('shadowJar', Jar) {
 		attributes(
 			'Main-Class': pluginMainClass,
 			'Multi-Release': true,
-			'Add-Exports': 'java.desktop/com.apple.eawt'
+			'Add-Exports': 'java.desktop/com.apple.eawt',
+			'Add-Opens': 'java.base/java.lang.reflect'
 		)
 	}
 
