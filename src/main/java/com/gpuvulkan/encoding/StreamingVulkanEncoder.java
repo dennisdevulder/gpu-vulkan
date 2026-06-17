@@ -106,10 +106,8 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
         nalRing = new NalRing(clamped);
     }
 
-    /** 5-second IDR cadence: balances trim-to-keyframe granularity against
-     *  bitrate spent on keyframes. With ~10s of pre-roll buffered, the worst-
-     *  case "first frame after the chosen IDR" latency is one IDR period. */
-    private static final int IDR_PERIOD_SECONDS = 5;
+    /** One-second IDR cadence keeps saved clips close to the requested pre-roll. */
+    private static final int IDR_PERIOD_SECONDS = 1;
 
     @Override
     public synchronized void start(int fps)

@@ -33,7 +33,7 @@ java {
 	targetCompatibility = JavaVersion.VERSION_11
 }
 
-def runeLiteVersion = '1.12.29.1'
+def runeLiteVersion = 'latest.release'
 def pluginMainClass = 'com.gpuvulkan.GpuVulkanPluginTest'
 // LWJGL core comes from runelite-client at runtime (3.3.2 classes AND
 // natives; RuneLite's plugin classloader is child-first, so bundling a
@@ -203,7 +203,6 @@ checkGpuVulkanShadersFresh.configure {
 
 tasks.withType(JavaCompile).configureEach {
 	options.encoding = 'UTF-8'
-	options.release.set(11)
 	options.compilerArgs += ['-Xlint:all', '-Xlint:-processing', '-Xlint:-serial']
 }
 

@@ -78,8 +78,7 @@ final class InFlightClipRecorder implements VulkanRenderExtension
 			probeAttempted = false;
 			configureEncoder();
 		}
-		else if (("inFlightEncodingBufferSeconds".equals(key)
-			|| "inFlightEncodingPostWaitSeconds".equals(key)) && encoder != null)
+		else if ("inFlightEncodingBufferSeconds".equals(key) && encoder != null)
 		{
 			updateBufferedFrameCount(encoder);
 		}
@@ -336,6 +335,9 @@ final class InFlightClipRecorder implements VulkanRenderExtension
 		{
 			Future<?> drained = frameExecutor.submit(() -> { });
 			drained.get(5, TimeUnit.SECONDS);
+			active.stop();
+			applyEncoderSettings(active);
+			active.start(captureFps());
 		}
 		catch (Exception e)
 		{

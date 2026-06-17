@@ -77,36 +77,15 @@ final class TextureArray implements AutoCloseable
 
 		try (MemoryStack stack = stackPush())
 		{
-			try
-			{
-				image = createImage(stack);
-				memory = allocateImageMemory(stack);
-				view = createView(stack);
-				sampler = createSampler(stack, requestedAnisotropy);
-			}
-			catch (RuntimeException e)
-			{
-				close();
-				throw e;
-			}
+			image = createImage(stack);
+			memory = allocateImageMemory(stack);
+			view = createView(stack);
+			sampler = createSampler(stack, requestedAnisotropy);
 		}
 
-		Buffer ubo = null;
-		try
-		{
-			uploadInitialContents(tp, osrsTextures);
-			ubo = buildAnimationUbo(osrsTextures);
-			animationUbo = ubo;
-		}
-		catch (RuntimeException e)
-		{
-			if (ubo != null)
-			{
-				ubo.close();
-			}
-			close();
-			throw e;
-		}
+		uploadInitialContents(tp, osrsTextures);
+
+		animationUbo = buildAnimationUbo(osrsTextures);
 	}
 
 	private long createImage(MemoryStack stack)

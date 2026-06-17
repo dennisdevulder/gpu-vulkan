@@ -40,45 +40,29 @@ final class RenderExtensions implements AutoCloseable
 {
 	private final VulkanRenderContext context;
 	private final List<VulkanRenderExtension> extensions = new ArrayList<>();
-	private boolean closed;
 
 	RenderExtensions(VulkanRenderContext context)
 	{
 		this.context = context;
 	}
 
-	void register(VulkanRenderExtension extension)
+	synchronized void register(VulkanRenderExtension extension)
 	{
-		synchronized (this)
-		{
-			if (closed)
-			{
-				throw new IllegalStateException("Render extension registry is closed");
-			}
-			extensions.add(extension);
-		}
 		try
 		{
+			extensions.add(extension);
 			extension.onRegistered(context);
 		}
 		catch (RuntimeException e)
 		{
-			synchronized (this)
-			{
-				extensions.remove(extension);
-			}
+			extensions.remove(extension);
 			closeFailedExtension(extension, "register", e);
 		}
 	}
 
-	void unregister(VulkanRenderExtension extension)
+	synchronized void unregister(VulkanRenderExtension extension)
 	{
-		boolean removed;
-		synchronized (this)
-		{
-			removed = extensions.remove(extension);
-		}
-		if (removed)
+		if (extensions.remove(extension))
 		{
 			try
 			{
@@ -91,167 +75,180 @@ final class RenderExtensions implements AutoCloseable
 		}
 	}
 
-	void onConfigChanged(ConfigChanged event)
+	synchronized void onConfigChanged(ConfigChanged event)
 	{
 		forEachExtension("onConfigChanged", extension -> extension.onConfigChanged(event));
 	}
 
-	void beginFrame()
+	synchronized void beginFrame()
 	{
-		for (VulkanRenderExtension extension : snapshot())
+		for (int i = 0; i < extensions.size(); )
 		{
+			VulkanRenderExtension extension = extensions.get(i);
 			try
 			{
 				extension.beginFrame();
+				i++;
 			}
 			catch (RuntimeException e)
 			{
-				removeFailedExtension(extension);
+				extensions.remove(i);
 				closeFailedExtension(extension, "beginFrame", e);
 			}
 		}
 	}
 
-	void captureScene(Scene scene)
+	synchronized void captureScene(Scene scene)
 	{
 		forEachExtension("captureScene", extension -> extension.captureScene(scene));
 	}
 
-	void captureDynamicPending()
+	synchronized void captureDynamicPending()
 	{
-		for (VulkanRenderExtension extension : snapshot())
+		for (int i = 0; i < extensions.size(); )
 		{
+			VulkanRenderExtension extension = extensions.get(i);
 			try
 			{
 				extension.captureDynamicPending();
+				i++;
 			}
 			catch (RuntimeException e)
 			{
-				removeFailedExtension(extension);
+				extensions.remove(i);
 				closeFailedExtension(extension, "captureDynamicPending", e);
 			}
 		}
 	}
 
-	void invalidateCapturedScene()
+	synchronized void invalidateCapturedScene()
 	{
 		forEachExtension("invalidateCapturedScene", VulkanRenderExtension::invalidateCapturedScene);
 	}
 
-	void invalidateZone(Scene scene, int zx, int zz)
+	synchronized void invalidateZone(Scene scene, int zx, int zz)
 	{
 		forEachExtension("invalidateZone", extension -> extension.invalidateZone(scene, zx, zz));
 	}
 
-	void rebuildDirtyZones(Scene scene)
+	synchronized void rebuildDirtyZones(Scene scene)
 	{
 		forEachExtension("rebuildDirtyZones", extension -> extension.rebuildDirtyZones(scene));
 	}
 
-	void captureSkybox(Scene scene)
+	synchronized void captureSkybox(Scene scene)
 	{
 		forEachExtension("captureSkybox", extension -> extension.captureSkybox(scene));
 	}
 
-	void drawPass(int pass)
+	synchronized void drawPass(int pass)
 	{
 		forEachExtension("drawPass", extension -> extension.drawPass(pass));
 	}
 
-	void captureModel(Model model, int orientation, int worldX, int worldY, int worldZ)
+	synchronized void captureModel(Model model, int orientation, int worldX, int worldY, int worldZ)
 	{
-		for (VulkanRenderExtension extension : snapshot())
+		for (int i = 0; i < extensions.size(); )
 		{
+			VulkanRenderExtension extension = extensions.get(i);
 			try
 			{
 				extension.captureModel(model, orientation, worldX, worldY, worldZ);
+				i++;
 			}
 			catch (RuntimeException e)
 			{
-				removeFailedExtension(extension);
+				extensions.remove(i);
 				closeFailedExtension(extension, "captureModel", e);
 			}
 		}
 	}
 
-	void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ)
+	synchronized void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ)
 	{
-		for (VulkanRenderExtension extension : snapshot())
+		for (int i = 0; i < extensions.size(); )
 		{
+			VulkanRenderExtension extension = extensions.get(i);
 			try
 			{
 				extension.captureModel(projection, model, orientation, worldX, worldY, worldZ);
+				i++;
 			}
 			catch (RuntimeException e)
 			{
-				removeFailedExtension(extension);
+				extensions.remove(i);
 				closeFailedExtension(extension, "captureModelSorted", e);
 			}
 		}
 	}
 
-	void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ, int renderMode)
+	synchronized void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ, int renderMode)
 	{
 		captureModel(projection, model, orientation, worldX, worldY, worldZ, renderMode, false);
 	}
 
-	void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ,
+	synchronized void captureModel(Projection projection, Model model, int orientation, int worldX, int worldY, int worldZ,
 		int renderMode, boolean actorModel)
 	{
-		for (VulkanRenderExtension extension : snapshot())
+		for (int i = 0; i < extensions.size(); )
 		{
+			VulkanRenderExtension extension = extensions.get(i);
 			try
 			{
 				extension.captureModel(projection, model, orientation, worldX, worldY, worldZ, renderMode, actorModel);
+				i++;
 			}
 			catch (RuntimeException e)
 			{
-				removeFailedExtension(extension);
+				extensions.remove(i);
 				closeFailedExtension(extension, "captureModelSorted", e);
 			}
 		}
 	}
 
-	void setLevelRange(int minLevel, int maxLevel)
+	synchronized void setLevelRange(int minLevel, int maxLevel)
 	{
 		forEachExtension("setLevelRange", extension -> extension.setLevelRange(minLevel, maxLevel));
 	}
 
-	void setLevelRange(int minLevel, int currentLevel, int maxLevel)
+	synchronized void setLevelRange(int minLevel, int currentLevel, int maxLevel)
 	{
 		forEachExtension("setLevelRange", extension -> extension.setLevelRange(minLevel, currentLevel, maxLevel));
 	}
 
-	void setHideRoofIds(Set<Integer> hideRoofIds)
+	synchronized void setHideRoofIds(Set<Integer> hideRoofIds)
 	{
 		forEachExtension("setHideRoofIds", extension -> extension.setHideRoofIds(hideRoofIds));
 	}
 
-	void collectDebugMetrics(GpuVulkanDebugMetrics metrics)
+	synchronized void collectDebugMetrics(GpuVulkanDebugMetrics metrics)
 	{
 		forEachExtension("collectDebugMetrics", extension -> extension.collectDebugMetrics(metrics));
 	}
 
-	void uploadUiPixels(int[] pixels, int width, int height)
+	synchronized void uploadUiPixels(int[] pixels, int width, int height)
 	{
-		for (VulkanRenderExtension extension : snapshot())
+		for (int i = 0; i < extensions.size(); )
 		{
+			VulkanRenderExtension extension = extensions.get(i);
 			try
 			{
 				extension.uploadUiPixels(pixels, width, height);
+				i++;
 			}
 			catch (RuntimeException e)
 			{
-				removeFailedExtension(extension);
+				extensions.remove(i);
 				closeFailedExtension(extension, "uploadUiPixels", e);
 			}
 		}
 	}
 
-	ScenePassRedirect scenePassRedirect()
+	synchronized ScenePassRedirect scenePassRedirect()
 	{
-		for (VulkanRenderExtension extension : snapshot())
+		for (int i = 0; i < extensions.size(); )
 		{
+			VulkanRenderExtension extension = extensions.get(i);
 			try
 			{
 				ScenePassRedirect redirect = extension.scenePassRedirect();
@@ -259,91 +256,102 @@ final class RenderExtensions implements AutoCloseable
 				{
 					return redirect;
 				}
+				i++;
 			}
 			catch (RuntimeException e)
 			{
-				removeFailedExtension(extension);
+				extensions.remove(i);
 				closeFailedExtension(extension, "scenePassRedirect", e);
 			}
 		}
 		return null;
 	}
 
-	void recordBeforeRenderPass(VkCommandBuffer commandBuffer)
+	synchronized void recordBeforeRenderPass(VkCommandBuffer commandBuffer)
 	{
-		for (VulkanRenderExtension extension : snapshot())
+		for (int i = 0; i < extensions.size(); )
 		{
+			VulkanRenderExtension extension = extensions.get(i);
 			try
 			{
 				extension.recordBeforeRenderPass(commandBuffer);
+				i++;
 			}
 			catch (RuntimeException e)
 			{
-				removeFailedExtension(extension);
+				extensions.remove(i);
 				closeFailedExtension(extension, "recordBeforeRenderPass", e);
 			}
 		}
 	}
 
-	void recordScenePass(VulkanFrameContext frame)
+	synchronized void recordScenePass(VulkanFrameContext frame)
 	{
-		for (VulkanRenderExtension extension : snapshot())
+		for (int i = 0; i < extensions.size(); )
 		{
+			VulkanRenderExtension extension = extensions.get(i);
 			try
 			{
 				extension.recordScenePass(frame);
+				i++;
 			}
 			catch (RuntimeException e)
 			{
-				removeFailedExtension(extension);
+				extensions.remove(i);
 				closeFailedExtension(extension, "recordScenePass", e);
 			}
 		}
 	}
 
-	void recordUiPass(VulkanFrameContext frame)
+	synchronized void recordUiPass(VulkanFrameContext frame)
 	{
-		for (VulkanRenderExtension extension : snapshot())
+		for (int i = 0; i < extensions.size(); )
 		{
+			VulkanRenderExtension extension = extensions.get(i);
 			try
 			{
 				extension.recordUiPass(frame);
+				i++;
 			}
 			catch (RuntimeException e)
 			{
-				removeFailedExtension(extension);
+				extensions.remove(i);
 				closeFailedExtension(extension, "recordUiPass", e);
 			}
 		}
 	}
 
-	void recordRenderPass(VulkanFrameContext frame)
+	synchronized void recordRenderPass(VulkanFrameContext frame)
 	{
-		for (VulkanRenderExtension extension : snapshot())
+		for (int i = 0; i < extensions.size(); )
 		{
+			VulkanRenderExtension extension = extensions.get(i);
 			try
 			{
 				extension.recordRenderPass(frame);
+				i++;
 			}
 			catch (RuntimeException e)
 			{
-				removeFailedExtension(extension);
+				extensions.remove(i);
 				closeFailedExtension(extension, "recordRenderPass", e);
 			}
 		}
 	}
 
-	void recordAfterComposite(VulkanPostFrameContext frame)
+	synchronized void recordAfterComposite(VulkanPostFrameContext frame)
 	{
-		for (VulkanRenderExtension extension : snapshot())
+		for (int i = 0; i < extensions.size(); )
 		{
+			VulkanRenderExtension extension = extensions.get(i);
 			try
 			{
 				extension.recordAfterComposite(frame);
+				i++;
 			}
 			catch (RuntimeException e)
 			{
-				removeFailedExtension(extension);
+				extensions.remove(i);
 				closeFailedExtension(extension, "recordAfterComposite", e);
 			}
 		}
@@ -355,16 +363,11 @@ final class RenderExtensions implements AutoCloseable
 	}
 
 	@Override
-	public void close()
+	public synchronized void close()
 	{
-		List<VulkanRenderExtension> closing;
-		synchronized (this)
-		{
-			closed = true;
-			closing = new ArrayList<>(extensions);
-			Collections.reverse(closing);
-			extensions.clear();
-		}
+		List<VulkanRenderExtension> closing = new ArrayList<>(extensions);
+		Collections.reverse(closing);
+		extensions.clear();
 		for (VulkanRenderExtension extension : closing)
 		{
 			try
@@ -380,28 +383,20 @@ final class RenderExtensions implements AutoCloseable
 
 	private void forEachExtension(String operation, ExtensionCall call)
 	{
-		for (VulkanRenderExtension extension : snapshot())
+		for (int i = 0; i < extensions.size(); )
 		{
+			VulkanRenderExtension extension = extensions.get(i);
 			try
 			{
 				call.accept(extension);
+				i++;
 			}
 			catch (RuntimeException e)
 			{
-				removeFailedExtension(extension);
+				extensions.remove(i);
 				closeFailedExtension(extension, operation, e);
 			}
 		}
-	}
-
-	private synchronized List<VulkanRenderExtension> snapshot()
-	{
-		return new ArrayList<>(extensions);
-	}
-
-	private synchronized void removeFailedExtension(VulkanRenderExtension extension)
-	{
-		extensions.remove(extension);
 	}
 
 	private void closeFailedExtension(VulkanRenderExtension extension, String operation, RuntimeException failure)

@@ -195,7 +195,7 @@ public class Regions
 		int idx = id / 8;
 		if (idx < regionMap.length)
 		{
-			regionMap[idx] = (byte) (regionMap[idx] | (1 << (id % 8)));
+			regionMap[idx] |= 1 << (idx % 8);
 		}
 	}
 
@@ -205,7 +205,7 @@ public class Regions
 		int idx = id / 8;
 		if (idx < regionMap.length)
 		{
-			return (regionMap[idx] & (1 << (id % 8))) != 0;
+			return (regionMap[idx] & (1 << (idx % 8))) != 0;
 		}
 		return true;
 	}
