@@ -81,21 +81,29 @@ final class Framebuffers implements AutoCloseable
 		{
 			for (int i = 0; i < views.length; i++)
 			{
-				// Attachment order matches RenderPass: [msaaColor, depth, resolve];
-				// without MSAA the swapchain image IS the color target.
-				LongBuffer attachments = msaaColor != null
-					? stack.longs(msaaColor.view(), depthBuffer.view(), views[i])
-					: stack.longs(views[i], depthBuffer.view());
-				VkFramebufferCreateInfo info = VkFramebufferCreateInfo.calloc(stack)
-					.sType$Default()
-					.renderPass(renderPass.handle())
-					.pAttachments(attachments)
-					.width(swapchain.width())
-					.height(swapchain.height())
-					.layers(1);
-				LongBuffer p = stack.mallocLong(1);
-				Vk.check("vkCreateFramebuffer", vkCreateFramebuffer(device.handle(), info, null, p));
-				handles[i] = p.get(0);
+				try
+				{
+					// Attachment order matches RenderPass: [msaaColor, depth, resolve];
+					// without MSAA the swapchain image IS the color target.
+					LongBuffer attachments = msaaColor != null
+						? stack.longs(msaaColor.view(), depthBuffer.view(), views[i])
+						: stack.longs(views[i], depthBuffer.view());
+					VkFramebufferCreateInfo info = VkFramebufferCreateInfo.calloc(stack)
+						.sType$Default()
+						.renderPass(renderPass.handle())
+						.pAttachments(attachments)
+						.width(swapchain.width())
+						.height(swapchain.height())
+						.layers(1);
+					LongBuffer p = stack.mallocLong(1);
+					Vk.check("vkCreateFramebuffer", vkCreateFramebuffer(device.handle(), info, null, p));
+					handles[i] = p.get(0);
+				}
+				catch (RuntimeException e)
+				{
+					destroy();
+					throw e;
+				}
 			}
 		}
 	}

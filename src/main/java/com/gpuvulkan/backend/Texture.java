@@ -63,10 +63,18 @@ final class Texture implements AutoCloseable
 
 		try (MemoryStack stack = stackPush())
 		{
-			image = createImage(stack, format);
-			memory = allocateAndBindMemory(stack);
-			view = createView(stack, format);
-			sampler = createSampler(stack);
+			try
+			{
+				image = createImage(stack, format);
+				memory = allocateAndBindMemory(stack);
+				view = createView(stack, format);
+				sampler = createSampler(stack);
+			}
+			catch (RuntimeException e)
+			{
+				close();
+				throw e;
+			}
 		}
 	}
 

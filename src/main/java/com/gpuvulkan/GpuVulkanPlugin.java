@@ -128,7 +128,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	private RenderPass renderPass;
 	private RegionManager regionManager;
 	private TextureArray textureArray;
-	private RenderExtensions renderExtensions;
+	private volatile RenderExtensions renderExtensions;
 	private InFlightClipRecorder inFlightClipRecorder;
 	private com.gpuvulkan.gfx.Renderer gfx;
 	private net.runelite.rlawt.AWTContext awtContext;

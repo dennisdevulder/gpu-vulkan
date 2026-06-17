@@ -126,8 +126,16 @@ final class DepthBuffer implements AutoCloseable
 				.baseArrayLayer(0).layerCount(1);
 
 			LongBuffer pView = stack.mallocLong(1);
-			Vk.check("vkCreateImageView (depth)", vkCreateImageView(device.handle(), viewInfo, null, pView));
-			view = pView.get(0);
+			try
+			{
+				Vk.check("vkCreateImageView (depth)", vkCreateImageView(device.handle(), viewInfo, null, pView));
+				view = pView.get(0);
+			}
+			catch (RuntimeException e)
+			{
+				destroy();
+				throw e;
+			}
 		}
 	}
 

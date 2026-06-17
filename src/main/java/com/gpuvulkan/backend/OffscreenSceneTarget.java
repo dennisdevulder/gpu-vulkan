@@ -53,13 +53,21 @@ final class OffscreenSceneTarget implements AutoCloseable
 		destroy();
 		this.width = width;
 		this.height = height;
-		createColor();
-		depth = new DepthBuffer(device, width, height, samples);
-		if (samples != VK_SAMPLE_COUNT_1_BIT)
+		try
 		{
-			msaaColor = new MsaaColorBuffer(device, width, height, format, samples);
+			createColor();
+			depth = new DepthBuffer(device, width, height, samples);
+			if (samples != VK_SAMPLE_COUNT_1_BIT)
+			{
+				msaaColor = new MsaaColorBuffer(device, width, height, format, samples);
+			}
+			createFramebuffer();
 		}
-		createFramebuffer();
+		catch (RuntimeException e)
+		{
+			destroy();
+			throw e;
+		}
 	}
 
 	int width()
