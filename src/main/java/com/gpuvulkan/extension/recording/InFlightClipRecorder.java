@@ -78,7 +78,8 @@ final class InFlightClipRecorder implements VulkanRenderExtension
 			probeAttempted = false;
 			configureEncoder();
 		}
-		else if ("inFlightEncodingBufferSeconds".equals(key) && encoder != null)
+		else if (("inFlightEncodingBufferSeconds".equals(key)
+			|| "inFlightEncodingPostWaitSeconds".equals(key)) && encoder != null)
 		{
 			updateBufferedFrameCount(encoder);
 		}
@@ -145,6 +146,7 @@ final class InFlightClipRecorder implements VulkanRenderExtension
 				return CompletableFuture.failedFuture(new IllegalStateException(
 					"in-flight encoding unavailable: " + unavailableReason));
 			}
+			updateBufferedFrameCount(active, preSeconds, postSeconds);
 		}
 
 		CompletableFuture<Path> future = new CompletableFuture<>();
@@ -242,8 +244,14 @@ final class InFlightClipRecorder implements VulkanRenderExtension
 
 	private void updateBufferedFrameCount(StreamingVulkanEncoder selected)
 	{
-		selected.setMaxBufferedFrames(
-			clamp(config.inFlightEncodingBufferSeconds(), 1, MAX_TOTAL_SECONDS) * captureFps());
+		int preSeconds = clamp(config.inFlightEncodingBufferSeconds(), 1, MAX_TOTAL_SECONDS);
+		int postSeconds = clamp(config.inFlightEncodingPostWaitSeconds(), 0, MAX_TOTAL_SECONDS - preSeconds);
+		updateBufferedFrameCount(selected, preSeconds, postSeconds);
+	}
+
+	private void updateBufferedFrameCount(StreamingVulkanEncoder selected, int preSeconds, int postSeconds)
+	{
+		selected.setMaxBufferedFrames((preSeconds + postSeconds) * captureFps());
 	}
 
 	private void applyEncoderSettings(StreamingVulkanEncoder selected)
