@@ -171,6 +171,11 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	{
 		log.info("Starting GPU (Vulkan)");
 		shuttingDown = false;
+		if (isMacOS())
+		{
+			log.warn("GPU (Vulkan) is disabled on macOS in this build.");
+			return;
+		}
 		keyManager.registerKeyListener(inFlightClipHotkeyListener);
 		runtimeConfig = new ClientRuntimeConfig(client, config);
 		// Refuse to coexist with stock GPU — two owners of the rlawt context
@@ -214,6 +219,12 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 				return true;
 			}
 		});
+	}
+
+	private static boolean isMacOS()
+	{
+		String os = System.getProperty("os.name", "").toLowerCase();
+		return os.contains("mac") || os.contains("darwin");
 	}
 
 	private static boolean isVulkanLoaderAvailable()
