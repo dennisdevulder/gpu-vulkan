@@ -28,6 +28,7 @@ import net.runelite.client.config.Config;
 import net.runelite.client.config.ConfigGroup;
 import net.runelite.client.config.ConfigItem;
 import net.runelite.client.config.ConfigSection;
+import net.runelite.client.config.Keybind;
 import net.runelite.client.config.Range;
 
 /**
@@ -76,10 +77,18 @@ public interface GpuVulkanPluginConfig extends Config
 	@ConfigSection(
 		name = "Debug",
 		description = "Runtime diagnostics for Vulkan memory and scene capture.",
-		position = 8,
+		position = 9,
 		closedByDefault = true
 	)
 	String DEBUG_SECTION = "debug";
+
+	@ConfigSection(
+		name = "In-flight Encoding",
+		description = "Keep recent frames in memory and write clips to disk.",
+		position = 8,
+		closedByDefault = true
+	)
+	String IN_FLIGHT_ENCODING_SECTION = "inFlightEncoding";
 
 	// --------------------------------------------------------------- top level
 
@@ -257,6 +266,60 @@ public interface GpuVulkanPluginConfig extends Config
 		position = 1
 	)
 	default int colorBlindIntensity() { return 100; }
+
+	// -------------------------------------------------------- In-flight Encoding
+
+	enum EncodingType
+	{
+		MP4
+	}
+
+	@ConfigItem(
+		keyName = "inFlightEncodingEnabled",
+		name = "Enable encoding",
+		description = "Keep a rolling frame buffer and allow clips to be saved to disk when Vulkan H.264 encode is available.",
+		section = IN_FLIGHT_ENCODING_SECTION,
+		position = 0
+	)
+	default boolean inFlightEncodingEnabled() { return false; }
+
+	@Range(min = 1, max = 60)
+	@ConfigItem(
+		keyName = "inFlightEncodingBufferSeconds",
+		name = "Buffer length",
+		description = "Seconds kept before the clip trigger. The total pre/post window is capped to 60 seconds.",
+		section = IN_FLIGHT_ENCODING_SECTION,
+		position = 1
+	)
+	default int inFlightEncodingBufferSeconds() { return 10; }
+
+	@Range(min = 0, max = 60)
+	@ConfigItem(
+		keyName = "inFlightEncodingPostWaitSeconds",
+		name = "Post wait",
+		description = "Seconds captured after the clip trigger before the file is written. The total pre/post window is capped to 60 seconds.",
+		section = IN_FLIGHT_ENCODING_SECTION,
+		position = 2
+	)
+	default int inFlightEncodingPostWaitSeconds() { return 4; }
+
+	@ConfigItem(
+		keyName = "inFlightEncodingType",
+		name = "Encoding type",
+		description = "Container/codec used for saved clips.",
+		section = IN_FLIGHT_ENCODING_SECTION,
+		position = 3
+	)
+	default EncodingType inFlightEncodingType() { return EncodingType.MP4; }
+
+	@ConfigItem(
+		keyName = "inFlightEncodingHotkey",
+		name = "Save clip hotkey",
+		description = "Save the current rolling clip to disk.",
+		section = IN_FLIGHT_ENCODING_SECTION,
+		position = 4
+	)
+	default Keybind inFlightEncodingHotkey() { return Keybind.NOT_SET; }
 
 	// ------------------------------------------------------------------- Debug
 
