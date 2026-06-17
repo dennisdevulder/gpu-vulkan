@@ -75,7 +75,6 @@ final class VulkanRenderer implements AutoCloseable
 	private final ScreenshotReadback screenshotReadback;
 	private OffscreenSceneTarget customPresentTarget;
 	private DrawManager drawManager;
-	private DrawManagerScreenshotProbe screenshotProbe = new DrawManagerScreenshotProbe(null);
 	private boolean screenshotReadbackRequested;
 	/** macOS-only — custom-present path. Null on Linux (we use {@link #swapchain}). */
 	private final MetalDrawableSet metalDrawables;
@@ -173,7 +172,6 @@ final class VulkanRenderer implements AutoCloseable
 	void setDrawManager(DrawManager drawManager)
 	{
 		this.drawManager = drawManager;
-		this.screenshotProbe = new DrawManagerScreenshotProbe(drawManager);
 	}
 
 	void markSwapchainStale()
@@ -289,7 +287,7 @@ final class VulkanRenderer implements AutoCloseable
 		this.gameTick = gameTick;
 		this.smoothBanding = smoothBanding;
 		this.overlayColor = overlayColor;
-		this.screenshotReadbackRequested = !disableScreenshotReadback && screenshotProbe.hasPendingRequest();
+		this.screenshotReadbackRequested = !disableScreenshotReadback && drawManager != null;
 	}
 
 	// Must complete before uploadPixels writes this slot's UI staging buffer,
