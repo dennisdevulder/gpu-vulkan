@@ -328,9 +328,6 @@ final class InFlightClipRecorder implements VulkanRenderExtension
 		{
 			Future<?> drained = frameExecutor.submit(() -> { });
 			drained.get(5, TimeUnit.SECONDS);
-			active.stop();
-			applyEncoderSettings(active);
-			active.start(captureFps());
 		}
 		catch (Exception e)
 		{
