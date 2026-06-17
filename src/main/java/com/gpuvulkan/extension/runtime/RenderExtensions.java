@@ -357,6 +357,11 @@ final class RenderExtensions implements AutoCloseable
 		}
 	}
 
+	synchronized void beforeSwapchainRebuild()
+	{
+		forEachExtension("beforeSwapchainRebuild", VulkanRenderExtension::beforeSwapchainRebuild);
+	}
+
 	@Override
 	public synchronized void close()
 	{
