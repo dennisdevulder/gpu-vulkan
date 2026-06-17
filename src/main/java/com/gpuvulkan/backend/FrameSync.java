@@ -69,25 +69,22 @@ final class FrameSync implements AutoCloseable
 
 	void recreateRenderFinished(int imageCount)
 	{
-		if (renderFinished != null && renderFinished.length >= imageCount)
-		{
-			return;
-		}
-
 		try (MemoryStack stack = stackPush())
 		{
-			int oldCount = renderFinished == null ? 0 : renderFinished.length;
-			long[] resized = new long[imageCount];
-			if (oldCount > 0)
+			if (renderFinished != null)
 			{
-				System.arraycopy(renderFinished, 0, resized, 0, oldCount);
+				Vk.check("vkDeviceWaitIdle", vkDeviceWaitIdle(device.handle()));
+				for (long s : renderFinished)
+				{
+					vkDestroySemaphore(device.handle(), s, null);
+				}
 			}
+			renderFinished = new long[imageCount];
 			VkSemaphoreCreateInfo info = VkSemaphoreCreateInfo.calloc(stack).sType$Default();
-			for (int i = oldCount; i < imageCount; i++)
+			for (int i = 0; i < imageCount; i++)
 			{
-				resized[i] = createSemaphore(stack, info);
+				renderFinished[i] = createSemaphore(stack, info);
 			}
-			renderFinished = resized;
 		}
 	}
 

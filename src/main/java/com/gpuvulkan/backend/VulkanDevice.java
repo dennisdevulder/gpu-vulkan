@@ -35,8 +35,6 @@ import org.lwjgl.vulkan.VkDeviceQueueCreateInfo;
 import org.lwjgl.vulkan.VkPhysicalDevice;
 import org.lwjgl.vulkan.VkPhysicalDeviceFeatures;
 import org.lwjgl.vulkan.VkPhysicalDeviceProperties;
-import org.lwjgl.vulkan.VkPhysicalDeviceSynchronization2Features;
-import org.lwjgl.vulkan.VkPhysicalDeviceVideoMaintenance1FeaturesKHR;
 import org.lwjgl.vulkan.VkQueue;
 import org.lwjgl.vulkan.VkQueueFamilyProperties;
 
@@ -45,11 +43,6 @@ import java.nio.IntBuffer;
 import java.util.Set;
 
 import static org.lwjgl.system.MemoryStack.stackPush;
-import static org.lwjgl.vulkan.KHRVideoEncodeH264.VK_KHR_VIDEO_ENCODE_H264_EXTENSION_NAME;
-import static org.lwjgl.vulkan.KHRVideoEncodeQueue.VK_KHR_VIDEO_ENCODE_QUEUE_EXTENSION_NAME;
-import static org.lwjgl.vulkan.KHRVideoEncodeQueue.VK_QUEUE_VIDEO_ENCODE_BIT_KHR;
-import static org.lwjgl.vulkan.KHRVideoMaintenance1.VK_KHR_VIDEO_MAINTENANCE_1_EXTENSION_NAME;
-import static org.lwjgl.vulkan.KHRVideoQueue.VK_KHR_VIDEO_QUEUE_EXTENSION_NAME;
 import static org.lwjgl.vulkan.KHRSurface.vkGetPhysicalDeviceSurfaceSupportKHR;
 import static org.lwjgl.vulkan.VK13.*;
 
@@ -63,9 +56,7 @@ final class VulkanDevice implements AutoCloseable
 	private final VkPhysicalDevice physicalDevice;
 	private final VkDevice handle;
 	private final VkQueue graphicsQueue;
-	private final VkQueue videoEncodeQueue;
 	private final int graphicsQueueFamily;
-	private final int videoEncodeQueueFamily;
 	private final String deviceName;
 	private final float maxSamplerAnisotropy;
 	private final int maxSampleCount;
@@ -77,8 +68,6 @@ final class VulkanDevice implements AutoCloseable
 	/** VK_EXT_metal_objects enabled (macOS only); selects the custom
 	 *  MTLCommandQueue present path over KHR_swapchain. */
 	private final boolean supportsMetalObjects;
-	private final boolean supportsVideoEncode;
-	private final String h264EncodeExtensionName;
 	/** {@code id<MTLCommandQueue>} for the custom present path; zero when
 	 *  {@link #supportsMetalObjects} is false. */
 	private long metalCommandQueue;
@@ -116,36 +105,12 @@ final class VulkanDevice implements AutoCloseable
 			boolean hasMetalObjects = deviceExtensions.contains("VK_EXT_metal_objects")
 				&& !Boolean.getBoolean("vkgpu.disableCustomPresent");
 			this.supportsMetalObjects = hasMetalObjects;
-			int encodeFamily = findQueueFamily(physicalDevice, VK_QUEUE_VIDEO_ENCODE_BIT_KHR, stack);
-			String h264Ext = selectH264EncodeExtension(deviceExtensions);
-			boolean hasVideoEncode = encodeFamily >= 0
-				&& deviceExtensions.contains(VK_KHR_VIDEO_QUEUE_EXTENSION_NAME)
-				&& deviceExtensions.contains(VK_KHR_VIDEO_ENCODE_QUEUE_EXTENSION_NAME)
-				&& deviceExtensions.contains(VK_KHR_VIDEO_MAINTENANCE_1_EXTENSION_NAME)
-				&& h264Ext != null
-				&& !hasPortabilitySubset;
-			this.supportsVideoEncode = hasVideoEncode;
-			this.videoEncodeQueueFamily = hasVideoEncode ? encodeFamily : -1;
-			this.h264EncodeExtensionName = h264Ext;
-			if (hasVideoEncode)
-			{
-				log.info("Enabling Vulkan Video H.264 encode on queue family {}", encodeFamily);
-			}
 
-			this.handle = createLogicalDevice(stack, hasPortabilitySubset, hasMetalObjects, hasVideoEncode);
+			this.handle = createLogicalDevice(stack, hasPortabilitySubset, hasMetalObjects);
 
 			PointerBuffer pQueue = stack.mallocPointer(1);
 			vkGetDeviceQueue(handle, graphicsQueueFamily, 0, pQueue);
 			this.graphicsQueue = new VkQueue(pQueue.get(0), handle);
-			if (hasVideoEncode)
-			{
-				vkGetDeviceQueue(handle, videoEncodeQueueFamily, 0, pQueue);
-				this.videoEncodeQueue = new VkQueue(pQueue.get(0), handle);
-			}
-			else
-			{
-				this.videoEncodeQueue = null;
-			}
 
 			this.metalCommandQueue = initMetalCommandQueue(stack);
 		}
@@ -181,26 +146,16 @@ final class VulkanDevice implements AutoCloseable
 		return highestSampleBit(counts);
 	}
 
-	private VkDevice createLogicalDevice(MemoryStack stack, boolean hasPortabilitySubset, boolean hasMetalObjects,
-		boolean hasVideoEncode)
+	private VkDevice createLogicalDevice(MemoryStack stack, boolean hasPortabilitySubset, boolean hasMetalObjects)
 	{
-		boolean sharedVideoQueue = hasVideoEncode && videoEncodeQueueFamily == graphicsQueueFamily;
-		int queueInfoCount = hasVideoEncode && !sharedVideoQueue ? 2 : 1;
-		VkDeviceQueueCreateInfo.Buffer qInfo = VkDeviceQueueCreateInfo.calloc(queueInfoCount, stack);
+		VkDeviceQueueCreateInfo.Buffer qInfo = VkDeviceQueueCreateInfo.calloc(1, stack);
 		qInfo.get(0).sType$Default()
 			.queueFamilyIndex(graphicsQueueFamily)
 			.pQueuePriorities(stack.floats(1.0f));
-		if (queueInfoCount == 2)
-		{
-			qInfo.get(1).sType$Default()
-				.queueFamilyIndex(videoEncodeQueueFamily)
-				.pQueuePriorities(stack.floats(1.0f));
-		}
 
 		int extCount = 1
 			+ (hasPortabilitySubset ? 1 : 0)
-			+ (hasMetalObjects ? 1 : 0)
-			+ (hasVideoEncode ? 4 : 0);
+			+ (hasMetalObjects ? 1 : 0);
 		PointerBuffer devExtensions = stack.mallocPointer(extCount);
 		devExtensions.put(stack.UTF8(KHRSwapchain.VK_KHR_SWAPCHAIN_EXTENSION_NAME));
 		if (hasPortabilitySubset)
@@ -213,13 +168,6 @@ final class VulkanDevice implements AutoCloseable
 			devExtensions.put(stack.UTF8("VK_EXT_metal_objects"));
 			log.info("Enabling VK_EXT_metal_objects (custom-present path)");
 		}
-		if (hasVideoEncode)
-		{
-			devExtensions.put(stack.UTF8(VK_KHR_VIDEO_QUEUE_EXTENSION_NAME));
-			devExtensions.put(stack.UTF8(VK_KHR_VIDEO_ENCODE_QUEUE_EXTENSION_NAME));
-			devExtensions.put(stack.UTF8(VK_KHR_VIDEO_MAINTENANCE_1_EXTENSION_NAME));
-			devExtensions.put(stack.UTF8(h264EncodeExtensionName));
-		}
 		devExtensions.flip();
 
 		// Enable only what's both wanted AND supported.
@@ -227,24 +175,8 @@ final class VulkanDevice implements AutoCloseable
 			.fillModeNonSolid(supportsFillModeNonSolid)
 			.samplerAnisotropy(supportsSamplerAnisotropy);
 
-		long pNext = 0L;
-		if (hasVideoEncode)
-		{
-			VkPhysicalDeviceSynchronization2Features sync2 =
-				VkPhysicalDeviceSynchronization2Features.calloc(stack)
-					.sType$Default()
-					.synchronization2(true);
-			VkPhysicalDeviceVideoMaintenance1FeaturesKHR videoMaint1 =
-				VkPhysicalDeviceVideoMaintenance1FeaturesKHR.calloc(stack)
-					.sType$Default()
-					.pNext(sync2.address())
-					.videoMaintenance1(true);
-			pNext = videoMaint1.address();
-		}
-
 		VkDeviceCreateInfo info = VkDeviceCreateInfo.calloc(stack)
 			.sType$Default()
-			.pNext(pNext)
 			.pQueueCreateInfos(qInfo)
 			.ppEnabledExtensionNames(devExtensions)
 			.pEnabledFeatures(features);
@@ -299,34 +231,14 @@ final class VulkanDevice implements AutoCloseable
 		return graphicsQueue;
 	}
 
-	VkQueue videoEncodeQueue()
-	{
-		return videoEncodeQueue;
-	}
-
 	int graphicsQueueFamily()
 	{
 		return graphicsQueueFamily;
 	}
 
-	int videoEncodeQueueFamily()
-	{
-		return videoEncodeQueueFamily;
-	}
-
 	boolean supportsMetalObjects()
 	{
 		return supportsMetalObjects;
-	}
-
-	boolean supportsVideoEncode()
-	{
-		return supportsVideoEncode;
-	}
-
-	String h264EncodeExtensionName()
-	{
-		return h264EncodeExtensionName;
 	}
 
 	/** {@code id<MTLCommandQueue>} for the custom-present path. Zero on Linux
@@ -467,35 +379,6 @@ final class VulkanDevice implements AutoCloseable
 			}
 		}
 		return -1;
-	}
-
-	private static int findQueueFamily(VkPhysicalDevice pd, int requiredFlags, MemoryStack stack)
-	{
-		IntBuffer count = stack.mallocInt(1);
-		vkGetPhysicalDeviceQueueFamilyProperties(pd, count, null);
-		VkQueueFamilyProperties.Buffer fams = VkQueueFamilyProperties.calloc(count.get(0), stack);
-		vkGetPhysicalDeviceQueueFamilyProperties(pd, count, fams);
-		for (int i = 0; i < fams.capacity(); i++)
-		{
-			if ((fams.get(i).queueFlags() & requiredFlags) == requiredFlags)
-			{
-				return i;
-			}
-		}
-		return -1;
-	}
-
-	private static String selectH264EncodeExtension(Set<String> extensions)
-	{
-		if (extensions.contains(VK_KHR_VIDEO_ENCODE_H264_EXTENSION_NAME))
-		{
-			return VK_KHR_VIDEO_ENCODE_H264_EXTENSION_NAME;
-		}
-		if (extensions.contains("VK_EXT_video_encode_h264"))
-		{
-			return "VK_EXT_video_encode_h264";
-		}
-		return null;
 	}
 
 	private static Set<String> enumerateDeviceExtensions(MemoryStack stack, VkPhysicalDevice pd)

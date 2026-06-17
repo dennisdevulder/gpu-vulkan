@@ -244,8 +244,8 @@ final class VulkanRenderer implements AutoCloseable
 		}
 	}
 
-	// Rebuilds a stale swapchain once the target size settles; returns false
-	// while the window is minimised or still resizing.
+	// Rebuilds a stale swapchain once the target size settles; false skips
+	// the frame (minimised window, mid-resize).
 	private boolean surfaceReady(int desiredWidth, int desiredHeight)
 	{
 		if (!useCustomPresent && swapchainRebuild.isStale())
@@ -594,9 +594,7 @@ final class VulkanRenderer implements AutoCloseable
 
 	private void rebuildSwapchain(int desiredWidth, int desiredHeight)
 	{
-		sync.waitAllInFlight();
 		Vk.check("vkDeviceWaitIdle", vkDeviceWaitIdle(device.handle()));
-		renderExtensions.beforeSwapchainRebuild();
 		framebuffers.destroyAll();
 		swapchain.recreate(desiredWidth, desiredHeight);
 		depthBuffer.recreate(swapchain.width(), swapchain.height());
