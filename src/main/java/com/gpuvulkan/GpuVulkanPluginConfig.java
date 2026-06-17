@@ -274,6 +274,67 @@ public interface GpuVulkanPluginConfig extends Config
 		MP4
 	}
 
+	enum RecordingFps
+	{
+		FPS_30(30, "30 FPS"),
+		FPS_60(60, "60 FPS");
+
+		private final int value;
+		private final String label;
+
+		RecordingFps(int value, String label)
+		{
+			this.value = value;
+			this.label = label;
+		}
+
+		int value()
+		{
+			return value;
+		}
+
+		@Override
+		public String toString()
+		{
+			return label;
+		}
+	}
+
+	enum RecordingQuality
+	{
+		STANDARD(10_000_000, 15_000_000, "Standard"),
+		HIGH(20_000_000, 30_000_000, "High"),
+		VERY_HIGH(35_000_000, 50_000_000, "Very high"),
+		MAXIMUM(50_000_000, 75_000_000, "Maximum");
+
+		private final int averageBitrate;
+		private final int peakBitrate;
+		private final String label;
+
+		RecordingQuality(int averageBitrate, int peakBitrate, String label)
+		{
+			this.averageBitrate = averageBitrate;
+			this.peakBitrate = peakBitrate;
+			this.label = label;
+		}
+
+		int averageBitrate()
+		{
+			return averageBitrate;
+		}
+
+		int peakBitrate()
+		{
+			return peakBitrate;
+		}
+
+		@Override
+		public String toString()
+		{
+			return label;
+		}
+	}
+
 	@ConfigItem(
 		keyName = "inFlightEncodingEnabled",
 		name = "Enable encoding",
@@ -304,11 +365,29 @@ public interface GpuVulkanPluginConfig extends Config
 	default int inFlightEncodingPostWaitSeconds() { return 4; }
 
 	@ConfigItem(
+		keyName = "inFlightEncodingFps",
+		name = "Recording FPS",
+		description = "Frame rate used for in-flight clips.",
+		section = IN_FLIGHT_ENCODING_SECTION,
+		position = 3
+	)
+	default RecordingFps inFlightEncodingFps() { return RecordingFps.FPS_30; }
+
+	@ConfigItem(
+		keyName = "inFlightEncodingQuality",
+		name = "Recording quality",
+		description = "Bitrate preset used for in-flight clips. Higher settings produce larger files.",
+		section = IN_FLIGHT_ENCODING_SECTION,
+		position = 4
+	)
+	default RecordingQuality inFlightEncodingQuality() { return RecordingQuality.STANDARD; }
+
+	@ConfigItem(
 		keyName = "inFlightEncodingType",
 		name = "Encoding type",
 		description = "Container/codec used for saved clips.",
 		section = IN_FLIGHT_ENCODING_SECTION,
-		position = 3
+		position = 5
 	)
 	default EncodingType inFlightEncodingType() { return EncodingType.MP4; }
 
@@ -317,7 +396,7 @@ public interface GpuVulkanPluginConfig extends Config
 		name = "Save clip hotkey",
 		description = "Save the current rolling clip to disk.",
 		section = IN_FLIGHT_ENCODING_SECTION,
-		position = 4
+		position = 6
 	)
 	default Keybind inFlightEncodingHotkey() { return Keybind.NOT_SET; }
 

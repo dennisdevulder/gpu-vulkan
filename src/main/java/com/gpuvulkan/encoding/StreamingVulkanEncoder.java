@@ -47,12 +47,10 @@ import static org.lwjgl.vulkan.VK10.*;
  * JPEG roundtrip the burst-encode path takes; quality is bounded by H.264
  * rather than by JPEG re-compression.
  *
- * Resize handling: shrinking resizes (sidebar open, dialog popups) pad into
- * the existing coded extent so the pre-roll buffer survives. Growing resizes
- * tear down the session and open a new segment; finalize then picks the
- * latest segment overlapping the requested window. Frames spanning a
- * growing resize are dropped from the clip — the alternative (multi-segment
- * MP4) is poorly supported by common players.
+ * Resize handling: any source-size change tears down the session and opens a
+ * new segment. Finalize then picks the latest segment overlapping the requested
+ * window. Frames spanning a resize are dropped from the clip — the alternative
+ * (multi-segment MP4) is poorly supported by common players.
  *
  * Thread-safety: public methods are {@code synchronized} on {@code this}.
  * Concurrent {@code submitFrameBgraBuffer} calls from the writer pool serialise.
@@ -169,10 +167,10 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
             {
                 initSegment(width, height, timestamp);
             }
-            else if (width > currentSegment.codedWidth || height > currentSegment.codedHeight)
-            {
-                rotateSegment(width, height, timestamp);
-            }
+            else if (width != currentSegment.sourceWidth || height != currentSegment.sourceHeight)
+			{
+				rotateSegment(width, height, timestamp);
+			}
 
             stage = "encode";
             int frameIndex = nextFrameIndex++;

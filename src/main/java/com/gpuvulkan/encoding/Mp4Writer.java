@@ -355,8 +355,8 @@ public final class Mp4Writer
         return stsd.build();
     }
 
-    // nclx colr: redundant with the SPS VUI but written as belt-and-suspenders,
-    // matching libx264's habit. matrix=6 (BT.601), full_range=1.
+    // nclx colr: redundant with the SPS VUI but written as belt-and-suspenders.
+    // matrix=6 (BT.601), full_range=0 to match the NV12 shader output.
     private static byte[] buildColr()
     {
         BoxBuilder b = new BoxBuilder("colr");
@@ -364,7 +364,7 @@ public final class Mp4Writer
         b.writeShort((short) 2);      // colour_primaries unspecified
         b.writeShort((short) 2);      // transfer_characteristics unspecified
         b.writeShort((short) 6);      // matrix_coefficients = BT.601
-        b.writeByte((byte) 0x80);     // full_range_flag=1, reserved=0
+        b.writeByte((byte) 0x00);     // full_range_flag=0, reserved=0
         return b.build();
     }
 

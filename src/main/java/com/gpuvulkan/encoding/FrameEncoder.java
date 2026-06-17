@@ -508,7 +508,7 @@ final class FrameEncoder
             if (r != VK_SUCCESS) throw new RuntimeException("vkCreatePipelineLayout (bgra->nv12) failed: " + r);
             convertPipelineLayout = p.get(0);
 
-            ByteBuffer spirv = loadResource("bgra_to_nv12.comp.spv");
+            ByteBuffer spirv = loadResource("/com/gpuvulkan/bgra_to_nv12.comp.spv");
             try
             {
                 convertShaderModule = createShaderModule(device, stack, spirv);

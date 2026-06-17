@@ -594,7 +594,9 @@ final class VulkanRenderer implements AutoCloseable
 
 	private void rebuildSwapchain(int desiredWidth, int desiredHeight)
 	{
+		sync.waitAllInFlight();
 		Vk.check("vkDeviceWaitIdle", vkDeviceWaitIdle(device.handle()));
+		renderExtensions.beforeSwapchainRebuild();
 		framebuffers.destroyAll();
 		swapchain.recreate(desiredWidth, desiredHeight);
 		depthBuffer.recreate(swapchain.width(), swapchain.height());

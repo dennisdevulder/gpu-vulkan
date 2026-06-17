@@ -15,6 +15,7 @@ import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -31,10 +32,8 @@ import static org.lwjgl.vulkan.VK13.*;
 @Slf4j
 final class InFlightClipRecorder implements VulkanRenderExtension
 {
-	private static final int CAPTURE_FPS = 30;
-	private static final int MAX_PENDING_ENCODE_FRAMES = CAPTURE_FPS;
 	private static final int MAX_TOTAL_SECONDS = 60;
-	private static final float JPEG_QUALITY = 0.70f;
+	private static final float UNUSED_QUALITY_HINT = 1.0f;
 
 	private final GpuVulkanPluginConfig config;
 	private final VulkanDevice renderDevice;
@@ -73,6 +72,8 @@ final class InFlightClipRecorder implements VulkanRenderExtension
 		String key = event.getKey();
 		if ("inFlightEncodingEnabled".equals(key)
 			|| "inFlightEncodingType".equals(key)
+			|| "inFlightEncodingFps".equals(key)
+			|| "inFlightEncodingQuality".equals(key)
 			|| "inFlightEncodingBufferSeconds".equals(key))
 		{
 			resetEncoder();
@@ -107,7 +108,7 @@ final class InFlightClipRecorder implements VulkanRenderExtension
 		{
 			return;
 		}
-		nextCaptureNanos = now + (1_000_000_000L / CAPTURE_FPS);
+		nextCaptureNanos = now + (1_000_000_000L / captureFps());
 
 		int slot = frame.frameIndex();
 		submitCompletedSlot(slot, active);
@@ -224,8 +225,9 @@ final class InFlightClipRecorder implements VulkanRenderExtension
 				return;
 			}
 			StreamingVulkanEncoder selected = new StreamingVulkanEncoder(encodeDevice, caps);
+			configureBitrate(selected);
 			updateBufferedFrameCount(selected);
-			selected.start(CAPTURE_FPS, JPEG_QUALITY);
+			selected.start(captureFps(), UNUSED_QUALITY_HINT);
 			encoder = selected;
 			unavailableReason = null;
 			log.info("In-flight encoding enabled with {}", selected.encoderName());
@@ -240,7 +242,23 @@ final class InFlightClipRecorder implements VulkanRenderExtension
 	private void updateBufferedFrameCount(StreamingVulkanEncoder selected)
 	{
 		selected.setMaxBufferedFrames(
-			clamp(config.inFlightEncodingBufferSeconds(), 1, MAX_TOTAL_SECONDS) * CAPTURE_FPS);
+			clamp(config.inFlightEncodingBufferSeconds(), 1, MAX_TOTAL_SECONDS) * captureFps());
+	}
+
+	private void configureBitrate(StreamingVulkanEncoder selected)
+	{
+		GpuVulkanPluginConfig.RecordingQuality quality = config.inFlightEncodingQuality();
+		if (quality == null)
+		{
+			quality = GpuVulkanPluginConfig.RecordingQuality.STANDARD;
+		}
+		selected.configureBitrate(quality.averageBitrate(), quality.peakBitrate());
+	}
+
+	private int captureFps()
+	{
+		GpuVulkanPluginConfig.RecordingFps fps = config.inFlightEncodingFps();
+		return fps == null ? 30 : fps.value();
 	}
 
 	private void submitCompletedSlot(int slot, StreamingVulkanEncoder active)
@@ -252,7 +270,8 @@ final class InFlightClipRecorder implements VulkanRenderExtension
 		Buffer buffer = buffers[slot];
 		int frameWidth = slotWidths[slot];
 		int frameHeight = slotHeights[slot];
-		if (pendingEncodeFrames.get() >= MAX_PENDING_ENCODE_FRAMES)
+		slotReady[slot] = false;
+		if (pendingEncodeFrames.get() >= captureFps())
 		{
 			return;
 		}
@@ -279,6 +298,40 @@ final class InFlightClipRecorder implements VulkanRenderExtension
 		catch (RejectedExecutionException e)
 		{
 			pendingEncodeFrames.decrementAndGet();
+		}
+	}
+
+	@Override
+	public void beforeSwapchainRebuild()
+	{
+		StreamingVulkanEncoder active;
+		synchronized (this)
+		{
+			active = encoder;
+			for (int i = 0; i < slotReady.length; i++)
+			{
+				slotReady[i] = false;
+			}
+		}
+		if (active == null || frameExecutor.isShutdown())
+		{
+			return;
+		}
+		try
+		{
+			Future<?> drained = frameExecutor.submit(() -> { });
+			drained.get(5, TimeUnit.SECONDS);
+			active.stop();
+			configureBitrate(active);
+			active.start(captureFps(), UNUSED_QUALITY_HINT);
+		}
+		catch (Exception e)
+		{
+			log.warn("Failed to drain in-flight encoder before swapchain rebuild", e);
+		}
+		finally
+		{
+			pendingEncodeFrames.set(0);
 		}
 	}
 
@@ -367,7 +420,7 @@ final class InFlightClipRecorder implements VulkanRenderExtension
 
 	private Path writeClip(byte[] bytes, long timestamp) throws IOException
 	{
-		Path root = Paths.get(System.getProperty("user.home"), ".runelite", "osrs-tracker-clips", "manual");
+		Path root = Paths.get(System.getProperty("user.home"), ".runelite", "recordings");
 		Files.createDirectories(root);
 		String slug = slugify("vulkan_clip_" + timestamp);
 		Path candidate = root.resolve(slug + ".mp4");

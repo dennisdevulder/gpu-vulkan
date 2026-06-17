@@ -200,12 +200,11 @@ public class H264SessionConfig implements AutoCloseable
             .direct_8x8_inference_flag(true)
             .vui_parameters_present_flag(true);
 
-        // SPS VUI: self-describe the bitstream as BT.601 full-range so decoders
-        // render 1:1 with the source RGB without relying on container metadata.
-        // matrix=6 pairs with the on-device BGRA->NV12 BT.601-JFIF coefficients.
+        // SPS VUI: match the on-device BGRA->NV12 shader, which writes
+        // BT.601 limited-range luma/chroma values.
         spsVuiFlags = StdVideoH264SpsVuiFlags.calloc()
             .video_signal_type_present_flag(true)
-            .video_full_range_flag(true)
+            .video_full_range_flag(false)
             .color_description_present_flag(true)
             .timing_info_present_flag(true)
             .fixed_frame_rate_flag(true);
