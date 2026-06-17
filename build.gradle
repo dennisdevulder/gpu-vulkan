@@ -75,10 +75,14 @@ dependencies {
 	launcherRuntime "org.lwjgl:lwjgl:${lwjglCoreVersion}:natives-linux-arm64"
 	launcherRuntime "org.lwjgl:lwjgl:${lwjglCoreVersion}:natives-windows"
 	launcherRuntime "org.lwjgl:lwjgl:${lwjglCoreVersion}:natives-windows-arm64"
+	launcherRuntime "org.lwjgl:lwjgl:${lwjglCoreVersion}:natives-macos"
+	launcherRuntime "org.lwjgl:lwjgl:${lwjglCoreVersion}:natives-macos-arm64"
 	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglCoreVersion}:natives-linux"
 	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglCoreVersion}:natives-linux-arm64"
 	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglCoreVersion}:natives-windows"
 	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglCoreVersion}:natives-windows-arm64"
+	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglCoreVersion}:natives-macos"
+	launcherRuntime "org.lwjgl:lwjgl-opengl:${lwjglCoreVersion}:natives-macos-arm64"
 }
 
 // Compiled shader artifacts (.spv) are COMMITTED under
@@ -217,9 +221,6 @@ tasks.register('shadowJar', Jar) {
 	exclude 'META-INF/*.RSA'
 	exclude '**/module-info.class'
 	exclude 'runelite-plugin.properties'
-	exclude 'META-INF/macos/**'
-	exclude 'macos/**'
-	exclude 'net/runelite/rlawt/macos-*/**'
 
 	group = BasePlugin.BUILD_GROUP
 	archiveClassifier = 'shadow'
