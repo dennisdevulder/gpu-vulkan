@@ -135,19 +135,40 @@ def compileGpuVulkanShaders = tasks.register('compileGpuVulkanShaders') {
 }
 
 // Guard against editing a shader without the toolchain: the committed .spv
-// would silently go stale and ship.
+// would silently go stale and ship. Do not use file mtimes here: Git checkouts
+// on Windows can make sources newer than committed binaries even when clean.
 def checkGpuVulkanShadersFresh = tasks.register('checkGpuVulkanShadersFresh') {
 	group = 'verification'
-	description = 'Fail when a shader source is newer than its committed .spv'
+	description = 'Fail when a changed shader source has no changed committed .spv'
 
 	doLast {
 		fileTree(gpuVulkanShaderSrc).matching {
 			include '**/*.vert', '**/*.frag', '**/*.comp', '**/*.geom'
 		}.each { src ->
 			def spv = new File(gpuVulkanResourceOut, "${src.name}.spv")
-			if (!spv.exists() || src.lastModified() > spv.lastModified()) {
-				throw new GradleException("${src.name} is newer than its committed .spv — " +
+			if (!spv.exists()) {
+				throw new GradleException("${src.name} has no committed .spv - " +
 					"install glslangValidator and run compileGpuVulkanShaders")
+			}
+			if (toolOnPath('git')) {
+				def srcStatus = new ByteArrayOutputStream()
+				def spvStatus = new ByteArrayOutputStream()
+				exec {
+					commandLine 'git', 'status', '--porcelain', '--', src
+					standardOutput = srcStatus
+					errorOutput = new ByteArrayOutputStream()
+					ignoreExitValue = true
+				}
+				exec {
+					commandLine 'git', 'status', '--porcelain', '--', spv
+					standardOutput = spvStatus
+					errorOutput = new ByteArrayOutputStream()
+					ignoreExitValue = true
+				}
+				if (srcStatus.toString('UTF-8').trim() && !spvStatus.toString('UTF-8').trim()) {
+					throw new GradleException("${src.name} changed without its committed .spv - " +
+						"install glslangValidator and run compileGpuVulkanShaders")
+				}
 			}
 		}
 	}
