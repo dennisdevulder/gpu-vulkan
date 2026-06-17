@@ -25,6 +25,8 @@
 package com.gpuvulkan;
 
 import java.awt.Canvas;
+import java.lang.reflect.Method;
+import java.nio.ByteBuffer;
 import java.nio.LongBuffer;
 import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.jawt.JAWT;
@@ -119,9 +121,7 @@ final class Win32PlatformSurface implements PlatformSurface
 
 	private static long createWin32Surface(VulkanInstance instance, long hwnd)
 	{
-		// Single-arg overload only: the client ships lwjgl core 3.3.2, which
-		// lacks the (debug, name) overload.
-		long hinstance = WinBase.GetModuleHandle((java.nio.ByteBuffer) null);
+		long hinstance = getProcessModuleHandle();
 		try (MemoryStack stack = stackPush())
 		{
 			VkWin32SurfaceCreateInfoKHR info = VkWin32SurfaceCreateInfoKHR.calloc(stack)
@@ -132,6 +132,32 @@ final class Win32PlatformSurface implements PlatformSurface
 			Vk.check("vkCreateWin32SurfaceKHR", KHRWin32Surface.vkCreateWin32SurfaceKHR(
 				instance.handle(), info, null, pSurface));
 			return pSurface.get(0);
+		}
+	}
+
+	private static long getProcessModuleHandle()
+	{
+		try
+		{
+			Method withError = WinBase.class.getMethod("GetModuleHandle",
+				java.nio.IntBuffer.class, ByteBuffer.class);
+			return (Long) withError.invoke(null, null, null);
+		}
+		catch (NoSuchMethodException ignored)
+		{
+			try
+			{
+				Method legacy = WinBase.class.getMethod("GetModuleHandle", ByteBuffer.class);
+				return (Long) legacy.invoke(null, new Object[] { null });
+			}
+			catch (ReflectiveOperationException e)
+			{
+				throw new RuntimeException("GetModuleHandle(NULL) failed", e);
+			}
+		}
+		catch (ReflectiveOperationException e)
+		{
+			throw new RuntimeException("GetModuleHandle(NULL) failed", e);
 		}
 	}
 }
