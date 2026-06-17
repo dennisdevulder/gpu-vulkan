@@ -35,8 +35,10 @@ import java.awt.Point;
 import java.awt.Window;
 import java.awt.event.ComponentAdapter;
 import java.awt.event.ComponentEvent;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import javax.swing.SwingUtilities;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
@@ -58,11 +60,13 @@ import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ConfigChanged;
+import net.runelite.client.input.KeyManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.plugins.PluginManager;
 import net.runelite.client.ui.DrawManager;
 import net.runelite.client.ui.overlay.OverlayManager;
+import net.runelite.client.util.HotkeyListener;
 
 @PluginDescriptor(
 	name = "GPU (Vulkan)",
@@ -92,6 +96,28 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	@Inject
 	private DrawManager drawManager;
 
+	@Inject
+	private KeyManager keyManager;
+
+	private final HotkeyListener inFlightClipHotkeyListener = new HotkeyListener(() -> config.inFlightEncodingHotkey())
+	{
+		@Override
+		public void hotkeyPressed()
+		{
+			requestInFlightClip().whenComplete((path, error) ->
+			{
+				if (error != null)
+				{
+					log.warn("In-flight clip hotkey failed: {}", error.getMessage());
+				}
+				else
+				{
+					log.info("In-flight clip saved: {}", path);
+				}
+			});
+		}
+	};
+
 	private Disposables disposables;
 	private VulkanInstance instance;
 	private VulkanSurface surface;
@@ -103,6 +129,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	private RegionManager regionManager;
 	private TextureArray textureArray;
 	private volatile RenderExtensions renderExtensions;
+	private InFlightClipRecorder inFlightClipRecorder;
 	private com.gpuvulkan.gfx.Renderer gfx;
 	private net.runelite.rlawt.AWTContext awtContext;
 	private Framebuffers framebuffers;
@@ -144,6 +171,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	{
 		log.info("Starting GPU (Vulkan)");
 		shuttingDown = false;
+		keyManager.registerKeyListener(inFlightClipHotkeyListener);
 		runtimeConfig = new ClientRuntimeConfig(client, config);
 		// Refuse to coexist with stock GPU — two owners of the rlawt context
 		// corrupt JAWT state and crash the JVM on disable.
@@ -400,6 +428,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		{
 			renderExtensions.register(new FsrUpscalerExtension());
 		}
+		inFlightClipRecorder = new InFlightClipRecorder(config, device);
+		renderExtensions.register(inFlightClipRecorder);
 		extensionQueue.attachQueued(renderExtensions);
 		disposables.add(renderExtensions);
 
@@ -511,6 +541,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		regionManager = null;
 		textureArray = null;
 		renderExtensions = null;
+		inFlightClipRecorder = null;
 		subWorldViews = null;
 		gfx = null;
 		framebuffers = null;
@@ -527,6 +558,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		log.info("Stopping GPU (Vulkan)");
 		startRequested = false;
 		shuttingDown = true;
+		keyManager.unregisterKeyListener(inFlightClipHotkeyListener);
 		removeMacResizeWake();
 		removeDebugOverlay();
 		// Unpublish first so a concurrent shutdown hook sees null and bails,
@@ -681,6 +713,26 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	public AutoCloseable registerExtension(VulkanRenderExtension extension)
 	{
 		return extensionQueue.register(extension, renderExtensions);
+	}
+
+	public CompletableFuture<Path> requestInFlightClip()
+	{
+		InFlightClipRecorder recorder = inFlightClipRecorder;
+		if (recorder == null)
+		{
+			return CompletableFuture.failedFuture(new IllegalStateException("Vulkan renderer is not running"));
+		}
+		return recorder.saveClip();
+	}
+
+	public CompletableFuture<Path> requestInFlightClip(int postSeconds)
+	{
+		InFlightClipRecorder recorder = inFlightClipRecorder;
+		if (recorder == null)
+		{
+			return CompletableFuture.failedFuture(new IllegalStateException("Vulkan renderer is not running"));
+		}
+		return recorder.saveClip(postSeconds);
 	}
 
 	private void markExtensionBackendDetached()

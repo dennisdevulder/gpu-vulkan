@@ -107,6 +107,8 @@ public interface VulkanRenderExtension extends AutoCloseable
 	 *  present. See {@link VulkanPostFrameContext} for the layout contract. */
 	default void recordAfterComposite(VulkanPostFrameContext frame) {}
 
+	default void beforeSwapchainRebuild() {}
+
 	@Override
 	default void close() {}
 }

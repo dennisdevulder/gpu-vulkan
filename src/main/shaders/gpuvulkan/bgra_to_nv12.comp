@@ -1,0 +1,85 @@
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer SrcBgra
+{
+    uint srcPixels[];
+};
+
+layout(std430, set = 0, binding = 1) writeonly buffer DstNv12
+{
+    uint dstWords[];
+};
+
+layout(push_constant) uniform Push
+{
+    uint srcWidth;
+    uint srcHeight;
+    uint dstWidth;
+    uint dstHeight;
+} pc;
+
+uint pack4(uint b0, uint b1, uint b2, uint b3)
+{
+    return (b0 & 0xffu)
+        | ((b1 & 0xffu) << 8)
+        | ((b2 & 0xffu) << 16)
+        | ((b3 & 0xffu) << 24);
+}
+
+vec3 loadRgb(uint x, uint y)
+{
+    if (x >= pc.srcWidth || y >= pc.srcHeight)
+    {
+        return vec3(0.0);
+    }
+
+    uint p = srcPixels[y * pc.srcWidth + x];
+    float b = float(p & 0xffu);
+    float g = float((p >> 8) & 0xffu);
+    float r = float((p >> 16) & 0xffu);
+    return vec3(r, g, b);
+}
+
+uint lumaByte(vec3 rgb)
+{
+    float y = 16.0 + (65.481 * rgb.r + 128.553 * rgb.g + 24.966 * rgb.b) / 255.0;
+    return uint(clamp(round(y), 0.0, 255.0));
+}
+
+vec2 chromaBytes(vec3 rgb)
+{
+    float u = 128.0 + (-37.797 * rgb.r - 74.203 * rgb.g + 112.0 * rgb.b) / 255.0;
+    float v = 128.0 + (112.0 * rgb.r - 93.786 * rgb.g - 18.214 * rgb.b) / 255.0;
+    return vec2(clamp(round(u), 0.0, 255.0), clamp(round(v), 0.0, 255.0));
+}
+
+void main()
+{
+    uint x = gl_GlobalInvocationID.x * 4u;
+    uint y = gl_GlobalInvocationID.y * 2u;
+    if (x >= pc.dstWidth || y >= pc.dstHeight)
+    {
+        return;
+    }
+
+    vec3 c00 = loadRgb(x + 0u, y + 0u);
+    vec3 c10 = loadRgb(x + 1u, y + 0u);
+    vec3 c20 = loadRgb(x + 2u, y + 0u);
+    vec3 c30 = loadRgb(x + 3u, y + 0u);
+    vec3 c01 = loadRgb(x + 0u, y + 1u);
+    vec3 c11 = loadRgb(x + 1u, y + 1u);
+    vec3 c21 = loadRgb(x + 2u, y + 1u);
+    vec3 c31 = loadRgb(x + 3u, y + 1u);
+
+    uint yWord0 = pack4(lumaByte(c00), lumaByte(c10), lumaByte(c20), lumaByte(c30));
+    uint yWord1 = pack4(lumaByte(c01), lumaByte(c11), lumaByte(c21), lumaByte(c31));
+    dstWords[(y * pc.dstWidth + x) >> 2] = yWord0;
+    dstWords[((y + 1u) * pc.dstWidth + x) >> 2] = yWord1;
+
+    vec2 uv0 = chromaBytes((c00 + c10 + c01 + c11) * 0.25);
+    vec2 uv1 = chromaBytes((c20 + c30 + c21 + c31) * 0.25);
+    uint uvByteOffset = pc.dstWidth * pc.dstHeight + ((y >> 1) * pc.dstWidth + x);
+    dstWords[uvByteOffset >> 2] = pack4(uint(uv0.x), uint(uv0.y), uint(uv1.x), uint(uv1.y));
+}
