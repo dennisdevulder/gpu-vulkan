@@ -244,8 +244,8 @@ final class VulkanRenderer implements AutoCloseable
 		}
 	}
 
-	// Rebuilds a stale swapchain once the target size settles; false skips
-	// the frame (minimised window, mid-resize).
+	// Rebuilds a stale swapchain once the target size settles; returns false
+	// while the window is minimised or still resizing.
 	private boolean surfaceReady(int desiredWidth, int desiredHeight)
 	{
 		if (!useCustomPresent && swapchainRebuild.isStale())

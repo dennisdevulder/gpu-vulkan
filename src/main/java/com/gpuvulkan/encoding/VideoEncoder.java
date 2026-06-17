@@ -35,14 +35,12 @@ public interface VideoEncoder
      * Initializes the encoder for recording at the given settings.
      *
      * @param fps target frames per second
-     * @param quality encoding quality (0.0-1.0, interpretation is encoder-specific)
      */
-    void start(int fps, float quality);
+    void start(int fps);
 
     /**
-     * Configures the H.264 rate-control bitrate target for the next recording.
-     * No-op for encoders that don't use a bitrate (MJPEG). Should be called
-     * before {@link #start} when the encoder is rate-controlled.
+     * Configures the rate-control bitrate target for the next recording. No-op
+     * for encoders that do not use bitrate-based rate control.
      */
     default void configureBitrate(int averageBps, int peakBps) {}
 
@@ -62,7 +60,7 @@ public interface VideoEncoder
     ClipData finalizeClip(long startTime, long endTime);
 
     /**
-     * Clears the buffer without stopping recording. Used when switching quality settings.
+     * Clears the buffer without stopping recording.
      */
     void reset();
 
@@ -87,10 +85,10 @@ public interface VideoEncoder
             this.totalSize = totalSize;
         }
 
-        /** Individual encoded frames (JPEG for MJPEG, or single MP4 byte array for H.264) */
+        /** Encoded payloads; H.264 returns a single MP4 byte array. */
         public List<byte[]> getFrames() { return frames; }
 
-        /** MIME type for upload (application/octet-stream for MJPEG, video/mp4 for H.264) */
+        /** MIME type for the encoded payload. */
         public String getContentType() { return contentType; }
 
         /** Total byte size of all frames combined */

@@ -187,7 +187,7 @@ final class FrameEncoder
         int r = vkQueueSubmit2(vulkanDevice.getVideoEncodeQueue(), drain, encodeFences[ringSlot]);
         if (r != VK_SUCCESS)
         {
-            // Likely device-lost. Clear state; burstEncode's catch falls back to MJPEG.
+            // Likely device-lost. Clear state; the caller will drop this frame.
             log.error("orphan drain submit slot {} failed: {}; slot left empty", ringSlot, r);
             slotFailed[ringSlot] = false;
             pendingFrame[ringSlot] = -1;

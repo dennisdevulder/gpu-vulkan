@@ -42,10 +42,8 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK10.*;
 
 /**
- * Per-frame H.264 encoder that stores Annex-B NALs (not JPEGs) in a ring,
- * keeping the encode session alive for the life of the recording. Avoids the
- * JPEG roundtrip the burst-encode path takes; quality is bounded by H.264
- * rather than by JPEG re-compression.
+ * Per-frame H.264 encoder that stores Annex-B NALs in a ring, keeping the
+ * encode session alive for the life of the recording.
  *
  * Resize handling: any source-size change tears down the session and opens a
  * new segment. Finalize then picks the latest segment overlapping the requested
@@ -114,7 +112,7 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
     private static final int IDR_PERIOD_SECONDS = 5;
 
     @Override
-    public synchronized void start(int fps, float quality)
+    public synchronized void start(int fps)
     {
         if (fps <= 0) throw new IllegalArgumentException("fps must be positive, got " + fps);
         this.sourceFps = fps;

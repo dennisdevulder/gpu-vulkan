@@ -33,7 +33,6 @@ import static org.lwjgl.vulkan.VK13.*;
 final class InFlightClipRecorder implements VulkanRenderExtension
 {
 	private static final int MAX_TOTAL_SECONDS = 60;
-	private static final float UNUSED_QUALITY_HINT = 1.0f;
 
 	private final GpuVulkanPluginConfig config;
 	private final VulkanDevice renderDevice;
@@ -73,12 +72,15 @@ final class InFlightClipRecorder implements VulkanRenderExtension
 		if ("inFlightEncodingEnabled".equals(key)
 			|| "inFlightEncodingType".equals(key)
 			|| "inFlightEncodingFps".equals(key)
-			|| "inFlightEncodingQuality".equals(key)
-			|| "inFlightEncodingBufferSeconds".equals(key))
+			|| "inFlightEncodingQuality".equals(key))
 		{
 			resetEncoder();
 			probeAttempted = false;
 			configureEncoder();
+		}
+		else if ("inFlightEncodingBufferSeconds".equals(key) && encoder != null)
+		{
+			updateBufferedFrameCount(encoder);
 		}
 	}
 
@@ -225,9 +227,8 @@ final class InFlightClipRecorder implements VulkanRenderExtension
 				return;
 			}
 			StreamingVulkanEncoder selected = new StreamingVulkanEncoder(encodeDevice, caps);
-			configureBitrate(selected);
-			updateBufferedFrameCount(selected);
-			selected.start(captureFps(), UNUSED_QUALITY_HINT);
+			applyEncoderSettings(selected);
+			selected.start(captureFps());
 			encoder = selected;
 			unavailableReason = null;
 			log.info("In-flight encoding enabled with {}", selected.encoderName());
@@ -243,6 +244,12 @@ final class InFlightClipRecorder implements VulkanRenderExtension
 	{
 		selected.setMaxBufferedFrames(
 			clamp(config.inFlightEncodingBufferSeconds(), 1, MAX_TOTAL_SECONDS) * captureFps());
+	}
+
+	private void applyEncoderSettings(StreamingVulkanEncoder selected)
+	{
+		configureBitrate(selected);
+		updateBufferedFrameCount(selected);
 	}
 
 	private void configureBitrate(StreamingVulkanEncoder selected)
@@ -322,8 +329,8 @@ final class InFlightClipRecorder implements VulkanRenderExtension
 			Future<?> drained = frameExecutor.submit(() -> { });
 			drained.get(5, TimeUnit.SECONDS);
 			active.stop();
-			configureBitrate(active);
-			active.start(captureFps(), UNUSED_QUALITY_HINT);
+			applyEncoderSettings(active);
+			active.start(captureFps());
 		}
 		catch (Exception e)
 		{

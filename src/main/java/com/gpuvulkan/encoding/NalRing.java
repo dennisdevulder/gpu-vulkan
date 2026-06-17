@@ -28,10 +28,9 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Circular buffer of encoded H.264 frames. Replaces the JPEG ring on the
- * streaming-encode path: each slot holds an Annex-B NAL payload tagged with
- * the segment that produced it, so finalize can pick frames from a single
- * session and trim to an IDR.
+ * Circular buffer of encoded H.264 frames. Each slot holds an Annex-B NAL
+ * payload tagged with the segment that produced it, so finalize can pick
+ * frames from a single session and trim to an IDR.
  *
  * Package-private: {@link Slot} aliases the underlying {@code byte[]} as
  * a final field, which is safe inside this package but should not be
