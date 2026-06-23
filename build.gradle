@@ -94,6 +94,8 @@ dependencies {
 // and the committed binaries ship as-is.
 def gpuVulkanShaderSrc = file('src/main/shaders/gpuvulkan')
 def gpuVulkanResourceOut = file('src/main/resources/com/gpuvulkan')
+def gpuVulkanNativeSrc = file('src/main/native/rlmtl.m')
+def gpuVulkanNativeOut = new File(gpuVulkanResourceOut, 'librlmtl.dylib')
 def glslangValidator = providers.environmentVariable('GLSLANG').getOrElse('glslangValidator')
 
 def toolOnPath = { tool ->
@@ -167,8 +169,45 @@ def checkGpuVulkanShadersFresh = tasks.register('checkGpuVulkanShadersFresh') {
 	}
 }
 
+def compileMacOSMetalHelper = tasks.register('compileMacOSMetalHelper') {
+	group = 'build'
+	description = 'Regenerate the committed macOS CAMetalLayer/JAWT helper (needs clang, macOS)'
+
+	inputs.file(gpuVulkanNativeSrc)
+	outputs.file(gpuVulkanNativeOut)
+	onlyIf {
+		System.getProperty('os.name', '').toLowerCase().contains('mac') && toolOnPath('clang')
+	}
+
+	doLast {
+		gpuVulkanResourceOut.mkdirs()
+		def javaHome = System.getenv('JAVA_HOME') ?: System.getProperty('java.home')
+		exec {
+			commandLine 'clang',
+				'-fno-objc-arc',
+				'-shared',
+				'-dynamiclib',
+				'-mmacosx-version-min=11.0',
+				'-arch', 'arm64',
+				'-arch', 'x86_64',
+				'-framework', 'Cocoa',
+				'-framework', 'QuartzCore',
+				'-framework', 'Metal',
+				'-I', "${javaHome}/include",
+				'-I', "${javaHome}/include/darwin",
+				'-Wl,-undefined,dynamic_lookup',
+				gpuVulkanNativeSrc.absolutePath,
+				'-o', gpuVulkanNativeOut.absolutePath
+		}
+		exec {
+			commandLine 'codesign', '--force', '--sign', '-', gpuVulkanNativeOut.absolutePath
+		}
+	}
+}
+
 processResources {
 	dependsOn compileGpuVulkanShaders
+	dependsOn compileMacOSMetalHelper
 	dependsOn checkGpuVulkanShadersFresh
 	from(projectDir) {
 		include 'runelite-plugin.properties'

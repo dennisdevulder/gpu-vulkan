@@ -169,10 +169,6 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	@Override
 	protected void startUp()
 	{
-		if (isMacOS())
-		{
-			return;
-		}
 		log.info("Starting GPU (Vulkan)");
 		shuttingDown = false;
 		keyManager.registerKeyListener(inFlightClipHotkeyListener);
@@ -218,12 +214,6 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 				return true;
 			}
 		});
-	}
-
-	private static boolean isMacOS()
-	{
-		String os = System.getProperty("os.name", "").toLowerCase();
-		return os.contains("mac") || os.contains("darwin");
 	}
 
 	private static boolean isVulkanLoaderAvailable()
