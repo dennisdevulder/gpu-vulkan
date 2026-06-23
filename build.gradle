@@ -38,11 +38,13 @@ def pluginMainClass = 'com.gpuvulkan.GpuVulkanPluginTest'
 // LWJGL core comes from runelite-client at runtime (3.3.2 classes AND
 // natives; RuneLite's plugin classloader is child-first, so bundling a
 // different core would shadow the client's classes against its older
-// natives — the 45f09ed Windows failure). lwjgl-vulkan 3.3.6 is the hub's
-// whitelisted version; jdeps verifies it links cleanly against core 3.3.2.
+// natives — the 45f09ed Windows failure). Core and JAWT stay on RuneLite's
+// LWJGL line; Vulkan stays newer because the opt-in recorder uses ratified
+// KHR H.264 encode bindings not present in lwjgl-vulkan 3.3.2.
 def lwjglCoreVersion = '3.3.2'
 def lwjglVulkanVersion = '3.3.6'
-def lombokVersion = '1.18.34'
+def lwjglJawtVersion = '3.3.2'
+def lombokVersion = '1.18.30'
 
 dependencies {
 	compileOnly "net.runelite:client:${runeLiteVersion}"
@@ -51,7 +53,7 @@ dependencies {
 	implementation("org.lwjgl:lwjgl-vulkan:${lwjglVulkanVersion}") {
 		exclude group: 'org.lwjgl', module: 'lwjgl'
 	}
-	implementation("org.lwjgl:lwjgl-jawt:${lwjglVulkanVersion}") {
+	implementation("org.lwjgl:lwjgl-jawt:${lwjglJawtVersion}") {
 		exclude group: 'org.lwjgl', module: 'lwjgl'
 	}
 	compileOnly "org.projectlombok:lombok:${lombokVersion}"

@@ -2,8 +2,7 @@
 
 A Vulkan renderer for [RuneLite](https://runelite.net), as a replacement for
 the stock OpenGL GPU plugin. It runs inside an unmodified client: no patches,
-no fork, just a plugin that takes over `DrawCallbacks`. On macOS it renders
-through MoltenVK, including Apple Silicon.
+no fork, just a plugin that takes over `DrawCallbacks`.
 
 It also doubles as a Vulkan backend for other plugins. If you want to write
 something GPU-accelerated (post-processing, compute, custom passes) you can
@@ -26,8 +25,8 @@ readback path. There's a plugin-by-plugin survey in
 - **Linux/X11**: working (daily driver). Several open issues, see the
   issue tracker. The prior sidebar-collapse crash is mitigated by keeping
   an rlawt GLX context alive for AWT while Vulkan owns rendering.
-- **macOS**: working on Apple Silicon via MoltenVK (bundled). Intel Macs
-  are unsupported in v1 (no x64 MoltenVK in the plugin jar).
+- **macOS**: not shipped in the Plugin Hub build. Native Metal-layer
+  integration is deferred until a later release.
 - **Windows**: working on x64, tested on NVIDIA.
 - **Wayland**: via XWayland.
 
@@ -35,9 +34,8 @@ The plugin defers Vulkan startup until you are logged in. The login screen
 renders on the CPU, so "nothing happens" at the login screen is expected.
 
 Active development happens in the parent `runelite-vkport` tree; this
-standalone repo is a snapshot intended for cross-platform development
-(macOS, Windows, Wayland) where you don't want to pull the whole client
-source tree.
+standalone repo is a snapshot intended for cross-platform development where
+you don't want to pull the whole client source tree.
 
 ## Requirements
 
@@ -61,8 +59,7 @@ source tree.
   - macOS: `brew install glslang`
   - Debian/Ubuntu: `apt install glslang-tools`
   - Fedora: `dnf install glslang`
-- **Vulkan loader** on the host. MoltenVK on macOS is bundled via
-  `lwjgl-vulkan` natives, so no extra step there.
+- **Vulkan loader** on the host.
 
 ## Build
 
@@ -73,11 +70,7 @@ JAVA_HOME=/path/to/temurin-21 ./gradlew build
 If `java -version` already points at a Temurin JDK, the `JAVA_HOME=` prefix
 is unnecessary.
 
-**macOS native helper**: `librlmtl.dylib` (the CAMetalLayer/JAWT bridge) is
-committed under `src/main/resources/com/gpuvulkan/` like the shaders;
-building on a Mac with `clang` regenerates it (universal arm64+x86_64,
-ad-hoc signed). Gatekeeper may quarantine the dylib when the jar was
-downloaded from a browser; `xattr -d com.apple.quarantine <jar>` clears it.
+The Plugin Hub build does not include native macOS presentation support.
 
 ## Run
 
@@ -101,8 +94,7 @@ JAVA_HOME=/path/to/temurin-21 ./gradlew run
 
 `./gradlew shadowJar` produces a self-contained jar at
 `build/libs/gpu-vulkan-<version>-all.jar` (~41 MB) bundling a full RuneLite
-client + this plugin + LWJGL natives for Linux, Windows, and macOS
-(including MoltenVK for x64 + arm64). Run it directly:
+client + this plugin + LWJGL natives. Run it directly:
 
 ```
 /path/to/temurin-21/bin/java -ea -jar build/libs/gpu-vulkan-<version>-all.jar
