@@ -1,8 +1,8 @@
 # gpu-vulkan
 
-A Vulkan renderer for [RuneLite](https://runelite.net), as a replacement for
-the stock OpenGL GPU plugin. It runs inside an unmodified client: no patches,
-no fork, just a plugin that takes over `DrawCallbacks`.
+A Vulkan renderer for [RuneLite](https://runelite.net). It runs inside an
+unmodified client: no patches, no fork, just a plugin that takes over
+`DrawCallbacks`.
 
 It also doubles as a Vulkan backend for other plugins. If you want to write
 something GPU-accelerated (post-processing, compute, custom passes) you can
@@ -17,8 +17,7 @@ loading, fog, skybox and roof handling, colour-blind modes, and FSR
 upscaling (render the scene at reduced resolution, EASU + RCAS it back up,
 composite the UI at full resolution). Normal overlays, infoboxes and the
 CPU UI work as usual, and `DrawManager` screenshot consumers get a Vulkan
-readback path. There's a plugin-by-plugin survey in
-[docs/COMPATIBILITY_MATRIX.md](docs/COMPATIBILITY_MATRIX.md).
+readback path.
 
 ## Status
 
@@ -159,8 +158,8 @@ Extensions that want the stock scene capture/draw path can request their
 own `VulkanSceneRenderer` through `createSceneRenderer()` instead of
 touching backend-owned Vulkan internals. Anything not covered drops to the
 raw handles on `VulkanRenderContext` plus the raw `VkCommandBuffer` hooks;
-see [docs/RENDERER_CONTRACT.md](docs/RENDERER_CONTRACT.md) for the
-invariants you must keep.
+the lifetime and layout invariants you must keep are documented in the
+javadoc on `VulkanRenderContext` and `VulkanRenderExtension`.
 
 For recorder-style plugins, the `recordAfterComposite` hook hands
 extensions the final composited frame (scene + UI) on the graphics command
@@ -214,11 +213,7 @@ src/main/shaders/...   GLSL sources (compiled .spv is committed in resources)
 src/test/java/...      IDE-run main
 build.gradle           Gradle build (shader compile task, deps)
 runelite-plugin.properties   plugin-hub-style descriptor
-docs/KNOWN_ISSUES.md         engineering notes; read before opening a PR
-docs/RENDERER_CONTRACT.md    invariants for extensions using raw handles
-docs/SOURCE_LAYOUT.md        source directory grouping and package-boundary notes
-docs/COMPATIBILITY_MATRIX.md plugin-by-plugin compatibility survey
-docs/RELEASE_CHECKLIST.md    production-readiness gates
+icon.png                     plugin-hub icon
 ```
 
 ## Contributing

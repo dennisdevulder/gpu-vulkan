@@ -70,7 +70,7 @@ import net.runelite.client.util.HotkeyListener;
 
 @PluginDescriptor(
 	name = "GPU (Vulkan)",
-	description = "Experimental Vulkan-backed GPU renderer",
+	description = "Experimental Vulkan renderer with an extension API and built-in GPU clip recording",
 	tags = {"vulkan", "renderer", "gpu", "experimental"},
 	enabledByDefault = false,
 	loadInSafeMode = false
