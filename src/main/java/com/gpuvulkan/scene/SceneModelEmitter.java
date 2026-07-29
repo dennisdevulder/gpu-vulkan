@@ -73,6 +73,7 @@ final class SceneModelEmitter
 		byte[] textureFaces;
 		int[] texA, texB, texC;
 		byte[] trans, bias;
+		byte modelTrans;
 		byte overrideHue, overrideSat, overrideLum, overrideAmount;
 		boolean hasOverride;
 
@@ -93,6 +94,7 @@ final class SceneModelEmitter
 			texB = m.getTexIndices2();
 			texC = m.getTexIndices3();
 			trans = m.getFaceTransparencies();
+			modelTrans = m.getTransparency();
 			bias = m.getFaceBias();
 			overrideAmount = m.getOverrideAmount();
 			overrideHue = m.getOverrideHue();
@@ -199,7 +201,7 @@ final class SceneModelEmitter
 			}
 
 			int bias = a.bias != null ? (a.bias[f] & 0xFF) : 0;
-			int trans = a.trans != null ? (a.trans[f] & 0xFF) : 0;
+			int trans = effectiveTransparency(a.modelTrans, a.trans != null ? (a.trans[f] & 0xFF) : 0);
 			// Static sweeps split faces by transparency; 255 is the engine
 			// invisibility sentinel and is dropped from static capture.
 			if (staticFaceFilter == FILTER_OPAQUE && trans != 0) continue;
@@ -282,14 +284,17 @@ final class SceneModelEmitter
 		int priorityStart = prioritySort ? sink.currentVertexCount() : -1;
 		int faceCount = m.getFaceCount();
 		byte[] faceTransparencies = m.getFaceTransparencies();
-		if (!prioritySort && faceCount <= OPAQUE_UNSORTED_FACE_THRESHOLD
+		// Whole-model transparency is per-renderable and can change every
+		// frame, so it stays out of the face cache key.
+		boolean modelTransparent = m.getTransparency() != 0;
+		if (!prioritySort && !modelTransparent && faceCount <= OPAQUE_UNSORTED_FACE_THRESHOLD
 			&& ModelFaceCache.countTransparentFaces(faceCount, faceTransparencies) == 0)
 		{
 			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
 			return;
 		}
 		ModelFaceCache.Entry modelInfo = modelFaceCache.info(faceCount, faceTransparencies);
-		boolean needsFaceSort = prioritySort || modelInfo.hasTransparentFaces;
+		boolean needsFaceSort = prioritySort || modelInfo.hasTransparentFaces || modelTransparent;
 		if (!needsFaceSort && modelInfo.faceCount <= OPAQUE_UNSORTED_FACE_THRESHOLD)
 		{
 			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
@@ -420,7 +425,7 @@ final class SceneModelEmitter
 			}
 
 			int bias = a.bias != null ? (a.bias[f] & 0xFF) : 0;
-			int trans = a.trans != null ? (a.trans[f] & 0xFF) : 0;
+			int trans = effectiveTransparency(a.modelTrans, a.trans != null ? (a.trans[f] & 0xFF) : 0);
 			int packedTexLayer = texLayer | (bias << 16) | (trans << 24);
 			boolean noUv = texLayer == 0;
 
@@ -479,6 +484,23 @@ final class SceneModelEmitter
 		emitTexturedFaces = texturedFaces;
 		emitOverrideFaces = overrideFaces;
 		emitUvNanos = uvNanos;
+	}
+
+	/** Stock GPU parity: fold whole-model transparency into each face's
+	 *  alpha. -1 is the engine's invisible sentinel; 253+ face values are
+	 *  already sentinels and pass through untouched. */
+	private static int effectiveTransparency(byte modelTransparency, int faceTransparency)
+	{
+		if (modelTransparency == -1)
+		{
+			return 255;
+		}
+		int t = modelTransparency & 0xFF;
+		if (t > 0 && faceTransparency < 253)
+		{
+			return faceTransparency + (((253 - faceTransparency) * t) >> 8);
+		}
+		return faceTransparency;
 	}
 
 	private void recordPriorityRange(int start)
@@ -659,7 +681,7 @@ final class SceneModelEmitter
 			}
 
 			int bias = a.bias != null ? (a.bias[f] & 0xFF) : 0;
-			int trans = a.trans != null ? (a.trans[f] & 0xFF) : 0;
+			int trans = effectiveTransparency(a.modelTrans, a.trans != null ? (a.trans[f] & 0xFF) : 0);
 			int packedTexLayer = texLayer | (bias << 16) | (trans << 24);
 			boolean noUv = texLayer == 0;
 
