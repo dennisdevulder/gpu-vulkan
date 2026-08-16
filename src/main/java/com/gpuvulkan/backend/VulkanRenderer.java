@@ -651,9 +651,12 @@ final class VulkanRenderer implements AutoCloseable
 	private void beginClearedRenderPass(MemoryStack stack, VkCommandBuffer cmd,
 		long pass, long framebuffer, int targetWidth, int targetHeight)
 	{
-		float skyR = ((skyboxColor >> 16) & 0xFF) / 255f;
-		float skyG = ((skyboxColor >>  8) & 0xFF) / 255f;
-		float skyB = ( skyboxColor        & 0xFF) / 255f;
+		// Stock GPU clears black behind a model skybox, otherwise to the
+		// engine-provided flat sky color.
+		int clearColor = renderExtensions.hasSkybox() ? 0 : skyboxColor;
+		float skyR = ((clearColor >> 16) & 0xFF) / 255f;
+		float skyG = ((clearColor >>  8) & 0xFF) / 255f;
+		float skyB = ( clearColor        & 0xFF) / 255f;
 		VkClearValue.Buffer clears = VkClearValue.calloc(2, stack);
 		clears.get(0).color(c -> c.float32(0, skyR).float32(1, skyG).float32(2, skyB).float32(3, 1.0f));
 		clears.get(1).depthStencil(ds -> ds.depth(0.0f).stencil(0));

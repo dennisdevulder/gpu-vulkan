@@ -141,6 +141,18 @@ final class RenderExtensions implements AutoCloseable
 		forEachExtension("captureSkybox", extension -> extension.captureSkybox(scene));
 	}
 
+	synchronized boolean hasSkybox()
+	{
+		for (VulkanRenderExtension extension : extensions)
+		{
+			if (extension.hasSkybox())
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
 	synchronized void drawPass(int pass)
 	{
 		forEachExtension("drawPass", extension -> extension.drawPass(pass));
