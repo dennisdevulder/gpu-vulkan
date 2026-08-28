@@ -40,7 +40,8 @@ interface PlatformSurface
 	 *  ownership; destroys via {@code vkDestroySurfaceKHR}. */
 	long createSurface(VulkanInstance instance, Canvas canvas);
 
-	/** Platforms control vsync via swapchain present modes. */
+	/** {@code vsync} is macOS-only (CAMetalLayer.displaySyncEnabled); other
+	 *  platforms control vsync via swapchain present modes. */
 	static PlatformSurface current(boolean vsync)
 	{
 		String os = System.getProperty("os.name", "").toLowerCase();
@@ -51,6 +52,10 @@ interface PlatformSurface
 		if (os.contains("win"))
 		{
 			return new Win32PlatformSurface();
+		}
+		if (os.contains("mac") || os.contains("darwin"))
+		{
+			return new MacOSPlatformSurface(vsync);
 		}
 		throw new UnsupportedOperationException(
 			"GPU (Vulkan) plugin: unsupported OS \"" + System.getProperty("os.name") + "\"");
