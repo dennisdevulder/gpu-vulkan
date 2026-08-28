@@ -448,6 +448,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		overflowed = false;
 		priorityRanges.clear();
 		dynamicOpaqueEnd = -1;
+		skyboxStart = skyboxEnd = -1;
 	}
 
 	void drawPass(int pass)
@@ -466,7 +467,11 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		vertexCount = overlayNextVertex[slot];
 		useFrameWriteArena(slot, vertexCount);
 
-		if (scene == null || dirtyZones.count() == 0)
+		if (scene == null)
+		{
+			return;
+		}
+		if (dirtyZones.count() == 0)
 		{
 			return;
 		}
@@ -668,7 +673,6 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 
 		Tile[][][] tiles = captureTiles(scene);
 		if (tiles == null) return;
-		captureSkybox(scene);
 		final int planes = Math.min(tiles.length, MAX_PLANES);
 
 		captureStaticLayers(scene, tiles, planes);
@@ -821,7 +825,9 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		{
 			int faces = skybox.getFaceCount();
 			skyboxStart = vertexCount;
-			captureModel(skybox, 0, 0, 0, 0);
+			modelEmitter.captureModel(skybox, 0, 0, 0, 0,
+				scene.getOverrideHue(), scene.getOverrideSaturation(),
+				scene.getOverrideLuminance(), scene.getOverrideAmount());
 			skyboxEnd = vertexCount;
 			int vertices = skyboxEnd - skyboxStart;
 			if (faces != loggedSkyboxFaces || vertices != loggedSkyboxVertices)
@@ -831,6 +837,11 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 				loggedSkyboxVertices = vertices;
 			}
 		}
+	}
+
+	boolean hasSkybox()
+	{
+		return skyboxEnd > skyboxStart;
 	}
 
 	private void clearOverlayZone(int slot, int zone)
@@ -1302,9 +1313,13 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			}
 
 			computeZoneCullRange(cameraX, cameraZ, drawDistanceTiles, fogDepthTiles);
+			// Draw the enclosing sky model as a background. Its pipeline does not
+			// write depth, so every scene surface drawn afterwards naturally wins;
+			// drawing it last lets imprecise skybox depth occlude the whole scene.
+			recordSkybox(cmd, stack, mvp, cameraX, cameraY, cameraZ, drawDistanceTiles, tick,
+				fragPush, slotFirstVertex);
 			recordLayerDraws(cmd, stack, vertPush, fragPush, slot, slotFirstVertex, skipPairs);
 			recordPriorityPasses(cmd, stack, vertPush, fragPush, slotFirstVertex);
-			recordSkybox(cmd, stack, mvp, cameraX, cameraY, cameraZ, drawDistanceTiles, tick, fragPush);
 		}
 	}
 
@@ -1371,7 +1386,7 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		final int loMin = minPlane;
 		final int loCur = currentPlane;
 		final int loMax = maxPlane;
-		int layerStart = skyboxEnd > skyboxStart ? skyboxEnd : 0;
+		int layerStart = 0;
 		for (int i = 0; i < LAYER_COUNT; i++)
 		{
 			int regionEnd = i == LAYER_COUNT - 1 ? vertexCount : regionEnds[i];
@@ -1403,7 +1418,9 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			if (LAYERS[i] == Layer.DYNAMIC)
 			{
 				int dynamicStart = overlayNextVertex[slot];
-				int dynamicEnd = dynamicOpaqueEnd >= dynamicStart ? Math.min(dynamicOpaqueEnd, regionEnd) : regionEnd;
+				int dynamicRegionEnd = skyboxEnd > skyboxStart ? skyboxStart : regionEnd;
+				int dynamicEnd = dynamicOpaqueEnd >= dynamicStart
+					? Math.min(dynamicOpaqueEnd, dynamicRegionEnd) : dynamicRegionEnd;
 				bindArena(cmd, vbuf.handle());
 				drawEmitter.drawRange(cmd, dynamicStart, dynamicEnd, priorityRanges.skipPairs(), priorityRanges.count(), priorityRanges.count() > 0, slotFirstVertex,
 					want.layout(), vertPush, fragPush);
@@ -1463,9 +1480,10 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 		drawPriorityRanges(cmd, slotFirstVertex, pipeline.layout(), vertPush, fragPush);
 	}
 
-	/** Skybox must draw LAST so the depth test kills fragments terrain already covers. */
+	/** Drawn before scene geometry as a depth-read-only background pass. */
 	private void recordSkybox(VkCommandBuffer cmd, MemoryStack stack, float[] mvp,
-		float cameraX, float cameraY, float cameraZ, float drawDistanceTiles, int tick, ByteBuffer fragPush)
+		float cameraX, float cameraY, float cameraZ, float drawDistanceTiles, int tick,
+		ByteBuffer fragPush, int slotFirstVertex)
 	{
 		if (skyboxEnd <= skyboxStart)
 		{
@@ -1476,17 +1494,28 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 
 		ByteBuffer skyboxVertPush = stack.malloc(96);
 		fillSceneVertPush(skyboxVertPush, skyboxMvp, cameraX, cameraZ, drawDistanceTiles, 0f, tick, 0, 0, 0);
+		// Stock uploads the entire skybox to one blended, depth-read-only VAO.
+		// Do not run it through the normal opaque-pass transparency filter: the
+		// dome's gradient is made from translucent faces. Alpha mode 2 keeps all
+		// non-sentinel faces in this single draw while preserving smoothBanding.
+		ByteBuffer skyboxFragPush = stack.malloc(32);
+		for (int offset = 0; offset < 28; offset += Float.BYTES)
+		{
+			skyboxFragPush.putFloat(fragPush.getFloat(offset));
+		}
+		skyboxFragPush.putFloat(20f + fragPush.getFloat(28));
+		skyboxFragPush.flip();
 
-		bindArena(cmd, vbuf.staticDrawHandle());
+		bindArena(cmd, vbuf.handle());
 		vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skyboxPipeline.handle());
 		vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
 			skyboxPipeline.layout(), 0, stack.longs(descriptorSet), null);
 		if (!repushConstantsEveryDraw)
 		{
-			drawEmitter.pushConstants(cmd, skyboxPipeline.layout(), skyboxVertPush, fragPush);
+			drawEmitter.pushConstants(cmd, skyboxPipeline.layout(), skyboxVertPush, skyboxFragPush);
 		}
 		drawEmitter.drawRange(cmd, skyboxStart, skyboxEnd, skipScratch, 0, false,
-			0, skyboxPipeline.layout(), skyboxVertPush, fragPush);
+			slotFirstVertex, skyboxPipeline.layout(), skyboxVertPush, skyboxFragPush);
 	}
 
 	/** Self-contained (rebinds buffer and pushes) so phases of different
@@ -1558,7 +1587,9 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			if (LAYERS[i] == Layer.DYNAMIC)
 			{
 				int dynamicStart = overlayNextVertex[slot];
-				int dynamicEnd = dynamicOpaqueEnd >= dynamicStart ? Math.min(dynamicOpaqueEnd, regionEnd) : regionEnd;
+				int dynamicRegionEnd = skyboxEnd > skyboxStart ? skyboxStart : regionEnd;
+				int dynamicEnd = dynamicOpaqueEnd >= dynamicStart
+					? Math.min(dynamicOpaqueEnd, dynamicRegionEnd) : dynamicRegionEnd;
 				bindArena(cmd, vbuf.handle());
 				drawEmitter.drawRange(cmd, dynamicStart, dynamicEnd, priorityRanges.skipPairs(), priorityRanges.count(),
 					false, slotFirstVertex, pipelineLayout, vertPush, fragPush);

@@ -55,6 +55,11 @@ public interface VulkanSceneRenderer extends AutoCloseable
 	{
 	}
 
+	default boolean hasSkybox()
+	{
+		return false;
+	}
+
 	default void drawPass(int pass)
 	{
 	}

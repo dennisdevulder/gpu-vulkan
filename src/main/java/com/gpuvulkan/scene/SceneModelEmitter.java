@@ -63,6 +63,14 @@ final class SceneModelEmitter
 		captureModelUnsorted(m, orient, worldX, worldY, worldZ);
 	}
 
+	void captureModel(Model m, int orient, int worldX, int worldY, int worldZ,
+		byte overrideHue, byte overrideSat, byte overrideLum, byte overrideAmount)
+	{
+		if (m == null) return;
+		captureModelUnsorted(m, orient, worldX, worldY, worldZ,
+			overrideHue, overrideSat, overrideLum, overrideAmount);
+	}
+
 	/** Per-model array snapshot, reused across captures (no allocation). */
 	private static final class ModelArrays
 	{
@@ -73,8 +81,11 @@ final class SceneModelEmitter
 		byte[] textureFaces;
 		int[] texA, texB, texC;
 		byte[] trans, bias;
+		byte modelTrans;
 		byte overrideHue, overrideSat, overrideLum, overrideAmount;
 		boolean hasOverride;
+		byte sceneHue, sceneSat, sceneLum, sceneAmount;
+		boolean hasSceneOverride;
 
 		boolean load(Model m)
 		{
@@ -93,12 +104,14 @@ final class SceneModelEmitter
 			texB = m.getTexIndices2();
 			texC = m.getTexIndices3();
 			trans = m.getFaceTransparencies();
+			modelTrans = m.getTransparency();
 			bias = m.getFaceBias();
 			overrideAmount = m.getOverrideAmount();
 			overrideHue = m.getOverrideHue();
 			overrideSat = m.getOverrideSaturation();
 			overrideLum = m.getOverrideLuminance();
 			hasOverride = (overrideAmount & 0xFF) != 0;
+			hasSceneOverride = false;
 			return vx != null && vy != null && vz != null && fa != null && fb != null && fc != null;
 		}
 	}
@@ -114,10 +127,26 @@ final class SceneModelEmitter
 
 	private void captureModelUnsorted(Model m, int orient, int worldX, int worldY, int worldZ)
 	{
+		captureModelUnsorted(m, orient, worldX, worldY, worldZ,
+			(byte) 0, (byte) 0, (byte) 0, (byte) 0);
+	}
+
+	private void captureModelUnsorted(Model m, int orient, int worldX, int worldY, int worldZ,
+		byte overrideHue, byte overrideSat, byte overrideLum, byte overrideAmount)
+	{
 		boolean detailedStats = stats.isDetailedModelStats();
 		long emitStart = detailedStats ? System.nanoTime() : 0L;
 		ModelArrays a = arrays;
 		if (!a.load(m)) return;
+		// RuneLite's stock GPU path first bakes the Model override in
+		// uploadTempModel(), then applies the Scene override in vert.glsl.
+		// Keep these as two stages; replacing the former with the latter turns
+		// scene skyboxes into nearly-black, flat-tinted geometry.
+		a.sceneHue = overrideHue;
+		a.sceneSat = overrideSat;
+		a.sceneLum = overrideLum;
+		a.sceneAmount = overrideAmount;
+		a.hasSceneOverride = (overrideAmount & 0xFF) != 0;
 
 		float cos = Perspective.COSINE[orient & 0x7FF] / 65536f;
 		float sin = Perspective.SINE[orient & 0x7FF] / 65536f;
@@ -190,16 +219,16 @@ final class SceneModelEmitter
 				u2 = uv[4]; v2 = uv[5];
 			}
 
-			if (a.hasOverride && texLayer == 0)
+			if ((a.hasOverride || a.hasSceneOverride) && texLayer == 0)
 			{
 				overrideFaces++;
-				col1 = HslColor.applyOverride(col1, a.overrideHue, a.overrideSat, a.overrideLum, a.overrideAmount);
-				col2 = HslColor.applyOverride(col2, a.overrideHue, a.overrideSat, a.overrideLum, a.overrideAmount);
-				col3 = HslColor.applyOverride(col3, a.overrideHue, a.overrideSat, a.overrideLum, a.overrideAmount);
+				col1 = applyOverrides(col1, a);
+				col2 = applyOverrides(col2, a);
+				col3 = applyOverrides(col3, a);
 			}
 
 			int bias = a.bias != null ? (a.bias[f] & 0xFF) : 0;
-			int trans = a.trans != null ? (a.trans[f] & 0xFF) : 0;
+			int trans = effectiveTransparency(a.modelTrans, a.trans != null ? (a.trans[f] & 0xFF) : 0);
 			// Static sweeps split faces by transparency; 255 is the engine
 			// invisibility sentinel and is dropped from static capture.
 			if (staticFaceFilter == FILTER_OPAQUE && trans != 0) continue;
@@ -282,14 +311,17 @@ final class SceneModelEmitter
 		int priorityStart = prioritySort ? sink.currentVertexCount() : -1;
 		int faceCount = m.getFaceCount();
 		byte[] faceTransparencies = m.getFaceTransparencies();
-		if (!prioritySort && faceCount <= OPAQUE_UNSORTED_FACE_THRESHOLD
+		// Whole-model transparency is per-renderable and can change every
+		// frame, so it stays out of the face cache key.
+		boolean modelTransparent = m.getTransparency() != 0;
+		if (!prioritySort && !modelTransparent && faceCount <= OPAQUE_UNSORTED_FACE_THRESHOLD
 			&& ModelFaceCache.countTransparentFaces(faceCount, faceTransparencies) == 0)
 		{
 			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
 			return;
 		}
 		ModelFaceCache.Entry modelInfo = modelFaceCache.info(faceCount, faceTransparencies);
-		boolean needsFaceSort = prioritySort || modelInfo.hasTransparentFaces;
+		boolean needsFaceSort = prioritySort || modelInfo.hasTransparentFaces || modelTransparent;
 		if (!needsFaceSort && modelInfo.faceCount <= OPAQUE_UNSORTED_FACE_THRESHOLD)
 		{
 			captureModelUnsorted(m, orient, worldX, worldY, worldZ);
@@ -420,7 +452,7 @@ final class SceneModelEmitter
 			}
 
 			int bias = a.bias != null ? (a.bias[f] & 0xFF) : 0;
-			int trans = a.trans != null ? (a.trans[f] & 0xFF) : 0;
+			int trans = effectiveTransparency(a.modelTrans, a.trans != null ? (a.trans[f] & 0xFF) : 0);
 			int packedTexLayer = texLayer | (bias << 16) | (trans << 24);
 			boolean noUv = texLayer == 0;
 
@@ -479,6 +511,38 @@ final class SceneModelEmitter
 		emitTexturedFaces = texturedFaces;
 		emitOverrideFaces = overrideFaces;
 		emitUvNanos = uvNanos;
+	}
+
+	/** Stock GPU parity: fold whole-model transparency into each face's
+	 *  alpha. -1 is the engine's invisible sentinel; 253+ face values are
+	 *  already sentinels and pass through untouched. */
+	private static int effectiveTransparency(byte modelTransparency, int faceTransparency)
+	{
+		if (modelTransparency == -1)
+		{
+			return 255;
+		}
+		int t = modelTransparency & 0xFF;
+		if (t > 0 && faceTransparency < 253)
+		{
+			return faceTransparency + (((253 - faceTransparency) * t) >> 8);
+		}
+		return faceTransparency;
+	}
+
+	private static int applyOverrides(int hsl, ModelArrays a)
+	{
+		if (a.hasOverride)
+		{
+			hsl = HslColor.applyOverride(hsl,
+				a.overrideHue, a.overrideSat, a.overrideLum, a.overrideAmount);
+		}
+		if (a.hasSceneOverride)
+		{
+			hsl = HslColor.applyOverride(hsl,
+				a.sceneHue, a.sceneSat, a.sceneLum, a.sceneAmount);
+		}
+		return hsl;
 	}
 
 	private void recordPriorityRange(int start)
@@ -659,7 +723,7 @@ final class SceneModelEmitter
 			}
 
 			int bias = a.bias != null ? (a.bias[f] & 0xFF) : 0;
-			int trans = a.trans != null ? (a.trans[f] & 0xFF) : 0;
+			int trans = effectiveTransparency(a.modelTrans, a.trans != null ? (a.trans[f] & 0xFF) : 0);
 			int packedTexLayer = texLayer | (bias << 16) | (trans << 24);
 			boolean noUv = texLayer == 0;
 

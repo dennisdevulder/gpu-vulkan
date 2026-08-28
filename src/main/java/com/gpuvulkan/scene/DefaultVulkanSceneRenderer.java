@@ -77,6 +77,12 @@ final class DefaultVulkanSceneRenderer implements VulkanSceneRenderer
 	}
 
 	@Override
+	public boolean hasSkybox()
+	{
+		return sceneRenderer.hasSkybox();
+	}
+
+	@Override
 	public void drawPass(int pass)
 	{
 		sceneRenderer.drawPass(pass);

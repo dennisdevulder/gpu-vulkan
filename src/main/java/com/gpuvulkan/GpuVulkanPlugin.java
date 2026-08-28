@@ -775,6 +775,13 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			renderExtensions.beginFrame();
 			stats.addNanos(stats.beginFrameNanos, start);
 		}
+		else if (renderExtensions != null)
+		{
+			// All scene callbacks have completed, so the temporary skybox can be
+			// appended after the dynamic suffix without mutating capture state
+			// from inside Vulkan command recording.
+			renderExtensions.captureSkybox(currentScene);
+		}
 		try
 		{
 			renderer.drawFrame(w, h, bp.getPixels(), bp.getWidth(), bp.getHeight(),
