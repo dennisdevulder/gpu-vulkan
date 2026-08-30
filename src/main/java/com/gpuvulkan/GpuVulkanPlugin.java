@@ -154,6 +154,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	private boolean pendingSceneIdentityRecapture;
 	private static boolean shutdownHookRegistered;
 	private final VulkanExtensionQueue extensionQueue = new VulkanExtensionQueue();
+	private ScenePipelines scenePipelines;
 	private SubWorldViewManager subWorldViews;
 
 	/** Read by the JVM shutdown hook to find the live instance — must be
@@ -422,16 +423,21 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 
 		regionManager = new RegionManager();
 
+		// Every scene renderer binds the same pipelines and descriptor set, so
+		// a worldview spawning costs an arena and nothing else.
+		scenePipelines = new ScenePipelines(device, renderPass, textureArray);
+		disposables.add(scenePipelines);
+
 		// Escape hatch: BaseRenderer falls back to the single recordDraw path
 		// and sub-scene callbacks drop.
 		if (!Boolean.getBoolean("vkgpu.disableSubWorldViews"))
 		{
-			subWorldViews = new SubWorldViewManager(device, sync, renderPass, textureArray, stats);
+			subWorldViews = new SubWorldViewManager(device, sync, scenePipelines, stats);
 			disposables.add(subWorldViews);
 		}
 
 		renderExtensions = new RenderExtensions(
-			new DefaultVulkanRenderContext(client, config, gfx, device, sync, renderPass, textureArray, stats));
+			new DefaultVulkanRenderContext(client, config, gfx, device, sync, renderPass, scenePipelines, stats));
 		renderExtensions.register(new BaseRenderer(subWorldViews));
 		if (config.upscalingMode() == GpuVulkanPluginConfig.UpscalingMode.FSR1)
 		{
@@ -552,6 +558,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		renderExtensions = null;
 		inFlightClipRecorder = null;
 		subWorldViews = null;
+		scenePipelines = null;
 		gfx = null;
 		framebuffers = null;
 		sync = null;

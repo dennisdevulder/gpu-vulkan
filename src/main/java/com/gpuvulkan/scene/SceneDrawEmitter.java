@@ -49,7 +49,8 @@ final class SceneDrawEmitter
 	void pushConstants(VkCommandBuffer cmd, long pipelineLayout, ByteBuffer vertPush, ByteBuffer fragPush)
 	{
 		vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, vertPush);
-		vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 96, fragPush);
+		vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
+			ScenePipeline.VERT_PUSH_BYTES, fragPush);
 		if (recordStats)
 		{
 			stats.scenePushConstants.addAndGet(2);
