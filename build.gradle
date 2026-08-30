@@ -193,6 +193,9 @@ tasks.register('run', JavaExec) {
 	jvmArgs '-ea',
 		'--add-exports=java.desktop/com.apple.eawt=ALL-UNNAMED',
 		'--add-opens=java.base/java.lang.reflect=ALL-UNNAMED'
+	// Forward -Dvkgpu.* from the gradle invocation into the client JVM, so the
+	// renderer escape hatches are reachable without editing this file.
+	systemProperties providers.systemPropertiesPrefixedBy('vkgpu.').get()
 	args '--developer-mode', '--debug'
 }
 
