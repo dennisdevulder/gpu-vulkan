@@ -36,13 +36,12 @@ final class DefaultVulkanRenderContext implements VulkanRenderContext
 	private final VulkanDevice device;
 	private final FrameSync sync;
 	private final RenderPass renderPass;
-	private final TextureArray textureArray;
+	private final ScenePipelines scenePipelines;
 	private final DrawCallbackStats stats;
 
 	DefaultVulkanRenderContext(Client client, GpuVulkanPluginConfig config,
 		Renderer renderer, VulkanDevice device, FrameSync sync,
-		RenderPass renderPass, TextureArray textureArray,
-		DrawCallbackStats stats)
+		RenderPass renderPass, ScenePipelines scenePipelines, DrawCallbackStats stats)
 	{
 		this.client = client;
 		this.config = config;
@@ -50,7 +49,7 @@ final class DefaultVulkanRenderContext implements VulkanRenderContext
 		this.device = device;
 		this.sync = sync;
 		this.renderPass = renderPass;
-		this.textureArray = textureArray;
+		this.scenePipelines = scenePipelines;
 		this.stats = stats;
 	}
 
@@ -82,7 +81,7 @@ final class DefaultVulkanRenderContext implements VulkanRenderContext
 	@Override
 	public VulkanSceneRenderer createSceneRenderer()
 	{
-		return new DefaultVulkanSceneRenderer(device, sync, renderPass, textureArray, stats);
+		return new DefaultVulkanSceneRenderer(device, sync, scenePipelines, stats);
 	}
 
 	@Override
