@@ -73,6 +73,7 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 		return t;
 	});
 	private final List<SessionRecording> sessions = new CopyOnWriteArrayList<>();
+	private volatile AudioCapture audio;
 
 	public VulkanRecordingService(RecordingBackend backend, RecordingStore store,
 		RecordingKindRegistry kinds, EventBus eventBus, GpuVulkanPluginConfig config,
@@ -92,6 +93,7 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 		{
 			sweepIncompleteFiles();
 			store.scan();
+			syncAudioCapture();
 		});
 		executor.scheduleAtFixedRate(this::publishProgress, 1, 1, TimeUnit.SECONDS);
 	}
@@ -99,6 +101,12 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 	public void shutdown()
 	{
 		stopAllSessions();
+		AudioCapture active = audio;
+		audio = null;
+		if (active != null)
+		{
+			active.stop();
+		}
 		executor.shutdown();
 		try
 		{
@@ -203,7 +211,11 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 			0, MAX_CLIP_SECONDS - pre);
 		// Queued, not inline: growing the ring takes the encoder lock, which is
 		// held across a frame encode, and triggers call this on the client thread.
-		executor.execute(() -> backend.ensureBuffered(pre, post));
+		executor.execute(() ->
+		{
+			backend.ensureBuffered(pre, post);
+			syncAudioCapture();
+		});
 
 		CompletableFuture<RecordingEntry> future = new CompletableFuture<>();
 		executor.schedule(() ->
@@ -227,7 +239,7 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 	{
 		long start = triggeredAt - TimeUnit.SECONDS.toMillis(pre);
 		long end = triggeredAt + TimeUnit.SECONDS.toMillis(post);
-		VideoEncoder.ClipData clip = encoder.finalizeClip(start, end);
+		VideoEncoder.ClipData clip = encoder.finalizeClip(start, end, clipAudio());
 		if (clip == null || clip.getFrames().isEmpty())
 		{
 			throw new IOException("no encoded frames were available for the requested window");
@@ -294,7 +306,7 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 		}
 
 		SessionRecording session = new SessionRecording(target, request, this, maxSeconds,
-			continuationOf, audioSource());
+			continuationOf, audio);
 		sessions.add(session);
 		// attachSink replays the pre-roll and goes live under the encoder lock:
 		// no gap, no duplicated frame. Queued for the same reason as above; the
@@ -367,11 +379,86 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 
 	// ------------------------------------------------------------------ shared
 
-	/** Null when audio is off, so the session records video only. */
-	private AudioSource audioSource()
+	/**
+	 * Keeps the rolling PCM buffer in step with the config. Capture has to run
+	 * continuously, not per recording: a clip reaches backwards for audio the
+	 * same way it reaches backwards for frames.
+	 */
+	private void syncAudioCapture()
 	{
-		return config.recordingAudioEnabled()
-			? new SystemAudioSource(config.recordingAudioDevice()) : null;
+		AudioCapture active = audio;
+		if (!config.recordingAudioEnabled() || !backend.available())
+		{
+			if (active != null)
+			{
+				audio = null;
+				active.stop();
+			}
+			return;
+		}
+		if (active == null)
+		{
+			AudioCapture started = new AudioCapture(
+				new SystemAudioSource(config.recordingAudioDevice()), audioBudgetBytes());
+			audio = started.start() ? started : null;
+		}
+		else
+		{
+			active.setByteBudget(audioBudgetBytes());
+		}
+	}
+
+	/** Null when capture is off, so the clip is muxed video-only. */
+	private com.gpuvulkan.encoding.PcmSource clipAudio()
+	{
+		AudioCapture active = audio;
+		if (active == null || !active.running())
+		{
+			return null;
+		}
+		return new com.gpuvulkan.encoding.PcmSource()
+		{
+			@Override
+			public int sampleRate()
+			{
+				return active.sampleRate();
+			}
+
+			@Override
+			public int channels()
+			{
+				return active.channels();
+			}
+
+			@Override
+			public byte[] window(long fromMs, long toMs)
+			{
+				return active.window(fromMs, toMs);
+			}
+		};
+	}
+
+	/** Sized from the clip window, so the pre-roll always has audio behind it. */
+	private long audioBudgetBytes()
+	{
+		int seconds = clamp(config.inFlightEncodingBufferSeconds()
+			+ config.inFlightEncodingPostWaitSeconds(), 1, MAX_CLIP_SECONDS) + 2;
+		return (long) seconds * 48_000 * 2 * 2;
+	}
+
+	/** Restarts capture after a device or enablement change. */
+	public void onConfigChanged()
+	{
+		executor.execute(() ->
+		{
+			AudioCapture active = audio;
+			if (active != null)
+			{
+				audio = null;
+				active.stop();
+			}
+			syncAudioCapture();
+		});
 	}
 
 	private RecordingEntry publishSaved(RecordingEntry entry, Path file)

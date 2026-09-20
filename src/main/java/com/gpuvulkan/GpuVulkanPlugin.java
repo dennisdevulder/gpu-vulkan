@@ -721,6 +721,14 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		{
 			clientThread.invokeLater(this::applyClientRuntimeConfig);
 		}
+		if ("recordingAudioEnabled".equals(ev.getKey()) || "recordingAudioDevice".equals(ev.getKey()))
+		{
+			VulkanRecordingService service = recordingService;
+			if (service != null)
+			{
+				service.onConfigChanged();
+			}
+		}
 		if (renderExtensions != null)
 		{
 			renderExtensions.onConfigChanged(ev);

@@ -68,9 +68,8 @@ final class SessionRecording implements NalSink, RecordingHandle
 	private final Owner owner;
 	private final long maxDurationMs;
 	private final String continuationOf;
-	private final AudioSource audioSource;
-	private final byte[] audioBuffer = new byte[16 * 1024];
-	private boolean audioLive;
+	private final AudioCapture audio;
+	private long audioCursorMs = -1L;
 	private final CompletableFuture<RecordingEntry> result = new CompletableFuture<>();
 	private final AtomicBoolean stopping = new AtomicBoolean();
 
@@ -82,10 +81,10 @@ final class SessionRecording implements NalSink, RecordingHandle
 	private volatile IOException writeFailure;
 
 	SessionRecording(RecordingTarget target, RecordingRequest request, Owner owner,
-		int maxSeconds, String continuationOf, AudioSource audioSource)
+		int maxSeconds, String continuationOf, AudioCapture audio)
 	{
 		this.continuationOf = continuationOf;
-		this.audioSource = audioSource;
+		this.audio = audio;
 		this.target = target;
 		this.request = request;
 		this.description = request.description();
@@ -188,18 +187,9 @@ final class SessionRecording implements NalSink, RecordingHandle
 			return;
 		}
 		StreamingMp4Writer opened = new StreamingMp4Writer(target.file());
-		if (audioSource != null)
+		if (audio != null && audio.running())
 		{
-			try
-			{
-				audioSource.start();
-				opened.audioTrack(audioSource.sampleRate(), audioSource.channels(), 16);
-			}
-			catch (Exception e)
-			{
-				log.warn("Audio capture unavailable, recording video only", e);
-				audioSource.close();
-			}
+			opened.audioTrack(audio.sampleRate(), audio.channels(), 16);
 		}
 		writer = opened;
 	}
@@ -262,42 +252,36 @@ final class SessionRecording implements NalSink, RecordingHandle
 	}
 
 	/**
-	 * Drains the capture line into the file. Runs on the encoder thread with
-	 * the video writes, which is what keeps the two interleaved and serialised.
+	 * Writes the audio that belongs alongside the frame just written, taken
+	 * from the same rolling buffer the video came from. Replayed pre-roll
+	 * frames therefore pull their own recorded audio, not silence.
 	 *
-	 * The video starts with buffered pre-roll that the audio device was never
-	 * asked for, so the track is opened with that much silence rather than
-	 * letting live audio sit against historical video.
+	 * Runs on the encoder thread with the video writes, which is what keeps
+	 * the two interleaved and serialised.
 	 */
 	private void pumpAudio(StreamingMp4Writer w, long timestampMs)
 	{
-		if (audioSource == null || !w.hasAudioTrack())
+		if (audio == null || !w.hasAudioTrack())
 		{
 			return;
 		}
+		if (audioCursorMs < 0)
+		{
+			// Start one block behind the first frame so nothing is skipped.
+			audioCursorMs = timestampMs - 1;
+		}
 		try
 		{
-			if (!audioLive)
+			for (AudioRing.Block block : audio.drain(audioCursorMs, timestampMs))
 			{
-				if (timestampMs < startedAt())
-				{
-					return;
-				}
-				audioLive = true;
-				w.writeSilence(Math.max(0L, timestampMs - firstFrameMs));
-			}
-			int read = audioSource.read(audioBuffer);
-			if (read > 0)
-			{
-				w.writeAudio(audioBuffer, 0, read);
+				w.writeAudio(block.pcm, 0, block.pcm.length);
 			}
 		}
-		catch (Exception e)
+		catch (IOException e)
 		{
-			log.warn("Audio capture failed, continuing without it", e);
-			audioSource.close();
-			audioLive = false;
+			log.warn("Failed to write audio, continuing without it", e);
 		}
+		audioCursorMs = timestampMs;
 	}
 
 	@Override
@@ -328,16 +312,8 @@ final class SessionRecording implements NalSink, RecordingHandle
 		}
 		if (!w.canFinish())
 		{
-			if (audioSource != null)
-			{
-				audioSource.close();
-			}
 			w.abort();
 			return null;
-		}
-		if (audioSource != null)
-		{
-			audioSource.close();
 		}
 		long duration = w.durationMs();
 		w.finish();

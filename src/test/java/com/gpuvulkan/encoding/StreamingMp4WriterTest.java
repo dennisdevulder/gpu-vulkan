@@ -381,23 +381,6 @@ public class StreamingMp4WriterTest
 	}
 
 	@Test
-	public void silenceAlignsAudioAgainstVideoPreRoll() throws IOException
-	{
-		Path file = tmp.getRoot().toPath().resolve("silence.mp4");
-		StreamingMp4Writer writer = new StreamingMp4Writer(file);
-		writer.segment(info());
-		writer.audioTrack(48000, 2, 16);
-		writer.write(idr(0, 100));
-		// 1s of pre-roll the capture device was never asked for.
-		writer.writeSilence(1000);
-		writer.finish();
-
-		// 48000 frames x 4 bytes of silence must be in mdat.
-		int[] mdat = topLevelBoxes(Files.readAllBytes(file)).get("mdat");
-		assertTrue(mdat[1] > 48000 * 4);
-	}
-
-	@Test
 	public void audioIsAbsentUntilATrackIsDeclared() throws IOException
 	{
 		Path file = tmp.getRoot().toPath().resolve("no-audio.mp4");
@@ -410,6 +393,38 @@ public class StreamingMp4WriterTest
 		byte[] mp4 = Files.readAllBytes(file);
 		assertEquals(1, countOccurrences(mp4, "trak"));
 		assertEquals(0, countOccurrences(mp4, "smhd"));
+	}
+
+	@Test
+	public void faststartClipsCarryAudioAfterTheVideoInOneMdat()
+	{
+		// Mirrors the clip path: LocalMp4Writer output, moov first.
+		Mp4Writer writer = new Mp4Writer(1920, 1080, 90000, SPS, PPS);
+		java.util.List<Mp4Writer.Sample> samples = new java.util.ArrayList<>();
+		samples.add(new Mp4Writer.Sample(0, 100, true, 3000));
+		samples.add(new Mp4Writer.Sample(100, 100, false, 3000));
+		byte[] avcc = new byte[200];
+		byte[] pcm = new byte[4 * 4800];
+
+		byte[] mp4 = writer.writeToBytes(avcc, samples, pcm, 48000, 2);
+		Map<String, int[]> boxes = topLevelBoxes(mp4);
+
+		// ftyp | moov | mdat, with both tracks sharing the one mdat.
+		assertTrue(boxes.get("moov")[0] < boxes.get("mdat")[0]);
+		assertEquals(8 + avcc.length + pcm.length, boxes.get("mdat")[1]);
+		assertEquals(2, countOccurrences(mp4, "trak"));
+		assertEquals(1, countOccurrences(mp4, "ipcm"));
+	}
+
+	@Test
+	public void faststartClipsWithoutAudioAreUnchanged()
+	{
+		Mp4Writer writer = new Mp4Writer(1920, 1080, 90000, SPS, PPS);
+		java.util.List<Mp4Writer.Sample> samples = new java.util.ArrayList<>();
+		samples.add(new Mp4Writer.Sample(0, 100, true, 3000));
+		byte[] mp4 = writer.writeToBytes(new byte[100], samples);
+		assertEquals(1, countOccurrences(mp4, "trak"));
+		assertEquals(0, countOccurrences(mp4, "ipcm"));
 	}
 
 	private static int countOccurrences(byte[] data, String fourcc)

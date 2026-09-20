@@ -212,12 +212,29 @@ public final class Mp4Writer
     /** Convenience: also exposes the final MP4 as a byte[] (tests and small clips). */
     public byte[] writeToBytes(byte[] avccBitstream, List<Sample> samples)
     {
+        return writeToBytes(avccBitstream, samples, null, 0, 0);
+    }
+
+    /**
+     * Faststart MP4 with an optional PCM track. Audio follows the video in a
+     * single mdat, so the layout stays ftyp | moov | mdat.
+     */
+    public byte[] writeToBytes(byte[] avccBitstream, List<Sample> samples,
+                               byte[] pcm, int sampleRate, int channels)
+    {
+        AudioTrack audio = null;
+        if (pcm != null && pcm.length > 0 && sampleRate > 0 && channels > 0)
+        {
+            audio = new AudioTrack(sampleRate, channels, 16);
+            audio.addChunk(avccBitstream.length, pcm.length / audio.bytesPerFrame());
+        }
+        int pcmBytes = audio == null ? 0 : (int) audio.totalFrames() * audio.bytesPerFrame();
+
         byte[] ftyp = buildFtyp();
-        byte[] moovProbe = buildMoov(samples, 0);
-        int headerSize = ftyp.length + moovProbe.length;
-        int mdatPayloadStart = headerSize + 8;
-        byte[] moov = buildMoov(samples, mdatPayloadStart);
-        int mdatBoxSize = 8 + avccBitstream.length;
+        byte[] moovProbe = buildMoov(samples, audio, 0);
+        int mdatPayloadStart = ftyp.length + moovProbe.length + 8;
+        byte[] moov = buildMoov(samples, audio, mdatPayloadStart);
+        int mdatBoxSize = 8 + avccBitstream.length + pcmBytes;
         int total = ftyp.length + moov.length + mdatBoxSize;
 
         ByteBuffer buf = ByteBuffer.allocate(total);
@@ -226,6 +243,10 @@ public final class Mp4Writer
         buf.putInt(mdatBoxSize);
         buf.putInt(0x6D646174);
         buf.put(avccBitstream);
+        if (pcmBytes > 0)
+        {
+            buf.put(pcm, 0, pcmBytes);
+        }
         return buf.array();
     }
 

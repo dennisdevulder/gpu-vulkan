@@ -122,24 +122,6 @@ public final class StreamingMp4Writer implements Closeable
         return audio != null;
     }
 
-    /** Writes {@code millis} of silence, used to align the track against
-     *  video pre-roll the capture device was never asked for. */
-    public void writeSilence(long millis) throws IOException
-    {
-        if (audio == null || millis <= 0)
-        {
-            return;
-        }
-        long frames = millis * audio.sampleRate / 1000L;
-        byte[] zeros = new byte[audio.bytesPerFrame() * 1024];
-        while (frames > 0)
-        {
-            int batch = (int) Math.min(frames, 1024);
-            writeAudio(zeros, 0, batch * audio.bytesPerFrame());
-            frames -= batch;
-        }
-    }
-
     /**
      * Appends a block of interleaved PCM. One block becomes one chunk in the
      * audio sample table, so callers should write reasonably sized blocks

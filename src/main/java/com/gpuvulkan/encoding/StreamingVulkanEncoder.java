@@ -305,6 +305,15 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
     @Override
     public synchronized ClipData finalizeClip(long startTime, long endTime)
     {
+        return finalizeClip(startTime, endTime, null);
+    }
+
+    /**
+     * @param audio queried for the span the clip actually covers, which starts
+     *              at the chosen IDR rather than at {@code startTime}
+     */
+    public synchronized ClipData finalizeClip(long startTime, long endTime, PcmSource audio)
+    {
         drainPending();
 
         List<EncodedFrame> all = nalRing.snapshot();
@@ -326,7 +335,7 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
         EncodeSegment seg = findSegment(targetSegment);
         if (seg == null) return null;
 
-        return assembleMp4(chosen, seg);
+        return assembleMp4(chosen, seg, audio);
     }
 
     /**
@@ -396,7 +405,7 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
         return chosen;
     }
 
-    private ClipData assembleMp4(List<EncodedFrame> chosen, EncodeSegment seg)
+    private ClipData assembleMp4(List<EncodedFrame> chosen, EncodeSegment seg, PcmSource audio)
     {
         ByteArrayOutputStream bs = new ByteArrayOutputStream(chosen.size() * 50000);
         long[] timestamps = new long[chosen.size()];
@@ -414,8 +423,17 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
             }
             timestamps[i] = s.timestampMs;
         }
+        byte[] pcm = null;
+        int sampleRate = 0;
+        int channels = 0;
+        if (audio != null && timestamps.length > 0)
+        {
+            pcm = audio.window(timestamps[0], timestamps[timestamps.length - 1]);
+            sampleRate = audio.sampleRate();
+            channels = audio.channels();
+        }
         byte[] mp4 = LocalMp4Writer.toBytes(bs.toByteArray(), seg.spsPps,
-            seg.sourceWidth, seg.sourceHeight, seg.fps, timestamps);
+            seg.sourceWidth, seg.sourceHeight, seg.fps, timestamps, pcm, sampleRate, channels);
         return new ClipData(Collections.singletonList(mp4), "video/mp4", mp4.length);
     }
 
