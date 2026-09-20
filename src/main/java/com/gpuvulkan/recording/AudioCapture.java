@@ -18,10 +18,13 @@ import lombok.extern.slf4j.Slf4j;
 final class AudioCapture
 {
 	private static final int READ_BUFFER_BYTES = 16 * 1024;
+	private static final int SILENCE_THRESHOLD = 16;
+	private static final long SILENCE_REPORT_MS = 10_000;
 
 	private final AudioSource source;
 	private final AudioRing ring;
 	private volatile boolean running;
+	private volatile long lastSignalMs;
 	private Thread pump;
 
 	AudioCapture(AudioSource source, long byteBudget)
@@ -68,6 +71,7 @@ final class AudioCapture
 			return false;
 		}
 		running = true;
+		lastSignalMs = System.currentTimeMillis();
 		pump = new Thread(this::pumpLoop, "vkgpu-audio");
 		pump.setDaemon(true);
 		pump.start();
@@ -93,7 +97,12 @@ final class AudioCapture
 					Thread.sleep(5);
 					continue;
 				}
-				ring.put(System.currentTimeMillis(), buffer, read);
+				long now = System.currentTimeMillis();
+				if (hasSignal(buffer, read))
+				{
+					lastSignalMs = now;
+				}
+				ring.put(now, buffer, read);
 			}
 			catch (InterruptedException e)
 			{
@@ -107,6 +116,30 @@ final class AudioCapture
 			}
 		}
 		running = false;
+	}
+
+	/**
+	 * True when the line has carried nothing but zeroes for a while. A device
+	 * that captures silence is indistinguishable from a working one until the
+	 * recording is played back, so this is what the panel reports.
+	 */
+	boolean silent()
+	{
+		return running && System.currentTimeMillis() - lastSignalMs > SILENCE_REPORT_MS;
+	}
+
+	private static boolean hasSignal(byte[] buffer, int length)
+	{
+		for (int i = 0; i + 1 < length; i += 2)
+		{
+			// 16-bit LE; a couple of LSBs of dither should not count as signal.
+			int sample = Math.abs((short) ((buffer[i + 1] << 8) | (buffer[i] & 0xFF)));
+			if (sample > SILENCE_THRESHOLD)
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 
 	List<AudioRing.Block> drain(long afterMs, long untilMs)

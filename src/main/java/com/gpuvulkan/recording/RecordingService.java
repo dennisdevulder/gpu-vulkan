@@ -46,6 +46,9 @@ public interface RecordingService
 	/** True when the audio ring is being filled, so recordings will have sound. */
 	boolean audioCapturing();
 
+	/** True when capture is running but the line has carried only silence. */
+	boolean audioSilent();
+
 	/** Sessions currently being written. */
 	List<RecordingHandle> activeSessions();
 

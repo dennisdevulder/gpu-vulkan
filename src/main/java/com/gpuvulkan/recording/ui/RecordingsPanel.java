@@ -317,10 +317,25 @@ public final class RecordingsPanel extends PluginPanel
 			rebuildingFilters = false;
 		}
 
-		boolean capturing = service.audioCapturing();
-		audioStatus.setText(capturing ? "Audio: capturing" : "Audio: device unavailable");
-		audioStatus.setForeground(capturing
-			? ColorScheme.PROGRESS_COMPLETE_COLOR : ColorScheme.PROGRESS_ERROR_COLOR);
+		if (!service.audioCapturing())
+		{
+			audioStatus.setText("Audio: device unavailable");
+			audioStatus.setForeground(ColorScheme.PROGRESS_ERROR_COLOR);
+		}
+		else if (service.audioSilent())
+		{
+			audioStatus.setText("Audio: silent, route a monitor source");
+			audioStatus.setToolTipText("The device is open but carrying no sound. System audio "
+				+ "is not exposed to Java directly; route your output monitor into this capture "
+				+ "stream (pavucontrol, Recording tab).");
+			audioStatus.setForeground(ColorScheme.PROGRESS_INPROGRESS_COLOR);
+		}
+		else
+		{
+			audioStatus.setText("Audio: capturing");
+			audioStatus.setToolTipText(null);
+			audioStatus.setForeground(ColorScheme.PROGRESS_COMPLETE_COLOR);
+		}
 	}
 
 	private void refreshSummary()
