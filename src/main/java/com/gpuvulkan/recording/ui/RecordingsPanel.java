@@ -206,8 +206,6 @@ public final class RecordingsPanel extends PluginPanel
 		audioCaveat.setFont(FontManager.getRunescapeSmallFont());
 		audioCaveat.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
 		audioCaveat.setAlignmentX(Component.LEFT_ALIGNMENT);
-		audioCaveat.setToolTipText("Convert before sharing: "
-			+ "ffmpeg -i clip.mp4 -c:v copy -c:a aac -b:a 160k out.mp4");
 		audioDevice.setAlignmentX(Component.LEFT_ALIGNMENT);
 		audioDevice.setMaximumSize(new Dimension(Integer.MAX_VALUE, 24));
 		audioDevice.setToolTipText("Capture device for recorded audio");
@@ -334,9 +332,9 @@ public final class RecordingsPanel extends PluginPanel
 		else if (service.audioSilent())
 		{
 			audioStatus.setText("Audio: silent, route a monitor source");
-			audioStatus.setToolTipText("The device is open but carrying no sound. System audio "
-				+ "is not exposed to Java directly; route your output monitor into this capture "
-				+ "stream (pavucontrol, Recording tab).");
+			audioStatus.setToolTipText("The device is open but carrying no sound. System output "
+				+ "is not visible to Java as a capture device; it has to be routed into this "
+				+ "stream in your system's audio settings.");
 			audioStatus.setForeground(ColorScheme.PROGRESS_INPROGRESS_COLOR);
 		}
 		else
