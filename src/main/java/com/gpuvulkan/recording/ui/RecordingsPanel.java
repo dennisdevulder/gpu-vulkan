@@ -107,6 +107,9 @@ public final class RecordingsPanel extends PluginPanel
 	private final JPanel listPanel = new JPanel();
 	/** Rebuilding the kind combo fires its listener; ignore it until settled. */
 	private boolean rebuildingFilters;
+	/** Capture state changes without a config edit -- a restart completing, a
+	 *  device being routed or unplugged -- so the status line has to re-ask. */
+	private final javax.swing.Timer audioPoll = new javax.swing.Timer(1000, e -> refreshAudioStatus());
 
 	private final RecordingCard.Actions actions = new RecordingCard.Actions()
 	{
@@ -373,10 +376,19 @@ public final class RecordingsPanel extends PluginPanel
 			rebuildingFilters = false;
 		}
 
+		refreshAudioStatus();
+	}
+
+	private void refreshAudioStatus()
+	{
+		if (!audioSetting.enabled())
+		{
+			return;
+		}
 		if (!service.audioCapturing())
 		{
-			audioStatus.setText("Audio: device unavailable");
-			audioStatus.setForeground(ColorScheme.PROGRESS_ERROR_COLOR);
+			audioStatus.setText("Audio: starting");
+			audioStatus.setForeground(ColorScheme.PROGRESS_INPROGRESS_COLOR);
 		}
 		else if (service.audioSilent())
 		{
@@ -514,6 +526,13 @@ public final class RecordingsPanel extends PluginPanel
 	public void onActivate()
 	{
 		refresh();
+		audioPoll.start();
+	}
+
+	@Override
+	public void onDeactivate()
+	{
+		audioPoll.stop();
 	}
 
 	@Subscribe
