@@ -412,8 +412,7 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 		}
 		if (active == null)
 		{
-			AudioCapture started = new AudioCapture(
-				new SystemAudioSource(config.recordingAudioDevice()), audioBudgetBytes());
+			AudioCapture started = new AudioCapture(buildSource(), audioBudgetBytes());
 			audio = started.start() ? started : null;
 		}
 		else
@@ -450,6 +449,17 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 				return active.window(fromMs, toMs);
 			}
 		};
+	}
+
+	private AudioSource buildSource()
+	{
+		AudioSource system = new SystemAudioSource(config.recordingAudioDevice());
+		if (!config.recordingMicEnabled())
+		{
+			return system;
+		}
+		return new MixingAudioSource(system,
+			new SystemAudioSource(config.recordingMicDevice()), config.recordingMicGain());
 	}
 
 	/** Sized from the clip window, so the pre-roll always has audio behind it. */

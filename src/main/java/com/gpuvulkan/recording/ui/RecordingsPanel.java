@@ -85,12 +85,19 @@ public final class RecordingsPanel extends PluginPanel
 		void set(String device);
 
 		boolean enabled();
+
+		String getMic();
+
+		void setMic(String device);
+
+		boolean micEnabled();
 	}
 
 	private final JLabel summary = new JLabel();
 	private final JLabel status = new JLabel();
 	private final JComboBox<String> kindFilter = new JComboBox<>();
 	private final JComboBox<String> audioDevice = new JComboBox<>();
+	private final JComboBox<String> micDevice = new JComboBox<>();
 	private final JLabel audioStatus = new JLabel();
 	private final JTextField search = new JTextField();
 	private final JPanel livePanel = new JPanel();
@@ -213,10 +220,23 @@ public final class RecordingsPanel extends PluginPanel
 			}
 		});
 
+		micDevice.setAlignmentX(Component.LEFT_ALIGNMENT);
+		micDevice.setMaximumSize(new Dimension(Integer.MAX_VALUE, 24));
+		micDevice.setToolTipText("Microphone mixed into the recording");
+		micDevice.addActionListener(e ->
+		{
+			Object selected = micDevice.getSelectedItem();
+			if (!rebuildingFilters && selected != null)
+			{
+				audioSetting.setMic(String.valueOf(selected));
+			}
+		});
+
 		header.add(Box.createVerticalStrut(6));
 		header.add(filters);
 		header.add(Box.createVerticalStrut(4));
 		header.add(audioDevice);
+		header.add(micDevice);
 		header.add(audioStatus);
 		header.add(Box.createVerticalStrut(4));
 		header.add(livePanel);
@@ -295,6 +315,7 @@ public final class RecordingsPanel extends PluginPanel
 		boolean on = audioSetting.enabled();
 		audioDevice.setVisible(on);
 		audioStatus.setVisible(on);
+		micDevice.setVisible(on && audioSetting.micEnabled());
 		if (!on)
 		{
 			return;
@@ -303,14 +324,24 @@ public final class RecordingsPanel extends PluginPanel
 		rebuildingFilters = true;
 		try
 		{
+			List<String> devices = SystemAudioSource.captureDevices();
 			String chosen = audioSetting.get();
 			audioDevice.removeAllItems();
 			audioDevice.addItem("default");
-			for (String name : SystemAudioSource.captureDevices())
+			for (String name : devices)
 			{
 				audioDevice.addItem(name);
 			}
 			audioDevice.setSelectedItem(chosen == null || chosen.isEmpty() ? "default" : chosen);
+
+			String mic = audioSetting.getMic();
+			micDevice.removeAllItems();
+			micDevice.addItem("default");
+			for (String name : devices)
+			{
+				micDevice.addItem(name);
+			}
+			micDevice.setSelectedItem(mic == null || mic.isEmpty() ? "default" : mic);
 		}
 		finally
 		{
