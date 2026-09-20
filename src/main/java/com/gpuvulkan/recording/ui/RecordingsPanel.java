@@ -98,6 +98,9 @@ public final class RecordingsPanel extends PluginPanel
 	private final JComboBox<String> kindFilter = new JComboBox<>();
 	private final JComboBox<String> audioDevice = new JComboBox<>();
 	private final JComboBox<String> micDevice = new JComboBox<>();
+	private final JLabel audioHeading = caption("Audio", true);
+	private final JLabel audioDeviceLabel = caption("Record from", false);
+	private final JLabel micDeviceLabel = caption("Microphone", false);
 	private final JLabel audioStatus = new JLabel();
 	private final JTextField search = new JTextField();
 	private final JPanel livePanel = new JPanel();
@@ -156,6 +159,18 @@ public final class RecordingsPanel extends PluginPanel
 		refresh();
 	}
 
+	/** Small left-aligned caption above a control. */
+	private static JLabel caption(String text, boolean heading)
+	{
+		JLabel label = new JLabel(text);
+		label.setFont(heading
+			? FontManager.getRunescapeSmallFont().deriveFont(Font.BOLD)
+			: FontManager.getRunescapeSmallFont());
+		label.setForeground(heading ? Color.WHITE : ColorScheme.LIGHT_GRAY_COLOR);
+		label.setAlignmentX(Component.LEFT_ALIGNMENT);
+		return label;
+	}
+
 	private JPanel header()
 	{
 		JPanel header = new JPanel();
@@ -210,7 +225,7 @@ public final class RecordingsPanel extends PluginPanel
 		audioStatus.setAlignmentX(Component.LEFT_ALIGNMENT);
 		audioDevice.setAlignmentX(Component.LEFT_ALIGNMENT);
 		audioDevice.setMaximumSize(new Dimension(Integer.MAX_VALUE, 24));
-		audioDevice.setToolTipText("Capture device for recorded audio");
+		audioDevice.setToolTipText("The device recordings take their sound from");
 		audioDevice.addActionListener(e ->
 		{
 			Object selected = audioDevice.getSelectedItem();
@@ -234,9 +249,15 @@ public final class RecordingsPanel extends PluginPanel
 
 		header.add(Box.createVerticalStrut(6));
 		header.add(filters);
-		header.add(Box.createVerticalStrut(4));
+		header.add(Box.createVerticalStrut(8));
+		header.add(audioHeading);
+		header.add(Box.createVerticalStrut(2));
+		header.add(audioDeviceLabel);
 		header.add(audioDevice);
+		header.add(Box.createVerticalStrut(4));
+		header.add(micDeviceLabel);
 		header.add(micDevice);
+		header.add(Box.createVerticalStrut(2));
 		header.add(audioStatus);
 		header.add(Box.createVerticalStrut(4));
 		header.add(livePanel);
@@ -313,9 +334,13 @@ public final class RecordingsPanel extends PluginPanel
 	private void refreshAudio()
 	{
 		boolean on = audioSetting.enabled();
+		boolean showMic = on && audioSetting.micEnabled();
+		audioHeading.setVisible(on);
+		audioDeviceLabel.setVisible(on);
 		audioDevice.setVisible(on);
 		audioStatus.setVisible(on);
-		micDevice.setVisible(on && audioSetting.micEnabled());
+		micDeviceLabel.setVisible(showMic);
+		micDevice.setVisible(showMic);
 		if (!on)
 		{
 			return;
