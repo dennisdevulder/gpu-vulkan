@@ -82,6 +82,7 @@ public final class StreamingMp4Writer implements Closeable
     private int height;
     private int fps;
     private byte[] driverSpsPps;
+    private Mp4Writer.AudioTrack audio;
     private FileChannel channel;
     private OutputStream out;
     private int ftypLength;
@@ -96,6 +97,73 @@ public final class StreamingMp4Writer implements Closeable
     {
         this.path = path;
         open();
+    }
+
+    /**
+     * Adds a PCM audio track. Call before the first {@link #writeAudio}; the
+     * samples are interleaved into the same mdat as the video.
+     */
+    public void audioTrack(int sampleRate, int channels, int bitsPerSample)
+    {
+        if (audio == null)
+        {
+            audio = new Mp4Writer.AudioTrack(sampleRate, channels, bitsPerSample);
+        }
+    }
+
+    public boolean hasAudio()
+    {
+        return audio != null && !audio.isEmpty();
+    }
+
+    /** True once {@link #audioTrack} has been declared, with or without samples. */
+    public boolean hasAudioTrack()
+    {
+        return audio != null;
+    }
+
+    /** Writes {@code millis} of silence, used to align the track against
+     *  video pre-roll the capture device was never asked for. */
+    public void writeSilence(long millis) throws IOException
+    {
+        if (audio == null || millis <= 0)
+        {
+            return;
+        }
+        long frames = millis * audio.sampleRate / 1000L;
+        byte[] zeros = new byte[audio.bytesPerFrame() * 1024];
+        while (frames > 0)
+        {
+            int batch = (int) Math.min(frames, 1024);
+            writeAudio(zeros, 0, batch * audio.bytesPerFrame());
+            frames -= batch;
+        }
+    }
+
+    /**
+     * Appends a block of interleaved PCM. One block becomes one chunk in the
+     * audio sample table, so callers should write reasonably sized blocks
+     * rather than a frame at a time.
+     */
+    public void writeAudio(byte[] pcm, int offset, int length) throws IOException
+    {
+        if (finished || audio == null || length <= 0)
+        {
+            return;
+        }
+        int frames = length / audio.bytesPerFrame();
+        if (frames <= 0)
+        {
+            return;
+        }
+        int bytes = frames * audio.bytesPerFrame();
+        if (mdatBytes + bytes > MAX_MDAT_BYTES)
+        {
+            return;
+        }
+        audio.addChunk(mdatBytes, frames);
+        out.write(pcm, offset, bytes);
+        mdatBytes += bytes;
     }
 
     /** Required before {@link #finish}. First call wins: a track cannot change
@@ -340,7 +408,7 @@ public final class StreamingMp4Writer implements Closeable
             out.add(new Mp4Writer.Sample(s.offsetInMdat, s.size, s.keyframe, durations[i]));
         }
         return new Mp4Writer(width, height, TIMESCALE, sps, pps)
-            .buildMoov(out, (int) mdatPayloadStart);
+            .buildMoov(out, audio, (int) mdatPayloadStart);
     }
 
     /** Closes and deletes the file. */

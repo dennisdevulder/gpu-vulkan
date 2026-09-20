@@ -293,7 +293,8 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 			return new FailedHandle(request, e);
 		}
 
-		SessionRecording session = new SessionRecording(target, request, this, maxSeconds, continuationOf);
+		SessionRecording session = new SessionRecording(target, request, this, maxSeconds,
+			continuationOf, audioSource());
 		sessions.add(session);
 		// attachSink replays the pre-roll and goes live under the encoder lock:
 		// no gap, no duplicated frame. Queued for the same reason as above; the
@@ -365,6 +366,13 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 	}
 
 	// ------------------------------------------------------------------ shared
+
+	/** Null when audio is off, so the session records video only. */
+	private AudioSource audioSource()
+	{
+		return config.recordingAudioEnabled()
+			? new SystemAudioSource(config.recordingAudioDevice()) : null;
+	}
 
 	private RecordingEntry publishSaved(RecordingEntry entry, Path file)
 	{

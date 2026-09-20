@@ -486,6 +486,24 @@ public interface GpuVulkanPluginConfig extends Config
 	default int recordingRetentionDays() { return 0; }
 
 	@ConfigItem(
+		keyName = "recordingAudioEnabled",
+		name = "Record audio",
+		description = "Add a system-audio track to long recordings. This captures everything you hear, voice chat included, not just the game. Needs a loopback or monitor input routed to the client.",
+		section = RECORDINGS_SECTION,
+		position = 6
+	)
+	default boolean recordingAudioEnabled() { return false; }
+
+	@ConfigItem(
+		keyName = "recordingAudioDevice",
+		name = "Audio device",
+		description = "Name of the capture device to record from, or 'default'.",
+		section = RECORDINGS_SECTION,
+		position = 7
+	)
+	default String recordingAudioDevice() { return "default"; }
+
+	@ConfigItem(
 		keyName = "recordingChatFeedback",
 		name = "Announce in chat",
 		description = "Post a game message when a recording is saved.",

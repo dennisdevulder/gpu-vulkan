@@ -29,6 +29,7 @@ import com.gpuvulkan.encoding.EncodedSegmentInfo;
 import com.gpuvulkan.encoding.EncoderRestart;
 import com.gpuvulkan.encoding.NalSink;
 import com.gpuvulkan.encoding.StreamingMp4Writer;
+import lombok.extern.slf4j.Slf4j;
 import java.io.IOException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -67,6 +68,9 @@ final class SessionRecording implements NalSink, RecordingHandle
 	private final Owner owner;
 	private final long maxDurationMs;
 	private final String continuationOf;
+	private final AudioSource audioSource;
+	private final byte[] audioBuffer = new byte[16 * 1024];
+	private boolean audioLive;
 	private final CompletableFuture<RecordingEntry> result = new CompletableFuture<>();
 	private final AtomicBoolean stopping = new AtomicBoolean();
 
@@ -78,9 +82,10 @@ final class SessionRecording implements NalSink, RecordingHandle
 	private volatile IOException writeFailure;
 
 	SessionRecording(RecordingTarget target, RecordingRequest request, Owner owner,
-		int maxSeconds, String continuationOf)
+		int maxSeconds, String continuationOf, AudioSource audioSource)
 	{
 		this.continuationOf = continuationOf;
+		this.audioSource = audioSource;
 		this.target = target;
 		this.request = request;
 		this.description = request.description();
@@ -178,10 +183,25 @@ final class SessionRecording implements NalSink, RecordingHandle
 	/** Called by the owner before attach, keeping the open off the encoder thread. */
 	void open() throws IOException
 	{
-		if (writer == null)
+		if (writer != null)
 		{
-			writer = new StreamingMp4Writer(target.file());
+			return;
 		}
+		StreamingMp4Writer opened = new StreamingMp4Writer(target.file());
+		if (audioSource != null)
+		{
+			try
+			{
+				audioSource.start();
+				opened.audioTrack(audioSource.sampleRate(), audioSource.channels(), 16);
+			}
+			catch (Exception e)
+			{
+				log.warn("Audio capture unavailable, recording video only", e);
+				audioSource.close();
+			}
+		}
+		writer = opened;
 	}
 
 	@Override
@@ -234,9 +254,49 @@ final class SessionRecording implements NalSink, RecordingHandle
 		{
 			firstFrameMs = frame.timestampMs;
 		}
-		else if (lastFrameMs - firstFrameMs >= maxDurationMs)
+		pumpAudio(w, frame.timestampMs);
+		if (lastFrameMs - firstFrameMs >= maxDurationMs)
 		{
 			requestStop(StopReason.MAX_LENGTH);
+		}
+	}
+
+	/**
+	 * Drains the capture line into the file. Runs on the encoder thread with
+	 * the video writes, which is what keeps the two interleaved and serialised.
+	 *
+	 * The video starts with buffered pre-roll that the audio device was never
+	 * asked for, so the track is opened with that much silence rather than
+	 * letting live audio sit against historical video.
+	 */
+	private void pumpAudio(StreamingMp4Writer w, long timestampMs)
+	{
+		if (audioSource == null || !w.hasAudioTrack())
+		{
+			return;
+		}
+		try
+		{
+			if (!audioLive)
+			{
+				if (timestampMs < startedAt())
+				{
+					return;
+				}
+				audioLive = true;
+				w.writeSilence(Math.max(0L, timestampMs - firstFrameMs));
+			}
+			int read = audioSource.read(audioBuffer);
+			if (read > 0)
+			{
+				w.writeAudio(audioBuffer, 0, read);
+			}
+		}
+		catch (Exception e)
+		{
+			log.warn("Audio capture failed, continuing without it", e);
+			audioSource.close();
+			audioLive = false;
 		}
 	}
 
@@ -268,8 +328,16 @@ final class SessionRecording implements NalSink, RecordingHandle
 		}
 		if (!w.canFinish())
 		{
+			if (audioSource != null)
+			{
+				audioSource.close();
+			}
 			w.abort();
 			return null;
+		}
+		if (audioSource != null)
+		{
+			audioSource.close();
 		}
 		long duration = w.durationMs();
 		w.finish();

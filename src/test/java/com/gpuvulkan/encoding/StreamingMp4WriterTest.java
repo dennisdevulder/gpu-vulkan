@@ -349,6 +349,84 @@ public class StreamingMp4WriterTest
 		writer.abort();
 	}
 
+	@Test
+	public void audioAndVideoShareOneMdatAndTwoTracks() throws IOException
+	{
+		Path file = tmp.getRoot().toPath().resolve("av.mp4");
+		StreamingMp4Writer writer = new StreamingMp4Writer(file);
+		writer.segment(info());
+		writer.audioTrack(48000, 2, 16);
+
+		byte[] pcm = new byte[4 * 480];
+		writer.write(idr(0, 500));
+		writer.writeAudio(pcm, 0, pcm.length);
+		for (int i = 1; i < 10; i++)
+		{
+			writer.write(inter(i * 33L, 100));
+			writer.writeAudio(pcm, 0, pcm.length);
+		}
+		assertTrue(writer.hasAudio());
+		writer.finish();
+
+		byte[] mp4 = Files.readAllBytes(file);
+		Map<String, int[]> boxes = topLevelBoxes(mp4);
+		// One mdat holding both tracks, and moov right after it.
+		assertEquals(1, countOccurrences(mp4, "mdat"));
+		assertEquals(boxes.get("mdat")[0] + boxes.get("mdat")[1], boxes.get("moov")[0]);
+		assertEquals(2, countOccurrences(mp4, "trak"));
+		assertEquals(1, countOccurrences(mp4, "vmhd"));
+		assertEquals(1, countOccurrences(mp4, "smhd"));
+		assertEquals(1, countOccurrences(mp4, "ipcm"));
+		assertEquals(1, countOccurrences(mp4, "pcmC"));
+	}
+
+	@Test
+	public void silenceAlignsAudioAgainstVideoPreRoll() throws IOException
+	{
+		Path file = tmp.getRoot().toPath().resolve("silence.mp4");
+		StreamingMp4Writer writer = new StreamingMp4Writer(file);
+		writer.segment(info());
+		writer.audioTrack(48000, 2, 16);
+		writer.write(idr(0, 100));
+		// 1s of pre-roll the capture device was never asked for.
+		writer.writeSilence(1000);
+		writer.finish();
+
+		// 48000 frames x 4 bytes of silence must be in mdat.
+		int[] mdat = topLevelBoxes(Files.readAllBytes(file)).get("mdat");
+		assertTrue(mdat[1] > 48000 * 4);
+	}
+
+	@Test
+	public void audioIsAbsentUntilATrackIsDeclared() throws IOException
+	{
+		Path file = tmp.getRoot().toPath().resolve("no-audio.mp4");
+		StreamingMp4Writer writer = new StreamingMp4Writer(file);
+		writer.segment(info());
+		writer.writeAudio(new byte[4096], 0, 4096);
+		writer.write(idr(0, 100));
+		writer.finish();
+
+		byte[] mp4 = Files.readAllBytes(file);
+		assertEquals(1, countOccurrences(mp4, "trak"));
+		assertEquals(0, countOccurrences(mp4, "smhd"));
+	}
+
+	private static int countOccurrences(byte[] data, String fourcc)
+	{
+		byte[] needle = fourcc.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+		int n = 0;
+		for (int i = 0; i + 4 <= data.length; i++)
+		{
+			if (data[i] == needle[0] && data[i+1] == needle[1]
+				&& data[i+2] == needle[2] && data[i+3] == needle[3])
+			{
+				n++;
+			}
+		}
+		return n;
+	}
+
 	/** name -> {offset, size} for each top-level box, in file order. */
 	private static Map<String, int[]> topLevelBoxes(byte[] mp4)
 	{
