@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2025, Dennis De Vulder
- * All rights reserved. See VulkanEncoder.java for full license text.
+ * SPDX-License-Identifier: BSD-2-Clause
  */
 package com.gpuvulkan.encoding;
 
