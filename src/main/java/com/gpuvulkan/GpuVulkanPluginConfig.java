@@ -494,12 +494,15 @@ public interface GpuVulkanPluginConfig extends Config
 	)
 	default boolean recordingAudioEnabled() { return false; }
 
+	// Chosen from the Recordings panel, where the list can be built from the
+	// devices that actually exist; a config enum would have to be static.
 	@ConfigItem(
 		keyName = "recordingAudioDevice",
 		name = "Audio device",
-		description = "Name of the capture device to record from, or 'default'.",
+		description = "Capture device to record from. Pick one in the Recordings panel.",
 		section = RECORDINGS_SECTION,
-		position = 7
+		position = 7,
+		hidden = true
 	)
 	default String recordingAudioDevice() { return "default"; }
 

@@ -183,6 +183,13 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 	}
 
 	@Override
+	public boolean audioCapturing()
+	{
+		AudioCapture active = audio;
+		return active != null && active.running();
+	}
+
+	@Override
 	public List<RecordingHandle> activeSessions()
 	{
 		return new ArrayList<>(sessions);

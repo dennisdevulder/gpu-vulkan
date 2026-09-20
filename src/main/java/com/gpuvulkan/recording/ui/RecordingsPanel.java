@@ -29,6 +29,7 @@ import com.gpuvulkan.recording.RecordingHandle;
 import com.gpuvulkan.recording.RecordingKind;
 import com.gpuvulkan.recording.RecordingService;
 import com.gpuvulkan.recording.RecordingStore;
+import com.gpuvulkan.recording.SystemAudioSource;
 import com.gpuvulkan.recording.events.RecordingDeleted;
 import com.gpuvulkan.recording.events.RecordingProgress;
 import com.gpuvulkan.recording.events.RecordingSaved;
@@ -74,10 +75,23 @@ public final class RecordingsPanel extends PluginPanel
 
 	private final RecordingService service;
 	private final Path root;
+	private final AudioDeviceSetting audioSetting;
+
+	/** How the panel persists the chosen device; the plugin supplies config access. */
+	public interface AudioDeviceSetting
+	{
+		String get();
+
+		void set(String device);
+
+		boolean enabled();
+	}
 
 	private final JLabel summary = new JLabel();
 	private final JLabel status = new JLabel();
 	private final JComboBox<String> kindFilter = new JComboBox<>();
+	private final JComboBox<String> audioDevice = new JComboBox<>();
+	private final JLabel audioStatus = new JLabel();
 	private final JTextField search = new JTextField();
 	private final JPanel livePanel = new JPanel();
 	private final JPanel listPanel = new JPanel();
@@ -119,11 +133,12 @@ public final class RecordingsPanel extends PluginPanel
 		}
 	};
 
-	public RecordingsPanel(RecordingService service, Path root)
+	public RecordingsPanel(RecordingService service, Path root, AudioDeviceSetting audioSetting)
 	{
 		super(false);
 		this.service = service;
 		this.root = root;
+		this.audioSetting = audioSetting;
 
 		setLayout(new BorderLayout());
 		setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
@@ -184,8 +199,25 @@ public final class RecordingsPanel extends PluginPanel
 		header.add(Box.createVerticalStrut(2));
 		header.add(summary);
 		header.add(status);
+		audioStatus.setFont(FontManager.getRunescapeSmallFont());
+		audioStatus.setAlignmentX(Component.LEFT_ALIGNMENT);
+		audioDevice.setAlignmentX(Component.LEFT_ALIGNMENT);
+		audioDevice.setMaximumSize(new Dimension(Integer.MAX_VALUE, 24));
+		audioDevice.setToolTipText("Capture device for recorded audio");
+		audioDevice.addActionListener(e ->
+		{
+			Object selected = audioDevice.getSelectedItem();
+			if (!rebuildingFilters && selected != null)
+			{
+				audioSetting.set(String.valueOf(selected));
+			}
+		});
+
 		header.add(Box.createVerticalStrut(6));
 		header.add(filters);
+		header.add(Box.createVerticalStrut(4));
+		header.add(audioDevice);
+		header.add(audioStatus);
 		header.add(Box.createVerticalStrut(4));
 		header.add(livePanel);
 		header.add(Box.createVerticalStrut(4));
@@ -218,6 +250,7 @@ public final class RecordingsPanel extends PluginPanel
 			return;
 		}
 		refreshKindFilter();
+		refreshAudio();
 		refreshSummary();
 		refreshLive();
 		refreshList();
@@ -254,6 +287,40 @@ public final class RecordingsPanel extends PluginPanel
 		{
 			rebuildingFilters = false;
 		}
+	}
+
+	/** Devices are discovered, and can appear or vanish while the client runs. */
+	private void refreshAudio()
+	{
+		boolean on = audioSetting.enabled();
+		audioDevice.setVisible(on);
+		audioStatus.setVisible(on);
+		if (!on)
+		{
+			return;
+		}
+
+		rebuildingFilters = true;
+		try
+		{
+			String chosen = audioSetting.get();
+			audioDevice.removeAllItems();
+			audioDevice.addItem("default");
+			for (String name : SystemAudioSource.captureDevices())
+			{
+				audioDevice.addItem(name);
+			}
+			audioDevice.setSelectedItem(chosen == null || chosen.isEmpty() ? "default" : chosen);
+		}
+		finally
+		{
+			rebuildingFilters = false;
+		}
+
+		boolean capturing = service.audioCapturing();
+		audioStatus.setText(capturing ? "Audio: capturing" : "Audio: device unavailable");
+		audioStatus.setForeground(capturing
+			? ColorScheme.PROGRESS_COMPLETE_COLOR : ColorScheme.PROGRESS_ERROR_COLOR);
 	}
 
 	private void refreshSummary()

@@ -43,6 +43,9 @@ public interface RecordingService
 	 *  cap, logout and teardown stop it regardless. */
 	RecordingHandle session(RecordingRequest request);
 
+	/** True when the audio ring is being filled, so recordings will have sound. */
+	boolean audioCapturing();
+
 	/** Sessions currently being written. */
 	List<RecordingHandle> activeSessions();
 

@@ -122,6 +122,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	private ClientToolbar clientToolbar;
 
 	@Inject
+	private ConfigManager configManager;
+
+	@Inject
 	private net.runelite.client.game.ItemManager itemManager;
 
 	private final HotkeyListener inFlightClipHotkeyListener = new HotkeyListener(() -> config.inFlightEncodingHotkey())
@@ -857,7 +860,28 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		{
 			return;
 		}
-		recordingsPanel = new RecordingsPanel(recordingService, RecordingStore.defaultRoot());
+		recordingsPanel = new RecordingsPanel(recordingService, RecordingStore.defaultRoot(),
+			new RecordingsPanel.AudioDeviceSetting()
+			{
+				@Override
+				public String get()
+				{
+					return config.recordingAudioDevice();
+				}
+
+				@Override
+				public void set(String device)
+				{
+					configManager.setConfiguration(GpuVulkanPluginConfig.GROUP,
+						"recordingAudioDevice", device);
+				}
+
+				@Override
+				public boolean enabled()
+				{
+					return config.recordingAudioEnabled();
+				}
+			});
 		// The panel listens on the same public events any other plugin would.
 		eventBus.register(recordingsPanel);
 		recordingsNavButton = NavigationButton.builder()
