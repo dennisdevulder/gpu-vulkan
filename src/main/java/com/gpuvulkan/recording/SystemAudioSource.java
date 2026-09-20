@@ -30,6 +30,9 @@ public final class SystemAudioSource implements AudioSource
 
 	private final String deviceName;
 	private TargetDataLine line;
+	/** Channels the device actually gave us; mono is upmixed on read. */
+	private int capturedChannels = CHANNELS;
+	private byte[] monoScratch = new byte[0];
 
 	public SystemAudioSource(String deviceName)
 	{
@@ -51,16 +54,37 @@ public final class SystemAudioSource implements AudioSource
 	@Override
 	public void start() throws Exception
 	{
-		AudioFormat format = new AudioFormat(SAMPLE_RATE, BITS, CHANNELS, true, false);
-		DataLine.Info info = new DataLine.Info(TargetDataLine.class, format);
-		TargetDataLine opened = open(info, format);
+		// Headset microphones are usually mono-only, so stereo cannot be
+		// assumed. Whatever opens is upmixed to stereo on read.
+		AudioFormat stereo = new AudioFormat(SAMPLE_RATE, BITS, CHANNELS, true, false);
+		AudioFormat mono = new AudioFormat(SAMPLE_RATE, BITS, 1, true, false);
+
+		AudioFormat format = stereo;
+		TargetDataLine opened = open(new DataLine.Info(TargetDataLine.class, stereo), stereo);
+		if (opened == null)
+		{
+			format = mono;
+			opened = open(new DataLine.Info(TargetDataLine.class, mono), mono);
+		}
+		if (opened == null)
+		{
+			throw new IllegalStateException("no capture line for " + describe());
+		}
+
+		capturedChannels = format.getChannels();
 		// A second of slack: the recorder polls on its own cadence and must not
 		// lose samples when a frame takes longer than expected.
-		opened.open(format, SAMPLE_RATE * CHANNELS * (BITS / 8));
+		opened.open(format, SAMPLE_RATE * capturedChannels * (BITS / 8));
 		opened.start();
 		line = opened;
 	}
 
+	private String describe()
+	{
+		return deviceName == null || deviceName.isEmpty() ? "default" : deviceName;
+	}
+
+	/** Null when this device cannot provide the format; the caller retries mono. */
 	private TargetDataLine open(DataLine.Info info, AudioFormat format) throws Exception
 	{
 		if (deviceName != null && !deviceName.isEmpty() && !"default".equals(deviceName))
@@ -72,15 +96,19 @@ public final class SystemAudioSource implements AudioSource
 					continue;
 				}
 				Mixer mixer = AudioSystem.getMixer(mi);
-				if (mixer.isLineSupported(info))
-				{
-					return (TargetDataLine) mixer.getLine(info);
-				}
+				return mixer.isLineSupported(info) ? (TargetDataLine) mixer.getLine(info) : null;
 			}
 			log.warn("Audio device '{}' is unavailable, using the default instead. Available: {}",
 				deviceName, captureDevices());
 		}
-		return AudioSystem.getTargetDataLine(format);
+		try
+		{
+			return AudioSystem.getTargetDataLine(format);
+		}
+		catch (IllegalArgumentException e)
+		{
+			return null;
+		}
 	}
 
 	@Override
@@ -91,15 +119,35 @@ public final class SystemAudioSource implements AudioSource
 		{
 			return -1;
 		}
-		int available = Math.min(active.available(), buffer.length);
+		if (capturedChannels == CHANNELS)
+		{
+			int available = Math.min(active.available(), buffer.length);
+			// Whole frames only: a split frame would swap the channels from here on.
+			available -= available % (CHANNELS * (BITS / 8));
+			return available <= 0 ? 0 : active.read(buffer, 0, available);
+		}
+
+		// Mono device: read half as many bytes and duplicate each sample.
+		int wanted = buffer.length / 2;
+		int available = Math.min(active.available(), wanted);
+		available -= available % (BITS / 8);
 		if (available <= 0)
 		{
 			return 0;
 		}
-		// Whole frames only: a split frame would swap the channels from here on.
-		int frameSize = CHANNELS * (BITS / 8);
-		available -= available % frameSize;
-		return available <= 0 ? 0 : active.read(buffer, 0, available);
+		if (monoScratch.length < available)
+		{
+			monoScratch = new byte[available];
+		}
+		int read = active.read(monoScratch, 0, available);
+		for (int i = 0, o = 0; i + 1 < read; i += 2, o += 4)
+		{
+			buffer[o] = monoScratch[i];
+			buffer[o + 1] = monoScratch[i + 1];
+			buffer[o + 2] = monoScratch[i];
+			buffer[o + 3] = monoScratch[i + 1];
+		}
+		return read * 2;
 	}
 
 	@Override
@@ -114,15 +162,21 @@ public final class SystemAudioSource implements AudioSource
 		}
 	}
 
-	/** Names of every mixer that can capture the recorder's format. */
+	/**
+	 * Mixers that can capture at all. Mono counts: most headset microphones
+	 * offer nothing else, and requiring stereo hid them from the picker.
+	 */
 	public static List<String> captureDevices()
 	{
-		AudioFormat format = new AudioFormat(SAMPLE_RATE, BITS, CHANNELS, true, false);
-		DataLine.Info info = new DataLine.Info(TargetDataLine.class, format);
+		DataLine.Info stereo = new DataLine.Info(TargetDataLine.class,
+			new AudioFormat(SAMPLE_RATE, BITS, CHANNELS, true, false));
+		DataLine.Info mono = new DataLine.Info(TargetDataLine.class,
+			new AudioFormat(SAMPLE_RATE, BITS, 1, true, false));
 		List<String> names = new ArrayList<>();
 		for (Mixer.Info mi : AudioSystem.getMixerInfo())
 		{
-			if (AudioSystem.getMixer(mi).isLineSupported(info))
+			Mixer mixer = AudioSystem.getMixer(mi);
+			if (mixer.isLineSupported(stereo) || mixer.isLineSupported(mono))
 			{
 				names.add(mi.getName());
 			}
