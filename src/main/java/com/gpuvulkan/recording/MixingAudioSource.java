@@ -12,21 +12,18 @@ import lombok.extern.slf4j.Slf4j;
  * it goes to the chat application, not to your speakers -- so without this you
  * hear everyone in a call except yourself.
  *
- * The primary drives the clock. The mic is sampled to match and is dropped
- * rather than buffered when it runs ahead, since drifting a voice track
- * steadily later is worse than losing a few milliseconds of it.
+ * The primary drives the clock. Both lines run at the same rate, so the mic is
+ * read to match and its own buffer absorbs jitter.
  */
 @Slf4j
 final class MixingAudioSource implements AudioSource
 {
-	/** Beyond this much backlog the mic is behind the picture; skip forward. */
-	private static final int MAX_BACKLOG_MULTIPLE = 2;
-
 	private final AudioSource primary;
 	private final AudioSource secondary;
 	private final float gain;
 	private byte[] scratch = new byte[0];
 	private boolean secondaryFailed;
+	private volatile float micLevel;
 
 	MixingAudioSource(AudioSource primary, AudioSource secondary, int gainPercent)
 	{
@@ -80,26 +77,10 @@ final class MixingAudioSource implements AudioSource
 		int mixable = secondary.read(scratch);
 		if (mixable > 0)
 		{
+			micLevel = AudioLevels.peak(scratch, mixable);
 			mix(buffer, scratch, Math.min(read, mixable));
 		}
-		skipBacklog(read);
 		return read;
-	}
-
-	/**
-	 * Drops mic audio that has queued up beyond one read. Both lines free-run,
-	 * so without this the mic drifts further behind for the whole recording.
-	 */
-	private void skipBacklog(int readSize) throws Exception
-	{
-		for (int guard = 0; guard < 4; guard++)
-		{
-			int surplus = secondary.read(scratch);
-			if (surplus < readSize * MAX_BACKLOG_MULTIPLE)
-			{
-				return;
-			}
-		}
 	}
 
 	/** Saturating sum: two full-scale sources would wrap without the clamp. */
@@ -121,6 +102,18 @@ final class MixingAudioSource implements AudioSource
 			into[i] = (byte) (sum & 0xFF);
 			into[i + 1] = (byte) ((sum >> 8) & 0xFF);
 		}
+	}
+
+	@Override
+	public float level()
+	{
+		return primary.level();
+	}
+
+	/** Pre-gain level of the mixed-in microphone. */
+	float micLevel()
+	{
+		return secondaryFailed ? 0f : micLevel;
 	}
 
 	@Override

@@ -101,6 +101,8 @@ public final class RecordingsPanel extends PluginPanel
 	private final JLabel audioHeading = caption("Audio", true);
 	private final JLabel audioDeviceLabel = caption("Record from", false);
 	private final JLabel micDeviceLabel = caption("Microphone", false);
+	private final LevelMeter audioMeter = new LevelMeter();
+	private final LevelMeter micMeter = new LevelMeter();
 	private final JLabel audioStatus = new JLabel();
 	private final JTextField search = new JTextField();
 	private final JPanel livePanel = new JPanel();
@@ -110,6 +112,7 @@ public final class RecordingsPanel extends PluginPanel
 	/** Capture state changes without a config edit -- a restart completing, a
 	 *  device being routed or unplugged -- so the status line has to re-ask. */
 	private final javax.swing.Timer audioPoll = new javax.swing.Timer(1000, e -> refreshAudioStatus());
+	private final javax.swing.Timer meterPoll = new javax.swing.Timer(50, e -> refreshMeters());
 
 	private final RecordingCard.Actions actions = new RecordingCard.Actions()
 	{
@@ -257,9 +260,13 @@ public final class RecordingsPanel extends PluginPanel
 		header.add(Box.createVerticalStrut(2));
 		header.add(audioDeviceLabel);
 		header.add(audioDevice);
-		header.add(Box.createVerticalStrut(4));
+		header.add(Box.createVerticalStrut(3));
+		header.add(audioMeter);
+		header.add(Box.createVerticalStrut(6));
 		header.add(micDeviceLabel);
 		header.add(micDevice);
+		header.add(Box.createVerticalStrut(3));
+		header.add(micMeter);
 		header.add(Box.createVerticalStrut(2));
 		header.add(audioStatus);
 		header.add(Box.createVerticalStrut(4));
@@ -341,9 +348,11 @@ public final class RecordingsPanel extends PluginPanel
 		audioHeading.setVisible(on);
 		audioDeviceLabel.setVisible(on);
 		audioDevice.setVisible(on);
+		audioMeter.setVisible(on);
 		audioStatus.setVisible(on);
 		micDeviceLabel.setVisible(showMic);
 		micDevice.setVisible(showMic);
+		micMeter.setVisible(showMic);
 		if (!on)
 		{
 			return;
@@ -527,12 +536,27 @@ public final class RecordingsPanel extends PluginPanel
 	{
 		refresh();
 		audioPoll.start();
+		meterPoll.start();
 	}
 
 	@Override
 	public void onDeactivate()
 	{
 		audioPoll.stop();
+		meterPoll.stop();
+	}
+
+	private void refreshMeters()
+	{
+		if (!audioSetting.enabled())
+		{
+			return;
+		}
+		audioMeter.setLevel(service.audioLevel());
+		if (audioSetting.micEnabled())
+		{
+			micMeter.setLevel(service.micLevel());
+		}
 	}
 
 	@Subscribe

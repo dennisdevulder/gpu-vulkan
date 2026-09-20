@@ -53,6 +53,17 @@ final class AudioCapture
 		return running;
 	}
 
+	float level()
+	{
+		return running ? source.level() : 0f;
+	}
+
+	float micLevel()
+	{
+		return running && source instanceof MixingAudioSource
+			? ((MixingAudioSource) source).micLevel() : 0f;
+	}
+
 	/** @return false when the device could not be opened; recording continues without audio */
 	boolean start()
 	{

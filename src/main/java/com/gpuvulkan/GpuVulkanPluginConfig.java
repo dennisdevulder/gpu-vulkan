@@ -527,11 +527,13 @@ public interface GpuVulkanPluginConfig extends Config
 	)
 	default String recordingMicDevice() { return "default"; }
 
-	@Range(min = 0, max = 200)
+	@Range(min = 0, max = 1000)
 	@ConfigItem(
 		keyName = "recordingMicGain",
 		name = "Microphone level",
-		description = "Volume of the mixed-in microphone, as a percentage.",
+		description = "Volume of the mixed-in microphone, as a percentage. Capture devices "
+			+ "are read raw, without the gain your desktop applies, so this often needs to be "
+			+ "well above 100. Watch the meter in the Recordings panel.",
 		section = RECORDINGS_SECTION,
 		position = 10
 	)

@@ -197,6 +197,20 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 	}
 
 	@Override
+	public float audioLevel()
+	{
+		AudioCapture active = audio;
+		return active == null ? 0f : active.level();
+	}
+
+	@Override
+	public float micLevel()
+	{
+		AudioCapture active = audio;
+		return active == null ? 0f : active.micLevel();
+	}
+
+	@Override
 	public List<RecordingHandle> activeSessions()
 	{
 		return new ArrayList<>(sessions);

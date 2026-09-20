@@ -32,6 +32,7 @@ public final class SystemAudioSource implements AudioSource
 	private TargetDataLine line;
 	/** Channels the device actually gave us; mono is upmixed on read. */
 	private int capturedChannels = CHANNELS;
+	private volatile float level;
 	private byte[] monoScratch = new byte[0];
 
 	public SystemAudioSource(String deviceName)
@@ -124,7 +125,13 @@ public final class SystemAudioSource implements AudioSource
 			int available = Math.min(active.available(), buffer.length);
 			// Whole frames only: a split frame would swap the channels from here on.
 			available -= available % (CHANNELS * (BITS / 8));
-			return available <= 0 ? 0 : active.read(buffer, 0, available);
+			if (available <= 0)
+			{
+				return 0;
+			}
+			int read = active.read(buffer, 0, available);
+			level = AudioLevels.peak(buffer, read);
+			return read;
 		}
 
 		// Mono device: read half as many bytes and duplicate each sample.
@@ -147,7 +154,14 @@ public final class SystemAudioSource implements AudioSource
 			buffer[o + 2] = monoScratch[i];
 			buffer[o + 3] = monoScratch[i + 1];
 		}
+		level = AudioLevels.peak(monoScratch, read);
 		return read * 2;
+	}
+
+	@Override
+	public float level()
+	{
+		return level;
 	}
 
 	@Override

@@ -26,6 +26,12 @@ public interface AudioSource extends AutoCloseable
 	 */
 	int read(byte[] buffer) throws Exception;
 
+	/** Peak of the most recent block, 0..1. Drives the panel's meter. */
+	default float level()
+	{
+		return 0f;
+	}
+
 	@Override
 	void close();
 }
