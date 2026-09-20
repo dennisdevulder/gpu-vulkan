@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026, Dennis de Vulder
- * All rights reserved.
+ * SPDX-License-Identifier: BSD-2-Clause
  */
 package com.gpuvulkan;
 
