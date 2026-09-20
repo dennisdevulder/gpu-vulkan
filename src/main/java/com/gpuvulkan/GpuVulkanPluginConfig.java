@@ -488,10 +488,7 @@ public interface GpuVulkanPluginConfig extends Config
 	@ConfigItem(
 		keyName = "recordingAudioEnabled",
 		name = "Record audio",
-		description = "Record system audio alongside video, voice chat included. "
-			+ "The track is uncompressed: it plays in VLC and mpv, but WhatsApp, Discord "
-			+ "and browsers ignore it, so clips shared there will be silent. "
-			+ "On Linux you must route an output monitor into the capture device.",
+		description = "Record system audio alongside video, voice chat included.",
 		section = RECORDINGS_SECTION,
 		position = 6
 	)

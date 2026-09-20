@@ -92,8 +92,6 @@ public final class RecordingsPanel extends PluginPanel
 	private final JComboBox<String> kindFilter = new JComboBox<>();
 	private final JComboBox<String> audioDevice = new JComboBox<>();
 	private final JLabel audioStatus = new JLabel();
-	private final JLabel audioCaveat = new JLabel("<html>Sound plays in VLC/mpv. "
-		+ "Sites that re-encode (WhatsApp, Discord) drop it.</html>");
 	private final JTextField search = new JTextField();
 	private final JPanel livePanel = new JPanel();
 	private final JPanel listPanel = new JPanel();
@@ -203,9 +201,6 @@ public final class RecordingsPanel extends PluginPanel
 		header.add(status);
 		audioStatus.setFont(FontManager.getRunescapeSmallFont());
 		audioStatus.setAlignmentX(Component.LEFT_ALIGNMENT);
-		audioCaveat.setFont(FontManager.getRunescapeSmallFont());
-		audioCaveat.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
-		audioCaveat.setAlignmentX(Component.LEFT_ALIGNMENT);
 		audioDevice.setAlignmentX(Component.LEFT_ALIGNMENT);
 		audioDevice.setMaximumSize(new Dimension(Integer.MAX_VALUE, 24));
 		audioDevice.setToolTipText("Capture device for recorded audio");
@@ -223,7 +218,6 @@ public final class RecordingsPanel extends PluginPanel
 		header.add(Box.createVerticalStrut(4));
 		header.add(audioDevice);
 		header.add(audioStatus);
-		header.add(audioCaveat);
 		header.add(Box.createVerticalStrut(4));
 		header.add(livePanel);
 		header.add(Box.createVerticalStrut(4));
@@ -301,7 +295,6 @@ public final class RecordingsPanel extends PluginPanel
 		boolean on = audioSetting.enabled();
 		audioDevice.setVisible(on);
 		audioStatus.setVisible(on);
-		audioCaveat.setVisible(on);
 		if (!on)
 		{
 			return;
@@ -331,16 +324,12 @@ public final class RecordingsPanel extends PluginPanel
 		}
 		else if (service.audioSilent())
 		{
-			audioStatus.setText("Audio: silent, route a monitor source");
-			audioStatus.setToolTipText("The device is open but carrying no sound. System output "
-				+ "is not visible to Java as a capture device; it has to be routed into this "
-				+ "stream in your system's audio settings.");
+			audioStatus.setText("Audio: no signal");
 			audioStatus.setForeground(ColorScheme.PROGRESS_INPROGRESS_COLOR);
 		}
 		else
 		{
 			audioStatus.setText("Audio: capturing");
-			audioStatus.setToolTipText(null);
 			audioStatus.setForeground(ColorScheme.PROGRESS_COMPLETE_COLOR);
 		}
 	}
