@@ -506,6 +506,17 @@ public interface GpuVulkanPluginConfig extends Config
 	)
 	default String recordingAudioDevice() { return "default"; }
 
+	@Range(min = 0, max = 1000)
+	@ConfigItem(
+		keyName = "recordingAudioGain",
+		name = "Audio level",
+		description = "Volume of the recorded system audio, as a percentage. An output monitor "
+			+ "is captured after the playback volume, so a quiet desktop records quietly.",
+		section = RECORDINGS_SECTION,
+		position = 7
+	)
+	default int recordingAudioGain() { return 100; }
+
 	@ConfigItem(
 		keyName = "recordingMicEnabled",
 		name = "Include microphone",

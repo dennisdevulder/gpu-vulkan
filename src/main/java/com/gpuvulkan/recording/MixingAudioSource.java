@@ -12,25 +12,30 @@ import lombok.extern.slf4j.Slf4j;
  * it goes to the chat application, not to your speakers -- so without this you
  * hear everyone in a call except yourself.
  *
- * The primary drives the clock. Both lines run at the same rate, so the mic is
- * read to match and its own buffer absorbs jitter.
+ * The primary drives the clock. The two lines deliver in bursts of different
+ * sizes, so everything the secondary offers is queued and then consumed to
+ * match the primary's block; reading it opportunistically instead leaves gaps
+ * wherever the two did not happen to line up.
  */
 @Slf4j
 final class MixingAudioSource implements AudioSource
 {
+	/** Roughly 200ms at 48 kHz stereo. Past this the mic is unusably late. */
+	private static final int MAX_QUEUE_BYTES = 48_000 * 2 * 2 / 5;
+
 	private final AudioSource primary;
 	private final AudioSource secondary;
-	private final float gain;
+	private final java.io.ByteArrayOutputStream pending = new java.io.ByteArrayOutputStream();
+	private byte[] queued = new byte[0];
+	private int queuedOffset;
 	private byte[] scratch = new byte[0];
 	private boolean secondaryFailed;
-	private volatile float micLevel;
 	private volatile float mixedLevel;
 
-	MixingAudioSource(AudioSource primary, AudioSource secondary, int gainPercent)
+	MixingAudioSource(AudioSource primary, AudioSource secondary)
 	{
 		this.primary = primary;
 		this.secondary = secondary;
-		this.gain = Math.max(0, gainPercent) / 100f;
 	}
 
 	@Override
@@ -75,26 +80,71 @@ final class MixingAudioSource implements AudioSource
 			scratch = new byte[read];
 		}
 
-		int mixable = secondary.read(scratch);
+		drainSecondary();
+		int mixable = take(read);
 		if (mixable > 0)
 		{
-			// Post-gain and clamped: what the microphone actually contributes,
-			// not what the device delivered before the level was applied.
-			micLevel = Math.min(1f, AudioLevels.peak(scratch, mixable) * gain);
-			mix(buffer, scratch, Math.min(read, mixable));
+			mix(buffer, queued, queuedOffset - mixable, mixable);
 		}
 		mixedLevel = AudioLevels.peak(buffer, read);
 		return read;
 	}
 
+	/** Pulls everything the secondary currently offers into the queue. */
+	private void drainSecondary() throws Exception
+	{
+		for (int guard = 0; guard < 8; guard++)
+		{
+			if (scratch.length == 0)
+			{
+				scratch = new byte[8192];
+			}
+			int read = secondary.read(scratch);
+			if (read <= 0)
+			{
+				break;
+			}
+			pending.write(scratch, 0, read);
+			if (pending.size() >= MAX_QUEUE_BYTES)
+			{
+				break;
+			}
+		}
+	}
+
+	/**
+	 * Takes up to {@code wanted} bytes off the queue. Oldest audio is dropped
+	 * when the queue has run long, which is the only point drift is corrected.
+	 */
+	private int take(int wanted)
+	{
+		if (pending.size() > 0)
+		{
+			byte[] drained = pending.toByteArray();
+			pending.reset();
+			int keepFrom = Math.max(0, drained.length - MAX_QUEUE_BYTES);
+			int remaining = queued.length - queuedOffset;
+			byte[] merged = new byte[remaining + drained.length - keepFrom];
+			System.arraycopy(queued, queuedOffset, merged, 0, remaining);
+			System.arraycopy(drained, keepFrom, merged, remaining, drained.length - keepFrom);
+			queued = merged;
+			queuedOffset = 0;
+		}
+		int available = queued.length - queuedOffset;
+		int take = Math.min(wanted, available);
+		take -= take % 2;
+		queuedOffset += take;
+		return take;
+	}
+
 	/** Saturating sum: two full-scale sources would wrap without the clamp. */
-	private void mix(byte[] into, byte[] from, int length)
+	private void mix(byte[] into, byte[] from, int fromOffset, int length)
 	{
 		for (int i = 0; i + 1 < length; i += 2)
 		{
 			int a = (short) ((into[i + 1] << 8) | (into[i] & 0xFF));
-			int b = (short) ((from[i + 1] << 8) | (from[i] & 0xFF));
-			int sum = a + Math.round(b * gain);
+			int b = (short) ((from[fromOffset + i + 1] << 8) | (from[fromOffset + i] & 0xFF));
+			int sum = a + b;
 			if (sum > Short.MAX_VALUE)
 			{
 				sum = Short.MAX_VALUE;
@@ -118,7 +168,7 @@ final class MixingAudioSource implements AudioSource
 	/** The microphone's contribution to that signal, after gain. */
 	float micLevel()
 	{
-		return secondaryFailed ? 0f : micLevel;
+		return secondaryFailed ? 0f : secondary.level();
 	}
 
 	@Override

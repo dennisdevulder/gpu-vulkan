@@ -467,13 +467,15 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 
 	private AudioSource buildSource()
 	{
-		AudioSource system = new SystemAudioSource(config.recordingAudioDevice());
+		AudioSource system = new GainAudioSource(
+			new SystemAudioSource(config.recordingAudioDevice()), config.recordingAudioGain());
 		if (!config.recordingMicEnabled())
 		{
 			return system;
 		}
-		return new MixingAudioSource(system,
+		AudioSource mic = new GainAudioSource(
 			new SystemAudioSource(config.recordingMicDevice()), config.recordingMicGain());
+		return new MixingAudioSource(system, mic);
 	}
 
 	/** Sized from the clip window, so the pre-roll always has audio behind it. */
