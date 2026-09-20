@@ -533,7 +533,7 @@ public interface GpuVulkanPluginConfig extends Config
 		name = "Microphone level",
 		description = "Volume of the mixed-in microphone, as a percentage. Capture devices "
 			+ "are read raw, without the gain your desktop applies, so this often needs to be "
-			+ "well above 100. Watch the meter in the Recordings panel.",
+			+ "well above 100. The meter in the Recordings panel shows the result.",
 		section = RECORDINGS_SECTION,
 		position = 10
 	)

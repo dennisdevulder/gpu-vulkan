@@ -49,10 +49,10 @@ public interface RecordingService
 	/** True when capture is running but the line has carried only silence. */
 	boolean audioSilent();
 
-	/** Peak of the captured system audio, 0..1. */
+	/** Peak of the signal being recorded, 0..1. */
 	float audioLevel();
 
-	/** Peak of the mixed-in microphone before gain, 0..1. */
+	/** The microphone's contribution to that signal after gain, 0..1. */
 	float micLevel();
 
 	/** Sessions currently being written. */

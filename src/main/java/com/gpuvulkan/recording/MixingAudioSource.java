@@ -24,6 +24,7 @@ final class MixingAudioSource implements AudioSource
 	private byte[] scratch = new byte[0];
 	private boolean secondaryFailed;
 	private volatile float micLevel;
+	private volatile float mixedLevel;
 
 	MixingAudioSource(AudioSource primary, AudioSource secondary, int gainPercent)
 	{
@@ -77,9 +78,12 @@ final class MixingAudioSource implements AudioSource
 		int mixable = secondary.read(scratch);
 		if (mixable > 0)
 		{
-			micLevel = AudioLevels.peak(scratch, mixable);
+			// Post-gain and clamped: what the microphone actually contributes,
+			// not what the device delivered before the level was applied.
+			micLevel = Math.min(1f, AudioLevels.peak(scratch, mixable) * gain);
 			mix(buffer, scratch, Math.min(read, mixable));
 		}
+		mixedLevel = AudioLevels.peak(buffer, read);
 		return read;
 	}
 
@@ -104,13 +108,14 @@ final class MixingAudioSource implements AudioSource
 		}
 	}
 
+	/** The summed signal, which is what reaches the file. */
 	@Override
 	public float level()
 	{
-		return primary.level();
+		return mixedLevel;
 	}
 
-	/** Pre-gain level of the mixed-in microphone. */
+	/** The microphone's contribution to that signal, after gain. */
 	float micLevel()
 	{
 		return secondaryFailed ? 0f : micLevel;
