@@ -92,6 +92,8 @@ public final class RecordingsPanel extends PluginPanel
 	private final JComboBox<String> kindFilter = new JComboBox<>();
 	private final JComboBox<String> audioDevice = new JComboBox<>();
 	private final JLabel audioStatus = new JLabel();
+	private final JLabel audioCaveat = new JLabel("<html>Sound plays in VLC/mpv. "
+		+ "Sites that re-encode (WhatsApp, Discord) drop it.</html>");
 	private final JTextField search = new JTextField();
 	private final JPanel livePanel = new JPanel();
 	private final JPanel listPanel = new JPanel();
@@ -201,6 +203,11 @@ public final class RecordingsPanel extends PluginPanel
 		header.add(status);
 		audioStatus.setFont(FontManager.getRunescapeSmallFont());
 		audioStatus.setAlignmentX(Component.LEFT_ALIGNMENT);
+		audioCaveat.setFont(FontManager.getRunescapeSmallFont());
+		audioCaveat.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		audioCaveat.setAlignmentX(Component.LEFT_ALIGNMENT);
+		audioCaveat.setToolTipText("Convert before sharing: "
+			+ "ffmpeg -i clip.mp4 -c:v copy -c:a aac -b:a 160k out.mp4");
 		audioDevice.setAlignmentX(Component.LEFT_ALIGNMENT);
 		audioDevice.setMaximumSize(new Dimension(Integer.MAX_VALUE, 24));
 		audioDevice.setToolTipText("Capture device for recorded audio");
@@ -218,6 +225,7 @@ public final class RecordingsPanel extends PluginPanel
 		header.add(Box.createVerticalStrut(4));
 		header.add(audioDevice);
 		header.add(audioStatus);
+		header.add(audioCaveat);
 		header.add(Box.createVerticalStrut(4));
 		header.add(livePanel);
 		header.add(Box.createVerticalStrut(4));
@@ -295,6 +303,7 @@ public final class RecordingsPanel extends PluginPanel
 		boolean on = audioSetting.enabled();
 		audioDevice.setVisible(on);
 		audioStatus.setVisible(on);
+		audioCaveat.setVisible(on);
 		if (!on)
 		{
 			return;
