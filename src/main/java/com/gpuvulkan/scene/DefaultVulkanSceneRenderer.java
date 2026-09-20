@@ -33,11 +33,10 @@ final class DefaultVulkanSceneRenderer implements VulkanSceneRenderer
 {
 	private final SceneRenderer sceneRenderer;
 
-	DefaultVulkanSceneRenderer(VulkanDevice device, FrameSync sync,
-		RenderPass renderPass, TextureArray textureArray,
+	DefaultVulkanSceneRenderer(VulkanDevice device, FrameSync sync, ScenePipelines pipelines,
 		DrawCallbackStats stats)
 	{
-		this.sceneRenderer = new SceneRenderer(device, sync, renderPass, textureArray, stats);
+		this.sceneRenderer = new SceneRenderer(device, sync, pipelines, stats);
 	}
 
 	@Override
@@ -182,31 +181,19 @@ final class DefaultVulkanSceneRenderer implements VulkanSceneRenderer
 	@Override
 	public void recordDraw(VulkanFrameContext frame)
 	{
-		sceneRenderer.recordDraw(frame.commandBuffer(), frame.sceneMvp(), frame.brightness(),
-			frame.cameraX(), frame.cameraY(), frame.cameraZ(), frame.drawDistanceTiles(), frame.fogDepthTiles(),
-			frame.fogR(), frame.fogG(), frame.fogB(), frame.gameTick(),
-			frame.textureLightMode(), frame.colorBlindMode(), frame.colorBlindIntensity(),
-			frame.smoothBanding());
+		sceneRenderer.recordDraw(frame.commandBuffer(), frame.sceneMvp(), frame);
 	}
 
 	/** Phase-split variants so sub-worldview draws can interleave between
 	 *  the toplevel's opaque and blended-alpha phases. */
 	void recordOpaque(VulkanFrameContext frame)
 	{
-		sceneRenderer.recordOpaque(frame.commandBuffer(), frame.sceneMvp(), frame.brightness(),
-			frame.cameraX(), frame.cameraY(), frame.cameraZ(), frame.drawDistanceTiles(), frame.fogDepthTiles(),
-			frame.fogR(), frame.fogG(), frame.fogB(), frame.gameTick(),
-			frame.textureLightMode(), frame.colorBlindMode(), frame.colorBlindIntensity(),
-			frame.smoothBanding(), 0, 0, 0);
+		sceneRenderer.recordOpaque(frame.commandBuffer(), frame.sceneMvp(), frame, SceneEntity.TOP_LEVEL);
 	}
 
 	void recordAlpha(VulkanFrameContext frame)
 	{
-		sceneRenderer.recordAlpha(frame.commandBuffer(), frame.sceneMvp(), frame.brightness(),
-			frame.cameraX(), frame.cameraY(), frame.cameraZ(), frame.drawDistanceTiles(), frame.fogDepthTiles(),
-			frame.fogR(), frame.fogG(), frame.fogB(), frame.gameTick(),
-			frame.textureLightMode(), frame.colorBlindMode(), frame.colorBlindIntensity(),
-			frame.smoothBanding(), 0, 0, 0);
+		sceneRenderer.recordAlpha(frame.commandBuffer(), frame.sceneMvp(), frame, SceneEntity.TOP_LEVEL);
 	}
 
 	@Override

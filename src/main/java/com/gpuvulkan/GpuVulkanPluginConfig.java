@@ -77,7 +77,7 @@ public interface GpuVulkanPluginConfig extends Config
 	@ConfigSection(
 		name = "Debug",
 		description = "Runtime diagnostics for Vulkan memory and scene capture.",
-		position = 9,
+		position = 11,
 		closedByDefault = true
 	)
 	String DEBUG_SECTION = "debug";
@@ -89,6 +89,22 @@ public interface GpuVulkanPluginConfig extends Config
 		closedByDefault = true
 	)
 	String IN_FLIGHT_ENCODING_SECTION = "inFlightEncoding";
+
+	@ConfigSection(
+		name = "Recordings",
+		description = "Save clips when something happens, and keep the library tidy.",
+		position = 9,
+		closedByDefault = true
+	)
+	String RECORDINGS_SECTION = "recordings";
+
+	@ConfigSection(
+		name = "Recorded events",
+		description = "Which in-game events save a clip.",
+		position = 10,
+		closedByDefault = true
+	)
+	String RECORDING_EVENTS_SECTION = "recordingEvents";
 
 	// --------------------------------------------------------------- top level
 
@@ -399,6 +415,168 @@ public interface GpuVulkanPluginConfig extends Config
 		position = 6
 	)
 	default Keybind inFlightEncodingHotkey() { return Keybind.NOT_SET; }
+
+	@Range(min = 16, max = 512)
+	@ConfigItem(
+		keyName = "inFlightEncodingRingBudgetMb",
+		name = "Buffer memory cap",
+		description = "Maximum heap the rolling buffer may use. The client has a limited heap, so at high bitrates this caps the pre-roll before the buffer length does.",
+		section = IN_FLIGHT_ENCODING_SECTION,
+		position = 7
+	)
+	default int inFlightEncodingRingBudgetMb() { return 64; }
+
+	// -------------------------------------------------------------- recordings
+
+	@ConfigItem(
+		keyName = "recordingsEnabled",
+		name = "Save recordings",
+		description = "Write clips to the recordings library and list them in the sidebar.",
+		section = RECORDINGS_SECTION,
+		position = 0
+	)
+	default boolean recordingsEnabled() { return false; }
+
+	@ConfigItem(
+		keyName = "recordingSessionsEnabled",
+		name = "Allow long recordings",
+		description = "Let an event record for as long as it lasts instead of a fixed clip. Written straight to disk, so length is bounded by the cap below rather than by memory.",
+		section = RECORDINGS_SECTION,
+		position = 1
+	)
+	default boolean recordingSessionsEnabled() { return false; }
+
+	@Range(min = 30, max = 3600)
+	@ConfigItem(
+		keyName = "recordingSessionMaxSeconds",
+		name = "Long recording cap",
+		description = "Hard limit on a single long recording. It is finalised and saved when the cap is reached.",
+		section = RECORDINGS_SECTION,
+		position = 2
+	)
+	default int recordingSessionMaxSeconds() { return 600; }
+
+	@ConfigItem(
+		keyName = "recordingSessionHotkey",
+		name = "Long recording hotkey",
+		description = "Start or stop a long recording by hand.",
+		section = RECORDINGS_SECTION,
+		position = 3
+	)
+	default Keybind recordingSessionHotkey() { return Keybind.NOT_SET; }
+
+	@Range(min = 0, max = 512000)
+	@ConfigItem(
+		keyName = "recordingDiskBudgetMb",
+		name = "Library size cap",
+		description = "Delete the oldest unpinned recordings once the library passes this size. 0 disables the limit.",
+		section = RECORDINGS_SECTION,
+		position = 4
+	)
+	default int recordingDiskBudgetMb() { return 10_000; }
+
+	@Range(min = 0, max = 3650)
+	@ConfigItem(
+		keyName = "recordingRetentionDays",
+		name = "Keep recordings for",
+		description = "Delete unpinned recordings older than this many days. 0 keeps them forever.",
+		section = RECORDINGS_SECTION,
+		position = 5
+	)
+	default int recordingRetentionDays() { return 0; }
+
+	@ConfigItem(
+		keyName = "recordingChatFeedback",
+		name = "Announce in chat",
+		description = "Post a game message when a recording is saved.",
+		section = RECORDINGS_SECTION,
+		position = 6
+	)
+	default boolean recordingChatFeedback() { return true; }
+
+	// --------------------------------------------------------- recorded events
+
+	@ConfigItem(
+		keyName = "recordLevelUps",
+		name = "Level ups",
+		description = "Save a clip when a skill levels up.",
+		section = RECORDING_EVENTS_SECTION,
+		position = 0
+	)
+	default boolean recordLevelUps() { return true; }
+
+	@ConfigItem(
+		keyName = "recordDeaths",
+		name = "Deaths",
+		description = "Save a clip when you die.",
+		section = RECORDING_EVENTS_SECTION,
+		position = 1
+	)
+	default boolean recordDeaths() { return true; }
+
+	@ConfigItem(
+		keyName = "recordLoot",
+		name = "Loot",
+		description = "Save a clip when a kill drops loot worth more than the threshold below.",
+		section = RECORDING_EVENTS_SECTION,
+		position = 2
+	)
+	default boolean recordLoot() { return true; }
+
+	@Range(min = 0, max = 1_000_000_000)
+	@ConfigItem(
+		keyName = "recordLootMinimumValue",
+		name = "Loot threshold",
+		description = "Minimum total drop value, in coins, worth recording.",
+		section = RECORDING_EVENTS_SECTION,
+		position = 3
+	)
+	default int recordLootMinimumValue() { return 500_000; }
+
+	@ConfigItem(
+		keyName = "recordPets",
+		name = "Pets",
+		description = "Save a clip on a pet drop.",
+		section = RECORDING_EVENTS_SECTION,
+		position = 4
+	)
+	default boolean recordPets() { return true; }
+
+	@ConfigItem(
+		keyName = "recordQuests",
+		name = "Quest completions",
+		description = "Save a clip when a quest is completed.",
+		section = RECORDING_EVENTS_SECTION,
+		position = 5
+	)
+	default boolean recordQuests() { return true; }
+
+	@ConfigItem(
+		keyName = "recordCollectionLog",
+		name = "Collection log slots",
+		description = "Save a clip when a new collection log slot is filled.",
+		section = RECORDING_EVENTS_SECTION,
+		position = 6
+	)
+	default boolean recordCollectionLog() { return true; }
+
+	@ConfigItem(
+		keyName = "recordClueScrolls",
+		name = "Clue scroll rewards",
+		description = "Save a clip when a clue casket is opened.",
+		section = RECORDING_EVENTS_SECTION,
+		position = 7
+	)
+	default boolean recordClueScrolls() { return true; }
+
+	@ConfigItem(
+		keyName = "recordBossWaves",
+		name = "Wave-based content",
+		description = "Record each Fight Cave or Inferno wave in full as a long recording. Needs long recordings enabled.",
+		section = RECORDING_EVENTS_SECTION,
+		position = 8
+	)
+	default boolean recordBossWaves() { return false; }
 
 	// ------------------------------------------------------------------- Debug
 

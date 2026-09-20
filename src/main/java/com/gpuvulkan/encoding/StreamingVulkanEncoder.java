@@ -37,6 +37,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Deque;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK10.*;
@@ -62,6 +63,9 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
     private final VulkanCapabilities caps;
 
     private NalRing nalRing = new NalRing();
+    /** Extra destinations for encoded frames, e.g. a session streaming to its
+     *  own mp4. Copy-on-write: the submit path iterates this every frame. */
+    private final List<NalSink> sinks = new CopyOnWriteArrayList<>();
     private final List<EncodeSegment> segments = new ArrayList<>();
     private final Deque<PendingMeta> inFlight = new ArrayDeque<>();
 
@@ -103,7 +107,86 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
         }
         drainPending();
         inFlight.clear();
-        nalRing = new NalRing(clamped);
+        nalRing = nalRing.resized(clamped);
+    }
+
+    /**
+     * Caps the heap the rolling buffer may hold. This, not the frame count, is
+     * what keeps the ring inside the client's heap at high bitrates; exceeding
+     * it shortens the available pre-roll rather than growing the ring.
+     */
+    public synchronized void setRingByteBudget(long bytes)
+    {
+        nalRing.setByteBudget(bytes);
+    }
+
+    /** Current slot capacity of the rolling buffer. */
+    public synchronized int ringCapacity()
+    {
+        return nalRing.capacity();
+    }
+
+    /** Bytes the rolling buffer currently holds. */
+    public synchronized long ringBytes()
+    {
+        return nalRing.bytes();
+    }
+
+    /** Frames the rolling buffer dropped to stay inside its byte budget. */
+    public synchronized long ringDroppedToBudget()
+    {
+        return nalRing.droppedToBudget();
+    }
+
+    /**
+     * Attaches a sink and replays everything already buffered from
+     * {@code preRollFromMs} onward into it, starting at the newest IDR at or
+     * before that time.
+     *
+     * Replay and attach happen under the encoder lock, so a session gets its
+     * pre-roll and the live stream with no gap and no duplicated frame.
+     *
+     * @return the timestamp of the first replayed frame, or -1 when nothing
+     *         was replayed (no IDR in the buffer yet).
+     */
+    public synchronized long attachSink(NalSink sink, long preRollFromMs)
+    {
+        if (sink == null)
+        {
+            throw new IllegalArgumentException("sink must not be null");
+        }
+        drainPending();
+
+        long firstReplayed = -1L;
+        if (currentSegment != null)
+        {
+            sink.segmentStarted(currentSegment.info());
+
+            List<EncodedFrame> all = nalRing.snapshot();
+            int idrIdx = findIdrIndex(all, currentSegment.id, preRollFromMs, Long.MAX_VALUE);
+            if (idrIdx >= 0)
+            {
+                List<EncodedFrame> preRoll = collectFromIdr(all, idrIdx, currentSegment.id, Long.MAX_VALUE);
+                for (EncodedFrame frame : preRoll)
+                {
+                    sink.frame(frame);
+                }
+                if (!preRoll.isEmpty())
+                {
+                    firstReplayed = preRoll.get(0).timestampMs;
+                }
+            }
+        }
+        sinks.add(sink);
+        return firstReplayed;
+    }
+
+    public synchronized void detachSink(NalSink sink)
+    {
+        if (sink != null && sinks.remove(sink))
+        {
+            sink.detached(null);
+        }
     }
 
     /** One-second IDR cadence keeps saved clips close to the requested pre-roll. */
@@ -142,7 +225,22 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
     @Override
     public synchronized void stop()
     {
+        stop(new IllegalStateException("encoder stopped"));
+    }
+
+    /**
+     * Stops as part of a restart, e.g. a swapchain rebuild. Sinks are told so
+     * a recording can continue into a new file rather than end.
+     */
+    public synchronized void stopForRestart()
+    {
+        stop(new EncoderRestart());
+    }
+
+    private synchronized void stop(Throwable detachCause)
+    {
         drainPending();
+        detachAll(detachCause);
         nalRing.reset();
         segments.clear();
         inFlight.clear();
@@ -181,7 +279,7 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
                 PendingMeta drained = inFlight.poll();
                 if (drained != null && prev != null)
                 {
-                    nalRing.put(toSlot(drained, prev));
+                    publish(toFrame(drained, prev));
                 }
             }
             inFlight.add(meta);
@@ -209,7 +307,7 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
     {
         drainPending();
 
-        List<NalRing.Slot> all = nalRing.snapshot();
+        List<EncodedFrame> all = nalRing.snapshot();
         if (all.isEmpty()) return null;
 
         int targetSegment = pickLatestSegment(all, startTime, endTime);
@@ -222,7 +320,7 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
             return null;
         }
 
-        List<NalRing.Slot> chosen = collectFromIdr(all, idrIdx, targetSegment, endTime);
+        List<EncodedFrame> chosen = collectFromIdr(all, idrIdx, targetSegment, endTime);
         if (chosen.isEmpty()) return null;
 
         EncodeSegment seg = findSegment(targetSegment);
@@ -236,10 +334,10 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
      * timestamp falls inside {@code [startTime, endTime]}. Returns {@code -1}
      * if no segment is in window.
      */
-    static int pickLatestSegment(List<NalRing.Slot> slots, long startTime, long endTime)
+    static int pickLatestSegment(List<EncodedFrame> slots, long startTime, long endTime)
     {
         int target = -1;
-        for (NalRing.Slot s : slots)
+        for (EncodedFrame s : slots)
         {
             if (s.timestampMs >= startTime && s.timestampMs <= endTime && s.segmentId > target)
             {
@@ -256,13 +354,13 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
      * preceded it. Returns {@code -1} if the segment has no IDR in the
      * window.
      */
-    static int findIdrIndex(List<NalRing.Slot> slots, int segmentId, long startTime, long endTime)
+    static int findIdrIndex(List<EncodedFrame> slots, int segmentId, long startTime, long endTime)
     {
         int idrIdx = -1;
         for (int i = 0; i < slots.size(); i++)
         {
-            NalRing.Slot s = slots.get(i);
-            if (s.segmentId != segmentId || !s.isIdr) continue;
+            EncodedFrame s = slots.get(i);
+            if (s.segmentId != segmentId || !s.idr) continue;
             if (s.timestampMs > endTime) break;
             if (s.timestampMs <= startTime)
             {
@@ -285,26 +383,26 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
      * Collects slots starting at {@code startIdx} until either the segment
      * changes or a slot's timestamp exceeds {@code endTime}.
      */
-    static List<NalRing.Slot> collectFromIdr(List<NalRing.Slot> slots, int startIdx,
+    static List<EncodedFrame> collectFromIdr(List<EncodedFrame> slots, int startIdx,
                                              int segmentId, long endTime)
     {
-        List<NalRing.Slot> chosen = new ArrayList<>();
+        List<EncodedFrame> chosen = new ArrayList<>();
         for (int i = startIdx; i < slots.size(); i++)
         {
-            NalRing.Slot s = slots.get(i);
+            EncodedFrame s = slots.get(i);
             if (s.segmentId != segmentId || s.timestampMs > endTime) break;
             chosen.add(s);
         }
         return chosen;
     }
 
-    private ClipData assembleMp4(List<NalRing.Slot> chosen, EncodeSegment seg)
+    private ClipData assembleMp4(List<EncodedFrame> chosen, EncodeSegment seg)
     {
         ByteArrayOutputStream bs = new ByteArrayOutputStream(chosen.size() * 50000);
         long[] timestamps = new long[chosen.size()];
         for (int i = 0; i < chosen.size(); i++)
         {
-            NalRing.Slot s = chosen.get(i);
+            EncodedFrame s = chosen.get(i);
             try
             {
                 bs.write(s.nalUnits);
@@ -343,6 +441,7 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
         if (closed) return;
         closed = true;
         drainPending();
+        detachAll(new IllegalStateException("encoder closed"));
         nalRing.reset();
         segments.clear();
         inFlight.clear();
@@ -383,6 +482,7 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
                 sourceWidth, sourceHeight, codedWidth, codedHeight, sourceFps,
                 spsPps, firstTimestamp);
             segments.add(currentSegment);
+            notifySegment(currentSegment.info());
         }
         catch (RuntimeException e)
         {
@@ -402,15 +502,83 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
             PendingMeta m = inFlight.poll();
             if (m != null && nal != null)
             {
-                nalRing.put(toSlot(m, nal));
+                publish(toFrame(m, nal));
             }
         }
         inFlight.clear();
     }
 
-    private NalRing.Slot toSlot(PendingMeta m, byte[] nal)
+    private EncodedFrame toFrame(PendingMeta m, byte[] nal)
     {
-        return new NalRing.Slot(m.segmentId, m.timestampMs, m.isIdr, m.frameNum, m.needsBlur, nal);
+        return new EncodedFrame(m.segmentId, m.timestampMs, m.isIdr, m.frameNum, m.needsBlur, nal);
+    }
+
+    /**
+     * Hands one frame to the ring and every attached sink. A sink that throws
+     * is detached rather than allowed to kill the capture -- a broken session
+     * writer must not take the recorder down with it.
+     */
+    private void publish(EncodedFrame frame)
+    {
+        nalRing.put(frame);
+        for (NalSink sink : sinks)
+        {
+            try
+            {
+                sink.frame(frame);
+            }
+            catch (RuntimeException e)
+            {
+                log.warn("detaching sink {} after it threw", sink.getClass().getSimpleName(), e);
+                if (sinks.remove(sink))
+                {
+                    safeDetach(sink, e);
+                }
+            }
+        }
+    }
+
+    private void notifySegment(EncodedSegmentInfo info)
+    {
+        for (NalSink sink : sinks)
+        {
+            try
+            {
+                sink.segmentStarted(info);
+            }
+            catch (RuntimeException e)
+            {
+                log.warn("detaching sink {} after it threw on segment start",
+                    sink.getClass().getSimpleName(), e);
+                if (sinks.remove(sink))
+                {
+                    safeDetach(sink, e);
+                }
+            }
+        }
+    }
+
+    private void detachAll(Throwable cause)
+    {
+        for (NalSink sink : sinks)
+        {
+            if (sinks.remove(sink))
+            {
+                safeDetach(sink, cause);
+            }
+        }
+    }
+
+    private void safeDetach(NalSink sink, Throwable cause)
+    {
+        try
+        {
+            sink.detached(cause);
+        }
+        catch (RuntimeException ignored)
+        {
+            // A sink failing to clean up is not the encoder's problem.
+        }
     }
 
     private EncodeSegment findSegment(int id)

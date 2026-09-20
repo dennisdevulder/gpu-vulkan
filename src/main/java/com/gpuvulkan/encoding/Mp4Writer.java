@@ -182,7 +182,8 @@ public final class Mp4Writer
         return buf.array();
     }
 
-    private byte[] buildFtyp()
+    /** Package-private so StreamingMp4Writer can emit the same header. */
+    static byte[] buildFtyp()
     {
         // ftyp: major_brand='isom', minor_version=512, compatible_brands=['isom','iso2','avc1','mp41']
         BoxBuilder b = new BoxBuilder("ftyp");
@@ -195,7 +196,8 @@ public final class Mp4Writer
         return b.build();
     }
 
-    private byte[] buildMoov(List<Sample> samples, int mdatPayloadStart)
+    /** Package-private: StreamingMp4Writer appends moov after a streamed mdat. */
+    byte[] buildMoov(List<Sample> samples, int mdatPayloadStart)
     {
         long totalDuration = 0;
         for (Sample s : samples) totalDuration += s.durationTicks;

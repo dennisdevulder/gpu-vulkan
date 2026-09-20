@@ -43,15 +43,15 @@ import org.lwjgl.vulkan.VkCommandBuffer;
 @Slf4j
 final class SubWorldViewManager implements AutoCloseable
 {
-	/** Ships are a handful of zones; these are generous. ~12 MB per worldview. */
-	private static final int SUB_STATIC_VERTICES = 400_000;
+	/** Seed only: captureScene grows the static arena to measured demand, so a
+	 *  rowboat does not pay a galleon's worst case. */
+	private static final int SUB_STATIC_VERTICES = 48_000;
 	private static final int SUB_FRAME_VERTICES = 40_000;
 	private static final double JAU_PER_RADIAN = 2048.0 / (2.0 * Math.PI);
 
 	private final VulkanDevice device;
 	private final FrameSync sync;
-	private final RenderPass renderPass;
-	private final TextureArray textureArray;
+	private final ScenePipelines pipelines;
 	private final DrawCallbackStats stats;
 
 	private final Map<Integer, SubView> views = new HashMap<>();
@@ -59,29 +59,36 @@ final class SubWorldViewManager implements AutoCloseable
 	private static final class SubView
 	{
 		final SceneRenderer renderer;
+		final float[] entityMatrix = new float[16];
+		/** world * entity for this frame; reused so a pass costs no allocation. */
+		final float[] composed = new float[16];
 		Scene scene;
 		int baseX;
 		int baseY;
 		boolean visible;
 		boolean placed;
-		final float[] entityMatrix = new float[16];
-		int entityTx;
-		int entityTz;
-		int entityYawJau;
+		SceneEntity entity = SceneEntity.TOP_LEVEL;
 
 		SubView(SceneRenderer renderer)
 		{
 			this.renderer = renderer;
 		}
+
+		void setEntity(int translateX, int translateZ, int yawJau, int tint)
+		{
+			if (!entity.is(translateX, translateZ, yawJau, tint))
+			{
+				entity = new SceneEntity(translateX, translateZ, yawJau, tint);
+			}
+		}
 	}
 
-	SubWorldViewManager(VulkanDevice device, FrameSync sync, RenderPass renderPass,
-		TextureArray textureArray, DrawCallbackStats stats)
+	SubWorldViewManager(VulkanDevice device, FrameSync sync, ScenePipelines pipelines,
+		DrawCallbackStats stats)
 	{
 		this.device = device;
 		this.sync = sync;
-		this.renderPass = renderPass;
-		this.textureArray = textureArray;
+		this.pipelines = pipelines;
 		this.stats = stats;
 	}
 
@@ -101,11 +108,11 @@ final class SubWorldViewManager implements AutoCloseable
 		SubView view = views.get(scene.getWorldViewId());
 		if (view == null)
 		{
-			view = new SubView(new SceneRenderer(device, sync, renderPass, textureArray, stats,
+			view = new SubView(new SceneRenderer(device, sync, pipelines, stats,
 				SUB_STATIC_VERTICES, SUB_FRAME_VERTICES, false));
 			views.put(scene.getWorldViewId(), view);
 			capture(view, scene);
-			log.info("Sub-worldview {} renderer created", scene.getWorldViewId());
+			log.debug("Sub-worldview {} renderer created", scene.getWorldViewId());
 		}
 		else if (scene != view.scene || scene.getBaseX() != view.baseX || scene.getBaseY() != view.baseY)
 		{
@@ -145,9 +152,10 @@ final class SubWorldViewManager implements AutoCloseable
 		System.arraycopy(m, 0, view.entityMatrix, 0, 16);
 		// Yaw from the rotY cells (column-major: m[0]=cos, m[8]=sin); pitch/roll
 		// would only perturb fog, never clip position.
-		view.entityTx = Math.round(m[12]);
-		view.entityTz = Math.round(m[14]);
-		view.entityYawJau = (int) Math.round(Math.atan2(m[8], m[0]) * JAU_PER_RADIAN) & 2047;
+		int yawJau = (int) Math.round(Math.atan2(m[8], m[0]) * JAU_PER_RADIAN) & 2047;
+		// The override can change while the worldview lives, so re-read it here
+		// rather than at capture.
+		view.setEntity(Math.round(m[12]), Math.round(m[14]), yawJau, SceneEntity.packTint(scene));
 		view.placed = true;
 	}
 
@@ -196,7 +204,7 @@ final class SubWorldViewManager implements AutoCloseable
 		if (view != null)
 		{
 			view.renderer.close();
-			log.info("Sub-worldview {} renderer freed", worldViewId);
+			log.debug("Sub-worldview {} renderer freed", worldViewId);
 		}
 	}
 
@@ -228,29 +236,15 @@ final class SubWorldViewManager implements AutoCloseable
 			{
 				continue;
 			}
-			float[] composed = frame.sceneMvp().clone();
-			Mat4Ops.mul(composed, view.entityMatrix);
+			System.arraycopy(frame.sceneMvp(), 0, view.composed, 0, 16);
+			Mat4Ops.mul(view.composed, view.entityMatrix);
 			if (opaque)
 			{
-				view.renderer.recordOpaque(cmd, composed, frame.brightness(),
-					frame.cameraX(), frame.cameraY(), frame.cameraZ(),
-					frame.drawDistanceTiles(), frame.fogDepthTiles(),
-					frame.fogR(), frame.fogG(), frame.fogB(),
-					frame.gameTick(), frame.textureLightMode(),
-					frame.colorBlindMode(), frame.colorBlindIntensity(),
-					frame.smoothBanding(),
-					view.entityTx, view.entityTz, view.entityYawJau);
+				view.renderer.recordOpaque(cmd, view.composed, frame, view.entity);
 			}
 			else
 			{
-				view.renderer.recordAlpha(cmd, composed, frame.brightness(),
-					frame.cameraX(), frame.cameraY(), frame.cameraZ(),
-					frame.drawDistanceTiles(), frame.fogDepthTiles(),
-					frame.fogR(), frame.fogG(), frame.fogB(),
-					frame.gameTick(), frame.textureLightMode(),
-					frame.colorBlindMode(), frame.colorBlindIntensity(),
-					frame.smoothBanding(),
-					view.entityTx, view.entityTz, view.entityYawJau);
+				view.renderer.recordAlpha(cmd, view.composed, frame, view.entity);
 			}
 		}
 	}

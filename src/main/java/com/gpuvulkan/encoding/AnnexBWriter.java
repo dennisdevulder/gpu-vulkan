@@ -135,7 +135,8 @@ public final class AnnexBWriter
         return out;
     }
 
-    private static int matchStartCode(byte[] data, int i, int n)
+    /** Package-private: StreamingMp4Writer scans without building a NAL list. */
+    static int matchStartCode(byte[] data, int i, int n)
     {
         if (i + 4 <= n && data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 0 && data[i + 3] == 1)
         {

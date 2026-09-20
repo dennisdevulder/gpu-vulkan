@@ -56,7 +56,17 @@ import net.runelite.api.Texture;
 import net.runelite.api.TextureProvider;
 import net.runelite.api.TileObject;
 import net.runelite.api.hooks.DrawCallbacks;
+import com.gpuvulkan.recording.RecordingContext;
+import com.gpuvulkan.recording.RecordingKindRegistry;
+import com.gpuvulkan.recording.TriggerRegistry;
+import com.gpuvulkan.recording.triggers.BuiltInTriggers;
+import com.gpuvulkan.recording.RecordingRequest;
+import com.gpuvulkan.recording.RecordingStore;
+import com.gpuvulkan.recording.VulkanRecordingService;
 import net.runelite.client.callback.ClientThread;
+import net.runelite.client.chat.ChatMessageManager;
+import net.runelite.client.chat.QueuedMessage;
+import net.runelite.client.eventbus.EventBus;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ConfigChanged;
@@ -64,7 +74,11 @@ import net.runelite.client.input.KeyManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.plugins.PluginManager;
+import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.DrawManager;
+import net.runelite.client.ui.NavigationButton;
+import net.runelite.client.util.ImageUtil;
+import com.gpuvulkan.recording.ui.RecordingsPanel;
 import net.runelite.client.ui.overlay.OverlayManager;
 import net.runelite.client.util.HotkeyListener;
 
@@ -98,6 +112,18 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	@Inject
 	private KeyManager keyManager;
 
+	@Inject
+	private EventBus eventBus;
+
+	@Inject
+	private ChatMessageManager chatMessageManager;
+
+	@Inject
+	private ClientToolbar clientToolbar;
+
+	@Inject
+	private net.runelite.client.game.ItemManager itemManager;
+
 	private final HotkeyListener inFlightClipHotkeyListener = new HotkeyListener(() -> config.inFlightEncodingHotkey())
 	{
 		@Override
@@ -117,6 +143,16 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		}
 	};
 
+	private final HotkeyListener recordingSessionHotkeyListener =
+		new HotkeyListener(() -> config.recordingSessionHotkey())
+	{
+		@Override
+		public void hotkeyPressed()
+		{
+			toggleManualSession();
+		}
+	};
+
 	private Disposables disposables;
 	private VulkanInstance instance;
 	private VulkanSurface surface;
@@ -129,6 +165,12 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	private TextureArray textureArray;
 	private RenderExtensions renderExtensions;
 	private InFlightClipRecorder inFlightClipRecorder;
+	private VulkanRecordingService recordingService;
+	private final RecordingKindRegistry recordingKinds = new RecordingKindRegistry();
+	private volatile com.gpuvulkan.recording.RecordingHandle manualSession;
+	private TriggerRegistry recordingTriggers;
+	private RecordingsPanel recordingsPanel;
+	private NavigationButton recordingsNavButton;
 	private com.gpuvulkan.gfx.Renderer gfx;
 	private net.runelite.rlawt.AWTContext awtContext;
 	private Framebuffers framebuffers;
@@ -154,6 +196,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	private boolean pendingSceneIdentityRecapture;
 	private static boolean shutdownHookRegistered;
 	private final VulkanExtensionQueue extensionQueue = new VulkanExtensionQueue();
+	private ScenePipelines scenePipelines;
 	private SubWorldViewManager subWorldViews;
 
 	/** Read by the JVM shutdown hook to find the live instance — must be
@@ -175,6 +218,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		log.info("Starting GPU (Vulkan)");
 		shuttingDown = false;
 		keyManager.registerKeyListener(inFlightClipHotkeyListener);
+		keyManager.registerKeyListener(recordingSessionHotkeyListener);
 		runtimeConfig = new ClientRuntimeConfig(client, config);
 		// Refuse to coexist with stock GPU — two owners of the rlawt context
 		// corrupt JAWT state and crash the JVM on disable.
@@ -422,16 +466,21 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 
 		regionManager = new RegionManager();
 
+		// Every scene renderer binds the same pipelines and descriptor set, so
+		// a worldview spawning costs an arena and nothing else.
+		scenePipelines = new ScenePipelines(device, renderPass, textureArray);
+		disposables.add(scenePipelines);
+
 		// Escape hatch: BaseRenderer falls back to the single recordDraw path
 		// and sub-scene callbacks drop.
 		if (!Boolean.getBoolean("vkgpu.disableSubWorldViews"))
 		{
-			subWorldViews = new SubWorldViewManager(device, sync, renderPass, textureArray, stats);
+			subWorldViews = new SubWorldViewManager(device, sync, scenePipelines, stats);
 			disposables.add(subWorldViews);
 		}
 
 		renderExtensions = new RenderExtensions(
-			new DefaultVulkanRenderContext(client, config, gfx, device, sync, renderPass, textureArray, stats));
+			new DefaultVulkanRenderContext(client, config, gfx, device, sync, renderPass, scenePipelines, stats));
 		renderExtensions.register(new BaseRenderer(subWorldViews));
 		if (config.upscalingMode() == GpuVulkanPluginConfig.UpscalingMode.FSR1)
 		{
@@ -439,6 +488,14 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		}
 		inFlightClipRecorder = new InFlightClipRecorder(config, device);
 		renderExtensions.register(inFlightClipRecorder);
+		recordingService = new VulkanRecordingService(inFlightClipRecorder,
+			new RecordingStore(RecordingStore.defaultRoot(), recordingKinds),
+			recordingKinds, eventBus, config, this::announceRecording);
+		recordingService.start();
+		recordingTriggers = new TriggerRegistry(new RecordingContext(recordingService, client,
+			clientThread, eventBus, itemManager, config));
+		recordingTriggers.bindAll(BuiltInTriggers.all());
+		addRecordingsPanel();
 		extensionQueue.attachQueued(renderExtensions);
 		disposables.add(renderExtensions);
 
@@ -551,7 +608,10 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		textureArray = null;
 		renderExtensions = null;
 		inFlightClipRecorder = null;
+		recordingService = null;
+		recordingTriggers = null;
 		subWorldViews = null;
+		scenePipelines = null;
 		gfx = null;
 		framebuffers = null;
 		sync = null;
@@ -568,6 +628,20 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		startRequested = false;
 		shuttingDown = true;
 		keyManager.unregisterKeyListener(inFlightClipHotkeyListener);
+		keyManager.unregisterKeyListener(recordingSessionHotkeyListener);
+		removeRecordingsPanel();
+		if (recordingTriggers != null)
+		{
+			recordingTriggers.unbindAll();
+			recordingTriggers = null;
+		}
+		if (recordingService != null)
+		{
+			// Before the renderer teardown: a session must close its file
+			// while the encoder is still alive.
+			recordingService.shutdown();
+			recordingService = null;
+		}
 		removeMacResizeWake();
 		removeDebugOverlay();
 		// Unpublish first so a concurrent shutdown hook sees null and bails,
@@ -679,6 +753,12 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		net.runelite.api.GameState state = ev.getGameState();
 		if (state.getState() < net.runelite.api.GameState.LOADING.getState())
 		{
+			if (recordingService != null)
+			{
+				// A session must not span a logout: close it while the file
+				// can still be finalised.
+				recordingService.stopAllSessions();
+			}
 			renderExtensions.invalidateCapturedScene();
 			recordCapturedSceneIdentity(null);
 			if (subWorldViews != null)
@@ -726,22 +806,119 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 
 	public CompletableFuture<Path> requestInFlightClip()
 	{
-		InFlightClipRecorder recorder = inFlightClipRecorder;
-		if (recorder == null)
-		{
-			return CompletableFuture.failedFuture(new IllegalStateException("Vulkan renderer is not running"));
-		}
-		return recorder.saveClip();
+		return requestInFlightClip(-1);
 	}
 
+	/**
+	 * Saves a clip from the rolling buffer. Routed through the recording
+	 * service when recordings are on, so the clip lands in the library; the
+	 * direct path stays for users who only ever wanted the hotkey.
+	 */
 	public CompletableFuture<Path> requestInFlightClip(int postSeconds)
 	{
+		VulkanRecordingService service = recordingService;
+		if (service != null && service.available())
+		{
+			return service.clip(RecordingRequest
+				.of(RecordingKindRegistry.QUICK_CAPTURE)
+				.description("clip")
+				.postRollSeconds(postSeconds)
+				.build())
+				.thenApply(entry -> RecordingStore.defaultRoot()
+					.resolve(recordingKinds.resolve(entry.kindId()).folder())
+					.resolve(entry.fileName()));
+		}
+
 		InFlightClipRecorder recorder = inFlightClipRecorder;
 		if (recorder == null)
 		{
 			return CompletableFuture.failedFuture(new IllegalStateException("Vulkan renderer is not running"));
 		}
-		return recorder.saveClip(postSeconds);
+		return postSeconds < 0 ? recorder.saveClip() : recorder.saveClip(postSeconds);
+	}
+
+	/** The recording API. Null until the renderer has started. */
+	public com.gpuvulkan.recording.RecordingService recordingService()
+	{
+		return recordingService;
+	}
+
+	private void addRecordingsPanel()
+	{
+		if (recordingsPanel != null || recordingService == null)
+		{
+			return;
+		}
+		recordingsPanel = new RecordingsPanel(recordingService, RecordingStore.defaultRoot());
+		// The panel listens on the same public events any other plugin would.
+		eventBus.register(recordingsPanel);
+		recordingsNavButton = NavigationButton.builder()
+			.tooltip("Recordings")
+			.icon(ImageUtil.loadImageResource(GpuVulkanPlugin.class, "/com/gpuvulkan/recordings_icon.png"))
+			.priority(9)
+			.panel(recordingsPanel)
+			.build();
+		clientToolbar.addNavigation(recordingsNavButton);
+	}
+
+	private void removeRecordingsPanel()
+	{
+		if (recordingsNavButton != null)
+		{
+			clientToolbar.removeNavigation(recordingsNavButton);
+			recordingsNavButton = null;
+		}
+		if (recordingsPanel != null)
+		{
+			eventBus.unregister(recordingsPanel);
+			recordingsPanel = null;
+		}
+	}
+
+	private void toggleManualSession()
+	{
+		VulkanRecordingService service = recordingService;
+		if (service == null)
+		{
+			return;
+		}
+		com.gpuvulkan.recording.RecordingHandle open = manualSession;
+		if (open == null || !open.active())
+		{
+			// A rollover hands the recording to a new handle, so the field can
+			// be stale while a manual session is still running.
+			open = service.activeSessions().stream()
+				.filter(h -> RecordingKindRegistry.QUICK_CAPTURE.equals(h.kind()))
+				.findFirst()
+				.orElse(null);
+		}
+		if (open != null && open.active())
+		{
+			manualSession = null;
+			open.stop();
+			return;
+		}
+		manualSession = service.session(RecordingRequest
+			.of(RecordingKindRegistry.QUICK_CAPTURE)
+			.description("manual")
+			.session(true)
+			.build());
+		manualSession.result().whenComplete((entry, error) ->
+		{
+			manualSession = null;
+			if (error != null)
+			{
+				log.warn("Long recording failed: {}", error.getMessage());
+			}
+		});
+	}
+
+	private void announceRecording(String message)
+	{
+		chatMessageManager.queue(QueuedMessage.builder()
+			.type(net.runelite.api.ChatMessageType.CONSOLE)
+			.runeLiteFormattedMessage(message)
+			.build());
 	}
 
 	private void markExtensionBackendDetached()

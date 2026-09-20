@@ -52,7 +52,8 @@ public final class LocalMp4Writer
             .writeToBytes(built.avccBitstream, built.samples);
     }
 
-    private static int[] computeDurations(int sampleCount, int fps, long[] timestampsMs)
+    /** Package-private: shared with StreamingMp4Writer. */
+    static int[] computeDurations(int sampleCount, int fps, long[] timestampsMs)
     {
         int[] durations = new int[sampleCount];
         int fallbackTicks = Math.max(1, TIMESCALE / Math.max(1, fps));
