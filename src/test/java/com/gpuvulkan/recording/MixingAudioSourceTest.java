@@ -251,6 +251,97 @@ public class MixingAudioSourceTest
 		assertEquals(100, sampleAt(buffer, 20));
 	}
 
+	/** Alternates L and R values so a channel swap is detectable. */
+	private static final class StereoBurst implements AudioSource
+	{
+		private final int bytesPerRead;
+		private int budget;
+		/** Absolute sample index, so the L/R pattern continues across bursts. */
+		private int sampleIndex;
+
+		StereoBurst(int bytesPerRead, int totalBytes)
+		{
+			this.bytesPerRead = bytesPerRead;
+			this.budget = totalBytes;
+		}
+
+		@Override
+		public int sampleRate()
+		{
+			return 48000;
+		}
+
+		@Override
+		public int channels()
+		{
+			return 2;
+		}
+
+		@Override
+		public void start()
+		{
+		}
+
+		@Override
+		public int read(byte[] buffer)
+		{
+			int n = Math.min(Math.min(bytesPerRead, buffer.length), budget);
+			for (int i = 0; i + 1 < n; i += 2)
+			{
+				// Left = 1000, right = 2000, by absolute sample position.
+				short v = (short) ((sampleIndex++ % 2 == 0) ? 1000 : 2000);
+				buffer[i] = (byte) (v & 0xFF);
+				buffer[i + 1] = (byte) (v >> 8);
+			}
+			budget -= n;
+			return n;
+		}
+
+		@Override
+		public void close()
+		{
+		}
+	}
+
+	@Test
+	public void micChannelsStayAlignedWhenBurstsSplitAFrame() throws Exception
+	{
+		// 6-byte bursts are one and a half stereo frames. Taking an odd number
+		// of samples would start the next block on the mic's right channel.
+		MixingAudioSource mix = new MixingAudioSource(
+			new Tone((short) 0, 100), new StereoBurst(6, 4096));
+		mix.start();
+
+		byte[] buffer = new byte[64];
+		for (int block = 0; block < 4; block++)
+		{
+			mix.read(buffer);
+			for (int frame = 0; frame < 16; frame++)
+			{
+				assertEquals("left, block " + block + " frame " + frame, 1000, sampleAt(buffer, frame * 2));
+				assertEquals("right, block " + block + " frame " + frame, 2000, sampleAt(buffer, frame * 2 + 1));
+			}
+		}
+	}
+
+	@Test
+	public void aLateMicDropsItsOldestAudioNotItsNewest() throws Exception
+	{
+		// Far more mic audio than the primary consumes: the queue must cap,
+		// and what survives must be the most recent.
+		MixingAudioSource mix = new MixingAudioSource(
+			new Tone((short) 0, 100), new Burst((short) 7, 8192, 1 << 20));
+		mix.start();
+
+		byte[] buffer = new byte[64];
+		for (int i = 0; i < 50; i++)
+		{
+			mix.read(buffer);
+		}
+		// Still voiced after heavy over-delivery, so the cap did not empty it.
+		assertEquals(7, sampleAt(buffer, 0));
+	}
+
 	@Test
 	public void closingReleasesBothDevices() throws Exception
 	{

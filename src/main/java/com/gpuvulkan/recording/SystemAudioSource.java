@@ -14,12 +14,8 @@ import javax.sound.sampled.TargetDataLine;
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * Captures from a {@code javax.sound.sampled} input line.
- *
- * This records the system, not the game: RuneLite exposes sound effect ids,
- * never PCM, so there is nothing game-specific to capture. On Linux the line
- * appears in the PipeWire graph and a monitor source can be routed into it;
- * elsewhere it needs a loopback device to exist.
+ * Captures from a {@code javax.sound.sampled} input line. RuneLite exposes no
+ * PCM, so this records the system; on Linux a monitor source is routed in.
  */
 @Slf4j
 public final class SystemAudioSource implements AudioSource
@@ -29,12 +25,9 @@ public final class SystemAudioSource implements AudioSource
 	private static final int BITS = 16;
 
 	private final String deviceName;
-	/** Substitute the default device when the named one is missing. Right for
-	 *  the main capture; wrong for a microphone, where the default is usually
-	 *  the output monitor and substituting it doubles the system audio. */
+	/** Wrong for a microphone: the default is usually the output monitor. */
 	private final boolean fallbackToDefault;
 	private TargetDataLine line;
-	/** Channels the device actually gave us; mono is upmixed on read. */
 	private int capturedChannels = CHANNELS;
 	private volatile float level;
 	private byte[] monoScratch = new byte[0];
@@ -65,8 +58,7 @@ public final class SystemAudioSource implements AudioSource
 	@Override
 	public void start() throws Exception
 	{
-		// Headset microphones are usually mono-only, so stereo cannot be
-		// assumed. Whatever opens is upmixed to stereo on read.
+		// Headset mics are usually mono-only; whatever opens is upmixed on read.
 		AudioFormat stereo = new AudioFormat(SAMPLE_RATE, BITS, CHANNELS, true, false);
 		AudioFormat mono = new AudioFormat(SAMPLE_RATE, BITS, 1, true, false);
 
@@ -83,8 +75,7 @@ public final class SystemAudioSource implements AudioSource
 		}
 
 		capturedChannels = format.getChannels();
-		// A second of slack: the recorder polls on its own cadence and must not
-		// lose samples when a frame takes longer than expected.
+		// A second of slack against a slow frame.
 		opened.open(format, SAMPLE_RATE * capturedChannels * (BITS / 8));
 		opened.start();
 		line = opened;
@@ -102,8 +93,7 @@ public final class SystemAudioSource implements AudioSource
 		{
 			for (Mixer.Info mi : AudioSystem.getMixerInfo())
 			{
-				// Stable name first; the raw mixer name carries an ALSA card
-				// number that changes across reboots and replugs.
+				// The mixer name carries a card number that moves across replugs.
 				if (!deviceName.equals(stableName(mi)) && !deviceName.equals(mi.getName()))
 				{
 					continue;
@@ -129,10 +119,7 @@ public final class SystemAudioSource implements AudioSource
 		}
 	}
 
-	/**
-	 * Identifies a device by what it is rather than where it is plugged in:
-	 * the description names the product, the mixer name only its card slot.
-	 */
+	/** The product name from the description; the mixer name is only a card slot. */
 	static String stableName(Mixer.Info mi)
 	{
 		String desc = mi.getDescription();
@@ -218,11 +205,7 @@ public final class SystemAudioSource implements AudioSource
 		}
 	}
 
-	/**
-	 * Mixers that can capture at all, by stable name. Mono counts: most
-	 * headset microphones offer nothing else. The JVM's own "[default]" entry
-	 * is skipped, since "default" already stands for it.
-	 */
+	/** Capture-capable mixers by stable name, mono included. */
 	public static List<String> captureDevices()
 	{
 		DataLine.Info stereo = new DataLine.Info(TargetDataLine.class,

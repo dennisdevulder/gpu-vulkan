@@ -183,6 +183,16 @@ final class AudioCapture
 		if (active != null)
 		{
 			active.interrupt();
+			try
+			{
+				// Let a read in progress return before the line goes away
+				// underneath it.
+				active.join(500);
+			}
+			catch (InterruptedException e)
+			{
+				Thread.currentThread().interrupt();
+			}
 		}
 		source.close();
 		ring.reset();
