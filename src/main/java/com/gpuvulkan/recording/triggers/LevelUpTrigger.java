@@ -78,7 +78,8 @@ public final class LevelUpTrigger extends EventBusTrigger
 	public void onStatChanged(StatChanged event)
 	{
 		Skill skill = event.getSkill();
-		if (skill == null)
+		if (skill == null || context == null
+			|| context.client().getGameState() != GameState.LOGGED_IN)
 		{
 			return;
 		}

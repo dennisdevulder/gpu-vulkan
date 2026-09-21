@@ -28,7 +28,10 @@ import com.gpuvulkan.recording.RecordingKind;
 import com.gpuvulkan.recording.RecordingKindRegistry;
 import com.gpuvulkan.recording.RecordingRequest;
 import net.runelite.api.gameval.VarPlayerID;
+import net.runelite.api.GameState;
+import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.VarbitChanged;
+import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.util.Text;
@@ -39,9 +42,8 @@ import net.runelite.client.util.Text;
  */
 public final class QuestTrigger extends EventBusTrigger
 {
-	/** The "Quest complete!" scroll; the child holds the name. */
-	private static final int QUEST_COMPLETE_GROUP = 153;
-	private static final int QUEST_COMPLETE_CHILD = 4;
+	/** Child of the completion scroll that holds the quest name. */
+	private static final int QUEST_NAME_CHILD = 4;
 
 	private int knownQuestPoints = -1;
 
@@ -58,9 +60,21 @@ public final class QuestTrigger extends EventBusTrigger
 	}
 
 	@Subscribe
+	public void onGameStateChanged(GameStateChanged event)
+	{
+		GameState state = event.getGameState();
+		if (state == GameState.LOGGING_IN || state == GameState.HOPPING
+			|| state == GameState.LOGIN_SCREEN)
+		{
+			// Varps arrive in bulk on login; the first value seen is a baseline.
+			knownQuestPoints = -1;
+		}
+	}
+
+	@Subscribe
 	public void onVarbitChanged(VarbitChanged event)
 	{
-		if (context == null)
+		if (context == null || context.client().getGameState() != GameState.LOGGED_IN)
 		{
 			return;
 		}
@@ -71,17 +85,22 @@ public final class QuestTrigger extends EventBusTrigger
 		{
 			return;
 		}
+		// A completion always shows the scroll; a varp load never does. Without
+		// it this is a login or a hop, not a quest.
 		String name = questName();
+		if (name == null)
+		{
+			return;
+		}
 		clip(RecordingRequest.of(kind())
-			.description(name == null ? "quest complete" : name)
+			.description(name)
 			.meta("questPoints", String.valueOf(points))
-			// The completion scroll is the shot worth keeping.
 			.postRollSeconds(8));
 	}
 
 	private String questName()
 	{
-		Widget widget = context.client().getWidget(QUEST_COMPLETE_GROUP, QUEST_COMPLETE_CHILD);
+		Widget widget = context.client().getWidget(InterfaceID.QUESTSCROLL, QUEST_NAME_CHILD);
 		if (widget == null || widget.isHidden() || widget.getText() == null)
 		{
 			return null;
