@@ -29,6 +29,10 @@ public final class SystemAudioSource implements AudioSource
 	private static final int BITS = 16;
 
 	private final String deviceName;
+	/** Substitute the default device when the named one is missing. Right for
+	 *  the main capture; wrong for a microphone, where the default is usually
+	 *  the output monitor and substituting it doubles the system audio. */
+	private final boolean fallbackToDefault;
 	private TargetDataLine line;
 	/** Channels the device actually gave us; mono is upmixed on read. */
 	private int capturedChannels = CHANNELS;
@@ -37,7 +41,13 @@ public final class SystemAudioSource implements AudioSource
 
 	public SystemAudioSource(String deviceName)
 	{
+		this(deviceName, true);
+	}
+
+	public SystemAudioSource(String deviceName, boolean fallbackToDefault)
+	{
 		this.deviceName = deviceName;
+		this.fallbackToDefault = fallbackToDefault;
 	}
 
 	@Override
@@ -92,12 +102,19 @@ public final class SystemAudioSource implements AudioSource
 		{
 			for (Mixer.Info mi : AudioSystem.getMixerInfo())
 			{
-				if (!deviceName.equals(mi.getName()))
+				// Stable name first; the raw mixer name carries an ALSA card
+				// number that changes across reboots and replugs.
+				if (!deviceName.equals(stableName(mi)) && !deviceName.equals(mi.getName()))
 				{
 					continue;
 				}
 				Mixer mixer = AudioSystem.getMixer(mi);
 				return mixer.isLineSupported(info) ? (TargetDataLine) mixer.getLine(info) : null;
+			}
+			if (!fallbackToDefault)
+			{
+				throw new IllegalStateException("audio device '" + deviceName
+					+ "' is not present. Available: " + captureDevices());
 			}
 			log.warn("Audio device '{}' is unavailable, using the default instead. Available: {}",
 				deviceName, captureDevices());
@@ -110,6 +127,31 @@ public final class SystemAudioSource implements AudioSource
 		{
 			return null;
 		}
+	}
+
+	/**
+	 * Identifies a device by what it is rather than where it is plugged in:
+	 * the description names the product, the mixer name only its card slot.
+	 */
+	static String stableName(Mixer.Info mi)
+	{
+		String desc = mi.getDescription();
+		if (desc == null || desc.isEmpty())
+		{
+			return mi.getName();
+		}
+		String prefix = "Direct Audio Device: ";
+		if (desc.startsWith(prefix))
+		{
+			desc = desc.substring(prefix.length());
+		}
+		// ALSA repeats the subdevice name; keep the first two distinct parts.
+		String[] parts = desc.split(",\\s*");
+		if (parts.length >= 2 && !parts[0].equals(parts[1]))
+		{
+			return parts[0] + ", " + parts[1];
+		}
+		return parts[0];
 	}
 
 	@Override
@@ -177,8 +219,9 @@ public final class SystemAudioSource implements AudioSource
 	}
 
 	/**
-	 * Mixers that can capture at all. Mono counts: most headset microphones
-	 * offer nothing else, and requiring stereo hid them from the picker.
+	 * Mixers that can capture at all, by stable name. Mono counts: most
+	 * headset microphones offer nothing else. The JVM's own "[default]" entry
+	 * is skipped, since "default" already stands for it.
 	 */
 	public static List<String> captureDevices()
 	{
@@ -189,10 +232,18 @@ public final class SystemAudioSource implements AudioSource
 		List<String> names = new ArrayList<>();
 		for (Mixer.Info mi : AudioSystem.getMixerInfo())
 		{
+			if (mi.getName().endsWith("[default]"))
+			{
+				continue;
+			}
 			Mixer mixer = AudioSystem.getMixer(mi);
 			if (mixer.isLineSupported(stereo) || mixer.isLineSupported(mono))
 			{
-				names.add(mi.getName());
+				String name = stableName(mi);
+				if (!names.contains(name))
+				{
+					names.add(name);
+				}
 			}
 		}
 		return names;

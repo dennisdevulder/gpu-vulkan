@@ -211,6 +211,13 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 	}
 
 	@Override
+	public boolean micUnavailable()
+	{
+		AudioCapture active = audio;
+		return active != null && active.micFailed();
+	}
+
+	@Override
 	public List<RecordingHandle> activeSessions()
 	{
 		return new ArrayList<>(sessions);
@@ -473,8 +480,10 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 		{
 			return system;
 		}
+		// No fallback for the mic: the default is usually the output monitor,
+		// and substituting it would mix the system audio in a second time.
 		AudioSource mic = new GainAudioSource(
-			new SystemAudioSource(config.recordingMicDevice()), config.recordingMicGain());
+			new SystemAudioSource(config.recordingMicDevice(), false), config.recordingMicGain());
 		return new MixingAudioSource(system, mic);
 	}
 

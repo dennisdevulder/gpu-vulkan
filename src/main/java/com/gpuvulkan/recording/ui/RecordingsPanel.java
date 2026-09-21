@@ -404,6 +404,11 @@ public final class RecordingsPanel extends PluginPanel
 			audioStatus.setText("Audio: no signal");
 			audioStatus.setForeground(ColorScheme.PROGRESS_INPROGRESS_COLOR);
 		}
+		else if (audioSetting.micEnabled() && service.micUnavailable())
+		{
+			audioStatus.setText("Audio: capturing, microphone not found");
+			audioStatus.setForeground(ColorScheme.PROGRESS_INPROGRESS_COLOR);
+		}
 		else
 		{
 			audioStatus.setText("Audio: capturing");

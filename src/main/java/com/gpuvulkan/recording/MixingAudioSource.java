@@ -165,6 +165,11 @@ final class MixingAudioSource implements AudioSource
 		return mixedLevel;
 	}
 
+	boolean micFailed()
+	{
+		return secondaryFailed;
+	}
+
 	/** The microphone's contribution to that signal, after gain. */
 	float micLevel()
 	{

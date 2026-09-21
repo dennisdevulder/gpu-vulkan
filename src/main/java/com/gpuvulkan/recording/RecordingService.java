@@ -55,6 +55,9 @@ public interface RecordingService
 	/** The microphone's contribution to that signal after gain, 0..1. */
 	float micLevel();
 
+	/** True when a microphone was requested but is not present or would not open. */
+	boolean micUnavailable();
+
 	/** Sessions currently being written. */
 	List<RecordingHandle> activeSessions();
 

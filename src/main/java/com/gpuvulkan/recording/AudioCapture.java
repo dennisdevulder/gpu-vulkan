@@ -58,6 +58,13 @@ final class AudioCapture
 		return running ? source.level() : 0f;
 	}
 
+	/** True when a microphone was requested but could not be opened. */
+	boolean micFailed()
+	{
+		return running && source instanceof MixingAudioSource
+			&& ((MixingAudioSource) source).micFailed();
+	}
+
 	float micLevel()
 	{
 		return running && source instanceof MixingAudioSource
