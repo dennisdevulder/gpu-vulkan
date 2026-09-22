@@ -78,7 +78,7 @@ public final class DiscordUploader
 	{
 		this.service = service;
 		this.config = config;
-		// Recordings are large and the default read timeout is for API calls.
+		// Defaults are tuned for API calls, not multi-megabyte uploads.
 		this.client = client.newBuilder()
 			.writeTimeout(10, TimeUnit.MINUTES)
 			.readTimeout(2, TimeUnit.MINUTES)

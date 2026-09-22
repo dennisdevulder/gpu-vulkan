@@ -98,8 +98,7 @@ final class AudioCapture
 				}
 				if (read == 0)
 				{
-					// The line had nothing ready; sleeping a frame keeps this
-					// thread off a spin without risking overrun on a 1s buffer.
+					// Off the spin; the 1s line buffer absorbs the wait.
 					Thread.sleep(5);
 					continue;
 				}
@@ -204,8 +203,7 @@ final class AudioCapture
 			active.interrupt();
 			try
 			{
-				// Let a read in progress return before the line goes away
-				// underneath it.
+				// Let a read in progress return before the line closes.
 				active.join(500);
 			}
 			catch (InterruptedException e)

@@ -37,8 +37,6 @@ final class ThumbnailCapture
 	}
 
 	/**
-	 * Requests the next frame and writes it to {@code destination}.
-	 *
 	 * DrawManager delivers inline on the render thread, between submit and
 	 * present, so scaling and encoding are handed to a worker rather than
 	 * sitting in front of the present call.
