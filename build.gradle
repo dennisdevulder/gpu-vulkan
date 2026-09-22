@@ -66,6 +66,7 @@ dependencies {
 	// runtimeOnly, so neither lands in pluginJar.
 	testRuntimeOnly 'com.google.code.gson:gson:2.8.5'
 	testRuntimeOnly 'org.slf4j:slf4j-api:1.7.36'
+	testRuntimeOnly 'com.squareup.okhttp3:okhttp:3.14.9'
 }
 
 configurations {

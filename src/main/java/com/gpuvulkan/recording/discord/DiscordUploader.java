@@ -14,6 +14,7 @@ import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.concurrent.Executors;
+import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import lombok.extern.slf4j.Slf4j;
@@ -53,6 +54,8 @@ public final class DiscordUploader
 	private static final long MIN_SPACING_MS = 5_000;
 	/** Past this the backlog is stale rather than useful. */
 	private static final int MAX_QUEUED = 16;
+	/** discordapp.com is the legacy domain and still issued in older setups. */
+	private static final String[] ALLOWED_HOSTS = {"discord.com", "discordapp.com"};
 
 	private final RecordingService service;
 	private final GpuVulkanPluginConfig config;
@@ -219,7 +222,7 @@ public final class DiscordUploader
 		return seconds > 0 ? name + " (" + seconds + "s)" : name;
 	}
 
-	/** Null when unset or not a usable URL, which is how this stays opt-in. */
+	/** Null when unset or not a usable webhook, which is how this stays opt-in. */
 	private HttpUrl webhook()
 	{
 		String configured = config.discordWebhookUrl();
@@ -227,11 +230,53 @@ public final class DiscordUploader
 		{
 			return null;
 		}
-		HttpUrl url = HttpUrl.parse(configured.trim());
+		HttpUrl url = parseWebhook(configured);
 		if (url == null)
 		{
-			log.debug("Discord webhook is not a valid URL");
+			log.warn("Discord webhook is not a Discord webhook URL; nothing will be posted");
 		}
 		return url;
+	}
+
+	/**
+	 * Accepts only an https Discord webhook endpoint. A recording is gameplay
+	 * footage with a player name on it, so a mistyped or pasted-in host must
+	 * not quietly become somewhere to send it.
+	 *
+	 * @return the parsed URL, or null when it is not one
+	 */
+	static HttpUrl parseWebhook(String configured)
+	{
+		HttpUrl url = configured == null ? null : HttpUrl.parse(configured.trim());
+		if (url == null || !"https".equals(url.scheme()) || !isDiscordHost(url.host()))
+		{
+			return null;
+		}
+		List<String> segments = url.pathSegments();
+		if (segments.size() < 4 || !"api".equals(segments.get(0)))
+		{
+			return null;
+		}
+		// /api/webhooks/{id}/{token} or /api/v10/webhooks/{id}/{token}
+		int webhooks = "webhooks".equals(segments.get(1)) ? 1
+			: segments.size() > 2 && "webhooks".equals(segments.get(2)) ? 2 : -1;
+		if (webhooks < 0 || segments.size() < webhooks + 3)
+		{
+			return null;
+		}
+		return segments.get(webhooks + 1).isEmpty() || segments.get(webhooks + 2).isEmpty()
+			? null : url;
+	}
+
+	private static boolean isDiscordHost(String host)
+	{
+		for (String allowed : ALLOWED_HOSTS)
+		{
+			if (allowed.equals(host) || host.endsWith("." + allowed))
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 }
