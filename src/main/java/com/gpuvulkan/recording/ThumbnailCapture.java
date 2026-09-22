@@ -37,9 +37,11 @@ final class ThumbnailCapture
 	}
 
 	/**
-	 * Requests the next frame and writes it to {@code destination}. The
-	 * callback runs off the client thread once the image arrives; a recording
-	 * that finishes first simply has no thumbnail.
+	 * Requests the next frame and writes it to {@code destination}.
+	 *
+	 * DrawManager delivers inline on the render thread, between submit and
+	 * present, so scaling and encoding are handed to a worker rather than
+	 * sitting in front of the present call.
 	 */
 	void capture(Path destination, Consumer<Boolean> onDone)
 	{
@@ -50,7 +52,8 @@ final class ThumbnailCapture
 		}
 		try
 		{
-			drawManager.requestNextFrameListener(image -> onDone.accept(write(image, destination)));
+			drawManager.requestNextFrameListener(image -> new Thread(
+				() -> onDone.accept(write(image, destination)), "vkgpu-thumbnail-write").start());
 		}
 		catch (RuntimeException e)
 		{

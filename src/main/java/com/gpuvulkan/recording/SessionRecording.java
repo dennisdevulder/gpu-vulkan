@@ -29,7 +29,6 @@ import com.gpuvulkan.encoding.EncodedSegmentInfo;
 import com.gpuvulkan.encoding.EncoderRestart;
 import com.gpuvulkan.encoding.NalSink;
 import com.gpuvulkan.encoding.StreamingMp4Writer;
-import lombok.extern.slf4j.Slf4j;
 import java.io.IOException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -70,6 +69,7 @@ final class SessionRecording implements NalSink, RecordingHandle
 	private final String continuationOf;
 	private final AudioCapture audio;
 	private long audioCursorMs = -1L;
+	private long audioEpochMs = -1L;
 	private final CompletableFuture<RecordingEntry> result = new CompletableFuture<>();
 	private final AtomicBoolean stopping = new AtomicBoolean();
 
@@ -274,6 +274,15 @@ final class SessionRecording implements NalSink, RecordingHandle
 		{
 			for (AudioRing.Block block : audio.drain(audioCursorMs, timestampMs))
 			{
+				if (audioEpochMs < 0)
+				{
+					audioEpochMs = block.timestampMs;
+				}
+				// Keep the track on wall clock. A dropped block would otherwise
+				// pull everything after it earlier, since the sample table is a
+				// single constant-rate run.
+				long expected = (block.timestampMs - audioEpochMs) * audio.sampleRate() / 1000L;
+				w.writeSilence(expected - w.audioFrames());
 				w.writeAudio(block.pcm, 0, block.pcm.length);
 			}
 		}

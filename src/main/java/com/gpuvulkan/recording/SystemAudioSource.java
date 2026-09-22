@@ -9,6 +9,7 @@ import java.util.List;
 import javax.sound.sampled.AudioFormat;
 import javax.sound.sampled.AudioSystem;
 import javax.sound.sampled.DataLine;
+import javax.sound.sampled.LineUnavailableException;
 import javax.sound.sampled.Mixer;
 import javax.sound.sampled.TargetDataLine;
 import lombok.extern.slf4j.Slf4j;
@@ -91,7 +92,20 @@ public final class SystemAudioSource implements AudioSource
 					continue;
 				}
 				Mixer mixer = AudioSystem.getMixer(mi);
-				return mixer.isLineSupported(info) ? (TargetDataLine) mixer.getLine(info) : null;
+				if (!mixer.isLineSupported(info))
+				{
+					return null;
+				}
+				try
+				{
+					return (TargetDataLine) mixer.getLine(info);
+				}
+				catch (LineUnavailableException e)
+				{
+					// Busy, often the previous capture still closing during a
+					// device switch. Null lets the caller retry in mono.
+					return null;
+				}
 			}
 			log.warn("Audio device '{}' is unavailable, using the default instead. Available: {}",
 				deviceName, captureDevices());
@@ -100,7 +114,7 @@ public final class SystemAudioSource implements AudioSource
 		{
 			return AudioSystem.getTargetDataLine(format);
 		}
-		catch (IllegalArgumentException e)
+		catch (IllegalArgumentException | LineUnavailableException e)
 		{
 			return null;
 		}

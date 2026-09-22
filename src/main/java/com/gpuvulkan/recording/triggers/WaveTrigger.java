@@ -128,7 +128,15 @@ public final class WaveTrigger extends EventBusTrigger
 			session = null;
 			return;
 		}
-		if (sessionRegion >= 0 && currentRegion() != sessionRegion)
+		int region = currentRegion();
+		if (sessionRegion < 0)
+		{
+			// The player is briefly null across the loading screen that precedes
+			// wave 1, so the region is latched on the first tick that has one.
+			sessionRegion = region;
+			return;
+		}
+		if (region >= 0 && region != sessionRegion)
 		{
 			// Left the arena: teleported out, or the run finished.
 			stopSession();

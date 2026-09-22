@@ -451,6 +451,15 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 			}
 			return;
 		}
+		if (active != null && active.failed())
+		{
+			// The device went away mid-session. Drop the corpse so the branch
+			// below rebuilds it, rather than recording silence for the rest of
+			// the session with the panel reporting success.
+			audio = null;
+			active.stop();
+			active = null;
+		}
 		if (active == null)
 		{
 			AudioCapture started = new AudioCapture(buildSource(), audioBudgetBytes());
@@ -550,6 +559,11 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 
 	private void publishProgress()
 	{
+		AudioCapture active = audio;
+		if (active != null && active.failed())
+		{
+			syncAudioCapture();
+		}
 		for (SessionRecording session : sessions)
 		{
 			if (session.active())

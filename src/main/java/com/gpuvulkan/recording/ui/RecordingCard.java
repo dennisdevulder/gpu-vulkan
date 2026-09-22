@@ -53,6 +53,8 @@ final class RecordingCard extends JPanel
 	private static final int THUMB_WIDTH = 64;
 	private static final int THUMB_HEIGHT = 36;
 
+	private ThumbnailCache cache;
+
 	interface Actions
 	{
 		void open(RecordingEntry entry);
@@ -71,20 +73,23 @@ final class RecordingCard extends JPanel
 		void delete(RecordingEntry entry);
 	}
 
-	RecordingCard(RecordingEntry entry, RecordingKind kind, Path thumbnail, Actions actions)
+	RecordingCard(RecordingEntry entry, RecordingKind kind, Path thumbnail,
+		ThumbnailCache cache, Actions actions)
 	{
+		this.cache = cache;
 		setLayout(new BorderLayout(6, 0));
 		setBorder(BorderFactory.createEmptyBorder(6, 6, 6, 6));
 		setBackground(ColorScheme.DARKER_GRAY_COLOR);
 
-		add(thumbnailLabel(kind, thumbnail), BorderLayout.WEST);
+		JLabel thumb = thumbnailLabel(kind, thumbnail);
+		add(thumb, BorderLayout.WEST);
 		add(details(entry, kind), BorderLayout.CENTER);
 
 		String tooltip = entry.fileName() + (entry.session() ? " (long recording)" : "");
 		setToolTipText(tooltip);
 
 		JPopupMenu menu = buildMenu(entry, actions);
-		addMouseListener(new MouseAdapter()
+		MouseAdapter mouse = new MouseAdapter()
 		{
 			@Override
 			public void mouseClicked(MouseEvent e)
@@ -106,7 +111,12 @@ final class RecordingCard extends JPanel
 			{
 				setBackground(ColorScheme.DARKER_GRAY_COLOR);
 			}
-		});
+		};
+		addMouseListener(mouse);
+		// The label covers part of the row, so it needs the same handling or
+		// clicking the picture does nothing.
+		thumb.addMouseListener(mouse);
+		thumb.setInheritsPopupMenu(true);
 		setComponentPopupMenu(menu);
 	}
 
@@ -181,7 +191,13 @@ final class RecordingCard extends JPanel
 		JLabel label = new JLabel();
 		label.setPreferredSize(new Dimension(THUMB_WIDTH, THUMB_HEIGHT));
 		label.setHorizontalAlignment(SwingConstants.CENTER);
-		BufferedImage shot = thumbnail == null ? null : read(thumbnail);
+		BufferedImage shot = cache == null ? null : cache.get(thumbnail);
+		if (shot == null && thumbnail != null)
+		{
+			// Decode off the EDT and fill the icon in when it arrives; the
+			// placeholder shows until then.
+			decodeLater(thumbnail, label);
+		}
 		if (shot != null)
 		{
 			label.setIcon(new ImageIcon(fit(shot)));
@@ -192,6 +208,20 @@ final class RecordingCard extends JPanel
 		}
 		label.setIcon(new ImageIcon(placeholder(kind)));
 		return label;
+	}
+
+	private void decodeLater(Path path, JLabel label)
+	{
+		new Thread(() ->
+		{
+			BufferedImage image = read(path);
+			if (image == null)
+			{
+				return;
+			}
+			cache.put(path, image);
+			javax.swing.SwingUtilities.invokeLater(() -> label.setIcon(new ImageIcon(fit(image))));
+		}, "vkgpu-thumbnail").start();
 	}
 
 	private static BufferedImage read(Path path)

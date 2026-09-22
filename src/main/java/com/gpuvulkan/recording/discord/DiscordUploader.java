@@ -47,6 +47,7 @@ public final class DiscordUploader
 	public static final String UPLOADING = "uploading";
 	public static final String QUEUED = "queued";
 	public static final String SKIPPED = "skipped";
+	public static final String NO_WEBHOOK = "no webhook";
 
 	private static final MediaType MP4 = MediaType.parse("video/mp4");
 	/** One post per this long; a boss that drops three times should not
@@ -70,6 +71,8 @@ public final class DiscordUploader
 	private final Deque<Runnable> queued = new ArrayDeque<>();
 	private boolean draining;
 	private long lastDispatchMs;
+	private final java.util.concurrent.atomic.AtomicBoolean warnedInvalid =
+		new java.util.concurrent.atomic.AtomicBoolean();
 
 	public DiscordUploader(RecordingService service, GpuVulkanPluginConfig config, OkHttpClient client)
 	{
@@ -103,6 +106,7 @@ public final class DiscordUploader
 		HttpUrl url = webhook();
 		if (url == null)
 		{
+			service.annotate(entry.id(), STATUS_KEY, NO_WEBHOOK);
 			return;
 		}
 
@@ -244,9 +248,14 @@ public final class DiscordUploader
 			return null;
 		}
 		HttpUrl url = parseWebhook(configured);
-		if (url == null)
+		if (url == null && warnedInvalid.compareAndSet(false, true))
 		{
+			// Once: configured() is called for every card on every refresh.
 			log.warn("Discord webhook is not a Discord webhook URL; nothing will be posted");
+		}
+		else if (url != null)
+		{
+			warnedInvalid.set(false);
 		}
 		return url;
 	}

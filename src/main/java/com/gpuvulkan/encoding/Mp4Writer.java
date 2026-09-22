@@ -261,6 +261,8 @@ public final class Mp4Writer
         b.writeFourCC("iso2");
         b.writeFourCC("avc1");
         b.writeFourCC("mp41");
+        // ISO/IEC 23003-5; without it players may skip a raw PCM audio track.
+        b.writeFourCC("iso6");
         return b.build();
     }
 

@@ -41,6 +41,7 @@ public final class RecordingEntry
 	private int schemaVersion = SCHEMA_VERSION;
 	private String id;
 	private String kindId;
+	private String folder;
 	private String description;
 	private String fileName;
 	private String thumbnailName;
@@ -65,6 +66,7 @@ public final class RecordingEntry
 		this.schemaVersion = SCHEMA_VERSION;
 		this.id = b.id;
 		this.kindId = b.kindId;
+		this.folder = b.folder;
 		this.description = b.description;
 		this.fileName = b.fileName;
 		this.thumbnailName = b.thumbnailName;
@@ -93,6 +95,16 @@ public final class RecordingEntry
 	public String kindId()
 	{
 		return kindId;
+	}
+
+	/**
+	 * Directory holding this recording, relative to the library root. Stored
+	 * rather than derived: the kind's extension may be gone by the time anyone
+	 * looks, and a synthesised kind does not know the real folder.
+	 */
+	public String folder()
+	{
+		return folder;
 	}
 
 	public String description()
@@ -180,6 +192,7 @@ public final class RecordingEntry
 		return new Builder()
 			.id(id)
 			.kindId(kindId)
+			.folder(folder)
 			.description(description)
 			.fileName(fileName)
 			.thumbnailName(thumbnailName)
@@ -203,6 +216,7 @@ public final class RecordingEntry
 	{
 		private String id;
 		private String kindId = RecordingKindRegistry.GENERIC.id();
+		private String folder;
 		private String description = "";
 		private String fileName;
 		private String thumbnailName;
@@ -225,7 +239,15 @@ public final class RecordingEntry
 
 		public Builder kind(RecordingKind v)
 		{
-			this.kindId = v == null ? RecordingKindRegistry.GENERIC.id() : v.id();
+			RecordingKind kind = v == null ? RecordingKindRegistry.GENERIC : v;
+			this.kindId = kind.id();
+			this.folder = kind.folder();
+			return this;
+		}
+
+		public Builder folder(String v)
+		{
+			this.folder = v;
 			return this;
 		}
 

@@ -24,6 +24,7 @@ final class AudioCapture
 	private final AudioSource source;
 	private final AudioRing ring;
 	private volatile boolean running;
+	private volatile boolean failed;
 	private volatile long lastSignalMs;
 	private Thread pump;
 
@@ -121,6 +122,16 @@ final class AudioCapture
 			}
 		}
 		running = false;
+		// The line is gone either way; releasing it lets the device be
+		// reopened, and failed() tells the owner to rebuild this instance.
+		source.close();
+		failed = true;
+	}
+
+	/** True when the pump died on its own rather than being stopped. */
+	boolean failed()
+	{
+		return failed;
 	}
 
 	/**
@@ -152,9 +163,30 @@ final class AudioCapture
 		return ring.drain(afterMs, untilMs);
 	}
 
+	/**
+	 * PCM for a span, with any gap between blocks filled with silence so the
+	 * track stays aligned to wall clock rather than closing up.
+	 */
 	byte[] window(long fromMs, long toMs)
 	{
-		return ring.window(fromMs, toMs);
+		List<AudioRing.Block> blocks = ring.drain(fromMs - 1, toMs);
+		if (blocks.isEmpty())
+		{
+			return new byte[0];
+		}
+		java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+		long epoch = blocks.get(0).timestampMs;
+		int frameBytes = bytesPerFrame();
+		for (AudioRing.Block block : blocks)
+		{
+			long expected = (block.timestampMs - epoch) * sampleRate() / 1000L * frameBytes;
+			for (long pad = expected - out.size(); pad > 0; pad -= frameBytes)
+			{
+				out.write(new byte[frameBytes], 0, frameBytes);
+			}
+			out.write(block.pcm, 0, block.pcm.length);
+		}
+		return out.toByteArray();
 	}
 
 	void setByteBudget(long budget)

@@ -116,6 +116,33 @@ public final class StreamingMp4Writer implements Closeable
         return audio != null && !audio.isEmpty();
     }
 
+    /** Audio frames written so far, for callers keeping the track on wall clock. */
+    public long audioFrames()
+    {
+        return audio == null ? 0L : audio.totalFrames();
+    }
+
+    /**
+     * Appends {@code frames} of silence. The sample table is one constant-rate
+     * run, so a gap left unfilled does not play as a gap -- everything after it
+     * plays early instead.
+     */
+    public void writeSilence(long frames) throws IOException
+    {
+        if (audio == null || frames <= 0)
+        {
+            return;
+        }
+        byte[] zeros = new byte[audio.bytesPerFrame() * 1024];
+        long remaining = frames;
+        while (remaining > 0)
+        {
+            int batch = (int) Math.min(remaining, 1024);
+            writeAudio(zeros, 0, batch * audio.bytesPerFrame());
+            remaining -= batch;
+        }
+    }
+
     /** True once {@link #audioTrack} has been declared, with or without samples. */
     public boolean hasAudioTrack()
     {
@@ -325,15 +352,25 @@ public final class StreamingMp4Writer implements Closeable
         finished = true;
         out.flush();
 
-        if (samples.isEmpty())
+        try
         {
-            throw new IOException("no frames were written");
+            if (samples.isEmpty())
+            {
+                throw new IOException("no frames were written");
+            }
+            if (width <= 0 || height <= 0)
+            {
+                throw new IOException("encode parameters were never supplied");
+            }
+            resolveParameterSets();
         }
-        if (width <= 0 || height <= 0)
+        catch (IOException | RuntimeException e)
         {
-            throw new IOException("encode parameters were never supplied");
+            // Nothing playable can come out of this file; leaving it would also
+            // leak the channel for the life of the client.
+            abort();
+            throw e;
         }
-        resolveParameterSets();
 
         long mdatBoxSize = 8L + mdatBytes;
         ByteBuffer patch = ByteBuffer.allocate(4);

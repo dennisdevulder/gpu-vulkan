@@ -478,9 +478,26 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 			return;
 		}
 
+		// captureTiles re-derives the captured extent, and the extended tiles
+		// can momentarily fail their coverage check while a region streams in.
+		// Letting that shrink the extent here would strand the static zone
+		// ranges, which were built on the larger grid, until the next full
+		// capture. Keep the extent the arena was built with and try again next
+		// frame; the zones stay dirty.
+		int priorOrigin = capturedSceneOrigin;
+		int priorSize = capturedSceneSize;
+		int priorZones = capturedZonesPerSide;
+		int priorLookup = tileLookupOffset;
+
 		Tile[][][] tiles = captureTiles(scene);
 		if (tiles == null)
 		{
+			restoreCapturedExtent(priorOrigin, priorSize, priorZones, priorLookup);
+			return;
+		}
+		if (capturedSceneOrigin != priorOrigin || capturedSceneSize != priorSize)
+		{
+			restoreCapturedExtent(priorOrigin, priorSize, priorZones, priorLookup);
 			return;
 		}
 
@@ -488,6 +505,14 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 
 		overlayNextVertex[slot] = vertexCount;
 		setWriteCursor(vertexCount);
+	}
+
+	private void restoreCapturedExtent(int origin, int size, int zones, int lookupOffset)
+	{
+		capturedSceneOrigin = origin;
+		capturedSceneSize = size;
+		capturedZonesPerSide = zones;
+		tileLookupOffset = lookupOffset;
 	}
 
 	/** Overlay arenas grow monotonically as zones churn; past the high-water
@@ -584,6 +609,13 @@ final class SceneRenderer implements AutoCloseable, PendingRenderables.Sink,
 						demand, maxStaticVertices);
 				}
 				uploadStaticMirror();
+				// The capture leaves the write cursor in the static arena. Any
+				// captureDynamic that follows within this frame would write
+				// there while recordOpaque reads never-written frame-arena
+				// bytes, so restore it here rather than at each call site.
+				int slot = sync.currentFrame();
+				vertexCount = overlayNextVertex[slot];
+				useFrameWriteArena(slot, vertexCount);
 				return;
 			}
 			int target = Math.min(MAX_STATIC_VERTICES_HARD_CAP,

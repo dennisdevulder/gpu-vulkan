@@ -80,7 +80,7 @@ final class ScenePipelines implements AutoCloseable
 				descriptorSet = allocateAndWriteDescriptorSet(stack, textureArray);
 			}
 		}
-		catch (RuntimeException e)
+		catch (RuntimeException | Error e)
 		{
 			close();
 			throw e;

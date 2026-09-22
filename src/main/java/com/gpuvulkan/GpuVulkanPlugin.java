@@ -631,9 +631,8 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		regionManager = null;
 		textureArray = null;
 		renderExtensions = null;
+		teardownRecordingStack();
 		inFlightClipRecorder = null;
-		recordingService = null;
-		recordingTriggers = null;
 		subWorldViews = null;
 		scenePipelines = null;
 		gfx = null;
@@ -653,25 +652,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		shuttingDown = true;
 		keyManager.unregisterKeyListener(inFlightClipHotkeyListener);
 		keyManager.unregisterKeyListener(recordingSessionHotkeyListener);
-		removeRecordingsPanel();
-		if (discordUploader != null)
-		{
-			eventBus.unregister(discordUploader);
-			discordUploader.close();
-			discordUploader = null;
-		}
-		if (recordingTriggers != null)
-		{
-			recordingTriggers.unbindAll();
-			recordingTriggers = null;
-		}
-		if (recordingService != null)
-		{
-			// Before the renderer teardown: a session must close its file
-			// while the encoder is still alive.
-			recordingService.shutdown();
-			recordingService = null;
-		}
+		// Before the renderer teardown: a session must close its file while the
+		// encoder is still alive.
+		teardownRecordingStack();
 		removeMacResizeWake();
 		removeDebugOverlay();
 		// Unpublish first so a concurrent shutdown hook sees null and bails,
@@ -1010,6 +993,32 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	 * inferred from the keys present, so future migrations have somewhere to
 	 * hang and a half-applied one re-runs rather than being skipped.
 	 */
+	/**
+	 * Releases the recording stack. It is built before the renderer, so a
+	 * renderer failure would otherwise leave its executors, its capture device
+	 * and its triggers running with nothing owning them.
+	 */
+	private void teardownRecordingStack()
+	{
+		removeRecordingsPanel();
+		if (discordUploader != null)
+		{
+			eventBus.unregister(discordUploader);
+			discordUploader.close();
+			discordUploader = null;
+		}
+		if (recordingTriggers != null)
+		{
+			recordingTriggers.unbindAll();
+			recordingTriggers = null;
+		}
+		if (recordingService != null)
+		{
+			recordingService.shutdown();
+			recordingService = null;
+		}
+	}
+
 	private void migrateConfig()
 	{
 		Integer version = configManager.getConfiguration(

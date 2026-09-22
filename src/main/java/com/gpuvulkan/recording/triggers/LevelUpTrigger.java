@@ -33,6 +33,7 @@ import java.util.Map;
 import net.runelite.api.GameState;
 import net.runelite.api.Skill;
 import net.runelite.api.events.GameStateChanged;
+import net.runelite.api.events.GameTick;
 import net.runelite.api.events.StatChanged;
 import net.runelite.client.eventbus.Subscribe;
 
@@ -43,6 +44,7 @@ import net.runelite.client.eventbus.Subscribe;
 public final class LevelUpTrigger extends EventBusTrigger
 {
 	private final Map<Skill, Integer> known = new EnumMap<>(Skill.class);
+	private boolean seeded;
 
 	@Override
 	public RecordingKind kind()
@@ -60,6 +62,7 @@ public final class LevelUpTrigger extends EventBusTrigger
 	public void unbind(RecordingContext context)
 	{
 		known.clear();
+		seeded = false;
 		super.unbind(context);
 	}
 
@@ -69,9 +72,31 @@ public final class LevelUpTrigger extends EventBusTrigger
 		if (event.getGameState() == GameState.LOGGING_IN
 			|| event.getGameState() == GameState.HOPPING)
 		{
-			// Re-baseline: the burst of StatChanged that follows is not news.
 			known.clear();
+			seeded = false;
 		}
+	}
+
+	/**
+	 * Takes the baseline from the client once, on the first tick after login.
+	 *
+	 * The login burst of StatChanged arrives before the state reaches
+	 * LOGGED_IN, so waiting for a StatChanged to establish the baseline spends
+	 * the first XP gain doing it -- and loses the level-up when that gain is
+	 * the one that levels.
+	 */
+	@Subscribe
+	public void onGameTick(GameTick event)
+	{
+		if (seeded || context == null || context.client().getGameState() != GameState.LOGGED_IN)
+		{
+			return;
+		}
+		for (Skill skill : Skill.values())
+		{
+			known.put(skill, context.client().getRealSkillLevel(skill));
+		}
+		seeded = true;
 	}
 
 	@Subscribe

@@ -59,6 +59,8 @@ public final class RecordingStore
 	private final RecordingKindRegistry kinds;
 	private final Object lock = new Object();
 	private final Map<String, RecordingEntry> entries = new LinkedHashMap<>();
+	/** Names handed out by allocate but not yet on disk. */
+	private final java.util.Set<String> claimed = new java.util.HashSet<>();
 
 	public RecordingStore(Path root, RecordingKindRegistry kinds)
 	{
@@ -124,7 +126,13 @@ public final class RecordingStore
 				}
 				// Trust the file: a session killed mid-write never updated its sidecar.
 				long size = sizeOf(video);
-				found.put(entry.id(), size == entry.sizeBytes() ? entry : entry.withSize(size));
+				RecordingEntry indexed = size == entry.sizeBytes() ? entry : entry.withSize(size);
+				if (indexed.folder() == null || indexed.folder().isEmpty())
+				{
+					indexed = indexed.toBuilder()
+						.folder(folder.getFileName().toString()).build();
+				}
+				found.put(entry.id(), indexed);
 			}
 		}
 		catch (IOException e)
@@ -134,15 +142,20 @@ public final class RecordingStore
 	}
 
 	/** Reserves a destination, creating the folder but no files. */
-	public RecordingTarget allocate(RecordingKind kind, String description, long triggeredAt) throws IOException
+	public synchronized RecordingTarget allocate(RecordingKind kind, String description,
+		long triggeredAt) throws IOException
 	{
 		RecordingKind resolved = kind == null ? RecordingKindRegistry.GENERIC : kind;
 		Path folder = root.resolve(resolved.folder());
 		Files.createDirectories(folder);
 
+		// Names are also claimed in memory: allocate creates no files, so two
+		// allocations in the same second with the same description would
+		// otherwise agree on a path and one would truncate the other.
 		String base = baseName(triggeredAt, description);
 		String candidate = base;
-		for (int i = 2; Files.exists(folder.resolve(candidate + VIDEO_EXT)); i++)
+		for (int i = 2; Files.exists(folder.resolve(candidate + VIDEO_EXT))
+			|| !claimed.add(resolved.folder() + "/" + candidate); i++)
 		{
 			candidate = base + "_" + i;
 		}
@@ -161,6 +174,15 @@ public final class RecordingStore
 	/** Call once the mp4 is complete. */
 	public RecordingEntry commit(RecordingEntry entry) throws IOException
 	{
+		synchronized (lock)
+		{
+			return commitLocked(entry);
+		}
+	}
+
+	/** Caller holds {@code lock}. */
+	private RecordingEntry commitLocked(RecordingEntry entry) throws IOException
+	{
 		RecordingEntry stored = entry;
 		Path video = videoPath(entry);
 		if (Files.isRegularFile(video))
@@ -172,10 +194,7 @@ public final class RecordingStore
 			}
 		}
 		RecordingCodec.write(sidecarPath(stored), stored);
-		synchronized (lock)
-		{
-			entries.put(stored.id(), stored);
-		}
+		entries.put(stored.id(), stored);
 		return stored;
 	}
 
@@ -286,7 +305,16 @@ public final class RecordingStore
 		{
 			return false;
 		}
-		deleteFiles(entry);
+		if (!deleteFiles(entry))
+		{
+			// Put it back: a file still held open is not reclaimed space, and
+			// dropping the row would hide it from the library forever.
+			synchronized (lock)
+			{
+				entries.put(entry.id(), entry);
+			}
+			return false;
+		}
 		return true;
 	}
 
@@ -383,45 +411,46 @@ public final class RecordingStore
 	 */
 	public Optional<RecordingEntry> annotate(String id, String key, String value)
 	{
-		RecordingEntry entry;
+		// Read and write under one lock: annotate runs on the upload thread
+		// while pin and rename run on the EDT, and a straddled update loses one
+		// of the two -- or resurrects an entry deleted in between.
 		synchronized (lock)
 		{
-			entry = entries.get(id);
-		}
-		if (entry == null)
-		{
-			return Optional.empty();
-		}
-		try
-		{
-			return Optional.of(commit(entry.toBuilder().meta(key, value).build()));
-		}
-		catch (IOException e)
-		{
-			log.warn("Could not annotate recording {}", id, e);
-			return Optional.of(entry);
+			RecordingEntry entry = entries.get(id);
+			if (entry == null)
+			{
+				return Optional.empty();
+			}
+			try
+			{
+				return Optional.of(commitLocked(entry.toBuilder().meta(key, value).build()));
+			}
+			catch (IOException e)
+			{
+				log.warn("Could not annotate recording {}", id, e);
+				return Optional.of(entry);
+			}
 		}
 	}
 
 	public Optional<RecordingEntry> setPinned(String id, boolean pinned)
 	{
-		RecordingEntry entry;
 		synchronized (lock)
 		{
-			entry = entries.get(id);
-		}
-		if (entry == null || entry.pinned() == pinned)
-		{
-			return Optional.ofNullable(entry);
-		}
-		try
-		{
-			return Optional.of(commit(entry.withPinned(pinned)));
-		}
-		catch (IOException e)
-		{
-			log.warn("Failed to update pin state for {}", id, e);
-			return Optional.of(entry);
+			RecordingEntry entry = entries.get(id);
+			if (entry == null || entry.pinned() == pinned)
+			{
+				return Optional.ofNullable(entry);
+			}
+			try
+			{
+				return Optional.of(commitLocked(entry.withPinned(pinned)));
+			}
+			catch (IOException e)
+			{
+				log.warn("Failed to update pin state for {}", id, e);
+				return Optional.of(entry);
+			}
 		}
 	}
 
@@ -522,18 +551,32 @@ public final class RecordingStore
 
 	private Path folderOf(RecordingEntry entry)
 	{
-		return root.resolve(kinds.resolve(entry.kindId()).folder());
+		String folder = entry.folder();
+		return root.resolve(folder == null || folder.isEmpty()
+			? kinds.resolve(entry.kindId()).folder() : folder);
 	}
 
-	private void deleteFiles(RecordingEntry entry)
+	/** @return false when the video could not be removed */
+	private boolean deleteFiles(RecordingEntry entry)
 	{
-		deleteQuietly(videoPath(entry));
+		boolean removed;
+		try
+		{
+			Path video = videoPath(entry);
+			removed = !Files.exists(video) || Files.deleteIfExists(video);
+		}
+		catch (IOException e)
+		{
+			log.warn("Could not delete {}", entry.id(), e);
+			return false;
+		}
 		deleteQuietly(sidecarPath(entry));
 		String thumb = entry.thumbnailName();
 		if (thumb != null && !thumb.isEmpty())
 		{
 			deleteQuietly(folderOf(entry).resolve(THUMB_DIR).resolve(thumb));
 		}
+		return removed;
 	}
 
 	private void deleteQuietly(Path path)

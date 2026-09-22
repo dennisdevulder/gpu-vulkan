@@ -113,10 +113,17 @@ public final class RecordingsPanel extends PluginPanel
 	private final JPanel listPanel = new JPanel();
 	/** Rebuilding the kind combo fires its listener; ignore it until settled. */
 	private boolean rebuildingFilters;
+	/** Device enumeration probes every mixer, so it is done off the EDT and
+	 *  reused until something asks for a rescan. */
+	private volatile List<String> deviceCache;
+	private int priorTooltipInitial;
+	private int priorTooltipDismiss;
 	/** Capture state changes without a config edit -- a restart completing, a
 	 *  device being routed or unplugged -- so the status line has to re-ask. */
 	private final javax.swing.Timer audioPoll = new javax.swing.Timer(1000, e -> refreshAudioStatus());
 	private final javax.swing.Timer meterPoll = new javax.swing.Timer(50, e -> refreshMeters());
+
+	private final ThumbnailCache thumbs = new ThumbnailCache();
 
 	private final RecordingCard.Actions actions = new RecordingCard.Actions()
 	{
@@ -193,10 +200,6 @@ public final class RecordingsPanel extends PluginPanel
 		this.audioSetting = audioSetting;
 		this.discord = discord;
 
-		// The thumbnail preview is a peek, not a hint; the default delay reads
-		// as the popup being broken.
-		javax.swing.ToolTipManager.sharedInstance().setInitialDelay(250);
-		javax.swing.ToolTipManager.sharedInstance().setDismissDelay(20_000);
 
 		setLayout(new BorderLayout());
 		setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
@@ -388,7 +391,7 @@ public final class RecordingsPanel extends PluginPanel
 		rebuildingFilters = true;
 		try
 		{
-			List<String> devices = SystemAudioSource.captureDevices();
+			List<String> devices = devices();
 			String chosen = audioSetting.get();
 			audioDevice.removeAllItems();
 			audioDevice.addItem(NO_AUDIO);
@@ -397,8 +400,14 @@ public final class RecordingsPanel extends PluginPanel
 			{
 				audioDevice.addItem(name);
 			}
-			audioDevice.setSelectedItem(!on ? NO_AUDIO
-				: chosen == null || chosen.isEmpty() ? "default" : chosen);
+			String want = !on ? NO_AUDIO : chosen == null || chosen.isEmpty() ? "default" : chosen;
+			if (on && !NO_AUDIO.equals(want) && !"default".equals(want) && !devices.contains(want))
+			{
+				// Configured but not present: show it rather than silently
+				// falling back, which read as a different device being chosen.
+				audioDevice.addItem(want);
+			}
+			audioDevice.setSelectedItem(want);
 
 		}
 		finally
@@ -407,6 +416,25 @@ public final class RecordingsPanel extends PluginPanel
 		}
 
 		refreshAudioStatus();
+	}
+
+	private List<String> devices()
+	{
+		List<String> cached = deviceCache;
+		if (cached != null)
+		{
+			return cached;
+		}
+		// Nothing yet: show what is configured and fill the list in the
+		// background rather than blocking the UI on a device probe.
+		new Thread(() ->
+		{
+			List<String> found = SystemAudioSource.captureDevices();
+			deviceCache = found;
+			SwingUtilities.invokeLater(this::refreshAudio);
+		}, "vkgpu-audio-devices").start();
+		deviceCache = new ArrayList<>();
+		return deviceCache;
 	}
 
 	private void refreshAudioStatus()
@@ -468,7 +496,7 @@ public final class RecordingsPanel extends PluginPanel
 			{
 				continue;
 			}
-			listPanel.add(new RecordingCard(entry, kind, thumbnailOf(entry, kind), actions));
+			listPanel.add(new RecordingCard(entry, kind, thumbnailOf(entry, kind), thumbs, actions));
 			listPanel.add(Box.createVerticalStrut(4));
 			shown++;
 		}
@@ -504,7 +532,14 @@ public final class RecordingsPanel extends PluginPanel
 
 	private Path pathOf(RecordingEntry entry)
 	{
-		return root.resolve(service.kinds().resolve(entry.kindId()).folder()).resolve(entry.fileName());
+		return folderOf(entry).resolve(entry.fileName());
+	}
+
+	private Path folderOf(RecordingEntry entry)
+	{
+		String folder = entry.folder();
+		return root.resolve(folder == null || folder.isEmpty()
+			? service.kinds().resolve(entry.kindId()).folder() : folder);
 	}
 
 	private Path thumbnailOf(RecordingEntry entry, RecordingKind kind)
@@ -514,7 +549,7 @@ public final class RecordingsPanel extends PluginPanel
 		{
 			return null;
 		}
-		Path path = root.resolve(kind.folder()).resolve("thumbs").resolve(name);
+		Path path = folderOf(entry).resolve("thumbs").resolve(name);
 		return Files.isRegularFile(path) ? path : null;
 	}
 
@@ -555,6 +590,15 @@ public final class RecordingsPanel extends PluginPanel
 	@Override
 	public void onActivate()
 	{
+		// Process-global, so it is scoped to this panel being open and restored
+		// on the way out rather than changed for the whole client.
+		javax.swing.ToolTipManager tips = javax.swing.ToolTipManager.sharedInstance();
+		priorTooltipInitial = tips.getInitialDelay();
+		priorTooltipDismiss = tips.getDismissDelay();
+		tips.setInitialDelay(250);
+		tips.setDismissDelay(20_000);
+
+		deviceCache = null;
 		refresh();
 		audioPoll.start();
 		meterPoll.start();
@@ -563,6 +607,9 @@ public final class RecordingsPanel extends PluginPanel
 	@Override
 	public void onDeactivate()
 	{
+		javax.swing.ToolTipManager tips = javax.swing.ToolTipManager.sharedInstance();
+		tips.setInitialDelay(priorTooltipInitial);
+		tips.setDismissDelay(priorTooltipDismiss);
 		audioPoll.stop();
 		meterPoll.stop();
 	}
