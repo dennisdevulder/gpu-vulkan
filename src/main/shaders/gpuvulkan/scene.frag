@@ -32,15 +32,22 @@
 
 layout(set = 0, binding = 0) uniform sampler2DArray uTextureArray;
 
+// The vertex stage owns push offsets 0..99 (see scene.vert), so these are
+// scalars: a vec3/vec4 would need 16-byte alignment that 100 does not give.
 layout(push_constant) uniform Push {
-    layout(offset = 96)  vec4 fogFrag;     // .rgb = fog/sky color, .a = brightness
-    layout(offset = 112) vec4 fragExtras;  // .x = textureLightMode (0 = light-only, 1 = full HSL tint)
-                                           // .y = colorBlindMode (0 NONE, 1 PROTAN, 2 DEUTERAN, 3 TRITAN)
-                                           // .z = colorBlindIntensity (0..1)
-                                           // .w = smoothBanding + 10 * alphaMode
-                                           //      0 = opaque pass, 1 = blended alpha pass,
-                                           //      2 = single-pass alpha-to-coverage
+    layout(offset = 100) float fogR;
+    layout(offset = 104) float fogG;
+    layout(offset = 108) float fogB;
+    layout(offset = 112) float brightness;
+    layout(offset = 116) float colorBlindIntensity;
+    layout(offset = 120) int   modes;
 } push;
+
+// modes bit layout, written by SceneRenderer.packModes.
+const int MODE_SMOOTH_BANDING = 0x1;   // per-vertex RGB instead of per-fragment HSL
+const int MODE_BRIGHT_TEXTURES = 0x2;  // full HSL tint on textured faces, not light only
+const int ALPHA_MODE_SHIFT = 2;        // 0 opaque, 1 blended, 2 alpha-to-coverage
+const int COLOR_BLIND_SHIFT = 4;       // 0 NONE, 1 PROTAN, 2 DEUTERAN, 3 TRITAN
 
 layout(location = 0) in vec3 vColor;       // CPU-decoded per-vertex RGB; smooth-banding term
 layout(location = 1) in float vHslPacked;  // packed HSL int as float (0..65535)
@@ -112,20 +119,19 @@ void main() {
     // Engine invisibility sentinel — discard rather than letting
     // alpha-to-coverage write zero samples (cheaper, skips depth write).
     if (vTrans == 255u) discard;
-    int alphaMode = int(push.fragExtras.w / 10.0);
+    int alphaMode = (push.modes >> ALPHA_MODE_SHIFT) & 0x3;
     if (alphaMode == 0 && vTrans != 0u) discard;
     if (alphaMode == 1 && vTrans == 0u) discard;
 
     int hsl = int(vHslPacked);
     int lum =  hsl        & 0x7F;
-    float smoothBanding = push.fragExtras.w - float(alphaMode * 10);
 
     vec3 rgb;
     if (vTexLayer == 0u) {
         // smoothBanding mixes per-fragment HSL decode (faceted, stock's
         // default-off look) with rasterizer-interpolated per-vertex RGB
         // (smooth gradients, stock's default-on look).
-        if (smoothBanding >= 0.5) {
+        if ((push.modes & MODE_SMOOTH_BANDING) != 0) {
             rgb = vColor;
         } else {
             int hue = (hsl >> 10) & 0x3F;
@@ -143,7 +149,7 @@ void main() {
         // 1 = full HSL→RGB tint (stock's "Bright textures").
         float light = float(lum) / 127.0;
         vec3 mulRgb;
-        if (push.fragExtras.x >= 0.5) {
+        if ((push.modes & MODE_BRIGHT_TEXTURES) != 0) {
             mulRgb = vColor;
         } else {
             mulRgb = vec3(light);
@@ -151,12 +157,13 @@ void main() {
         rgb = tex * mulRgb;
     }
     // Keep brightness behavior identical to the previous Vulkan shader.
-    rgb = pow(rgb, vec3(push.fogFrag.a));
-    rgb = mix(rgb, push.fogFrag.rgb, vFogAmount);
+    rgb = pow(rgb, vec3(push.brightness));
+    rgb = mix(rgb, vec3(push.fogR, push.fogG, push.fogB), vFogAmount);
     // Colour-blind correction runs after fog so the fog tint is also
     // Daltonized (matches stock ordering).
-    if (push.fragExtras.y > 0.5) {
-        rgb = applyColorBlind(rgb, int(push.fragExtras.y), push.fragExtras.z);
+    int colorBlindMode = (push.modes >> COLOR_BLIND_SHIFT) & 0x3;
+    if (colorBlindMode != 0) {
+        rgb = applyColorBlind(rgb, colorBlindMode, push.colorBlindIntensity);
     }
     // alpha = 1 - vTrans/255; drives MSAA coverage via the pipeline's
     // alphaToCoverageEnable.

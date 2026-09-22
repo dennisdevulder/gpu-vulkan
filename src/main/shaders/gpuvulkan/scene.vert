@@ -4,14 +4,14 @@
 // stock GPU's sub-unit coordinates; colour is packed HSL plus alpha/bias;
 // texture id and UV are signed shorts.
 //
-// Push layout:
-//   offset 0..63  : mat4 mvp                  (vertex)
-//   offset 64..79 : vec4 fogVtx               (vertex)
+// Push layout (the vertex stage owns 0..99, the fragment stage 100..123):
+//   offset 0..63  : mat4 mvp
+//   offset 64..79 : vec4 fogVtx
 //                   .x = cameraX (world)
 //                   .y = cameraZ (world)
 //                   .z = drawDistance * TILE_SIZE
 //                   .w = fogDepth     * TILE_SIZE
-//   offset 80..95 : ivec4 misc                (vertex)
+//   offset 80..95 : ivec4 misc
 //                   .x = current game tick (modulo small enough that
 //                        `tick * anim * (1/128)` doesn't overflow visible UV)
 //                   .y = sub-worldview translate X (toplevel scene units)
@@ -20,14 +20,16 @@
 //                   .yzw are zero for top-level draws (local == world);
 //                   used only to reconstruct world XZ for fog — the clip
 //                   position comes from the pre-composed (world*entity) mvp
-//   offset 96..111: vec4 fogFrag              (fragment; not used here)
-//                   .rgb = fog color (= skybox)
-//                   .a   = brightness
+//   offset 96..99 : int entityTint
+//                   the engine's per-scene HSL override as four signed bytes:
+//                   hue<<24 | sat<<16 | lum<<8 | amount. Zero (amount 0) is a
+//                   no-op, which is what the top level pushes.
 
 layout(push_constant) uniform PushConstants {
     mat4 mvp;
     vec4 fogVtx;
     ivec4 misc;
+    int entityTint;
 } pc;
 
 // Scene uniforms, set 0 binding 1.
@@ -82,13 +84,11 @@ float hueToChannel(float p, float q, float t) {
     return p;
 }
 
-vec3 hslToRgb(int hslInt) {
-    int h = (hslInt >> 10) & 0x3F;
-    int s = (hslInt >> 7) & 0x07;
-    int l = hslInt & 0x7F;
-    float hue = float(h) / 64.0 + 0.0078125;
-    float sat = float(s) / 8.0 + 0.0625;
-    float lum = float(l) / 128.0;
+// hsl carries the raw component values: h 0..63, s 0..7, l 0..127.
+vec3 hslToRgb(vec3 hsl) {
+    float hue = hsl.x / 64.0 + 0.0078125;
+    float sat = hsl.y / 8.0 + 0.0625;
+    float lum = hsl.z / 128.0;
     float q = lum < 0.5 ? lum * (1.0 + sat) : lum + sat - lum * sat;
     float p = 2.0 * lum - q;
     return vec3(
@@ -102,17 +102,36 @@ void main() {
     uint biasByte = (inAlphaBiasHsl >> 16) & 0xFFu;
     vTrans = (inAlphaBiasHsl >> 24) & 0xFFu;
 
+    // Per-scene HSL override, ported from stock vert.glsl. Component-space
+    // lerp with amount/128; amount stays a signed byte as the engine sends it.
+    vec3 hslComponents = vec3(
+        float((hsl >> 10) & 0x3Fu),
+        float((hsl >> 7) & 0x07u),
+        float(hsl & 0x7Fu));
+    vec3 tintComponents = vec3(
+        float(bitfieldExtract(pc.entityTint, 24, 8)),
+        float(bitfieldExtract(pc.entityTint, 16, 8)),
+        float(bitfieldExtract(pc.entityTint,  8, 8)));
+    float tintAmount = float(bitfieldExtract(pc.entityTint, 0, 8));
+    hslComponents += ((tintComponents - hslComponents) * tintAmount) / 128.0;
+
     vec3 position = inPosition;
     vec4 clip = pc.mvp * vec4(position, 1.0);
     float bias = float(biasByte) / 128.0;
     clip.z += bias;
     gl_Position = clip;
 
-    vColor = hslToRgb(int(hsl));
-    vLight = float(hsl);
+    vColor = hslToRgb(hslComponents);
 
     int textureId = inTextureUv.x;
     vTexLayer = textureId <= 0 ? 0u : uint(textureId);
+    // Texture lighting is not tinted (stock keeps fHsl raw for textured faces);
+    // untextured faces repack the tinted components so smooth banding matches.
+    vLight = textureId > 0
+        ? float(hsl)
+        : float(((int(hslComponents.x) & 0x3F) << 10)
+              | ((int(hslComponents.y) & 0x07) << 7)
+              |  (int(hslComponents.z) & 0x7F));
 
     // Per-tick UV scroll for animated textures (water, lava, etc.). Anim
     // is in texels per tick; multiply by tick and the texel→UV unit to get

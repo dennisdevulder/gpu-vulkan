@@ -61,4 +61,11 @@ final class EncodeSegment
         this.spsPps = spsPps;
         this.firstTimestampMs = firstTimestampMs;
     }
+
+    /** Public view for sinks outside this package. */
+    EncodedSegmentInfo info()
+    {
+        return new EncodedSegmentInfo(id, sourceWidth, sourceHeight,
+            codedWidth, codedHeight, fps, spsPps);
+    }
 }

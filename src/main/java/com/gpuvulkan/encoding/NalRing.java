@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, Dennis De Vulder
+ * Copyright (c) 2026, Dennis de Vulder
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -28,80 +28,120 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Circular buffer of encoded H.264 frames. Each slot holds an Annex-B NAL
- * payload tagged with the segment that produced it, so finalize can pick
- * frames from a single session and trim to an IDR.
+ * Circular buffer of encoded frames, bounded by frame count and by bytes.
  *
- * Package-private: {@link Slot} aliases the underlying {@code byte[]} as
- * a final field, which is safe inside this package but should not be
- * exposed externally.
+ * The byte budget is the binding one: 60s at 60fps and 12 Mbps is ~90 MB in a
+ * ring sized purely by slots, against a ~712 MB client heap.
  */
-final class NalRing
+final class NalRing implements NalSink
 {
-    /** 600 slots covers 10s of pre-roll at up to 60fps; ~12-24MB at typical
-     *  H.264 NAL sizes, well under the heap-pressure ceiling. */
+    /** 600 slots covers 10s of pre-roll at up to 60fps. */
     static final int DEFAULT_CAPACITY = 600;
 
-    static final class Slot
-    {
-        final int segmentId;
-        final long timestampMs;
-        final boolean isIdr;
-        final int frameNum;
-        final boolean needsBlur;
-        final byte[] nalUnits;
+    /** Overridden from config. */
+    static final long DEFAULT_BYTE_BUDGET = 64L * 1024 * 1024;
 
-        Slot(int segmentId, long timestampMs, boolean isIdr, int frameNum,
-             boolean needsBlur, byte[] nalUnits)
-        {
-            this.segmentId = segmentId;
-            this.timestampMs = timestampMs;
-            this.isIdr = isIdr;
-            this.frameNum = frameNum;
-            this.needsBlur = needsBlur;
-            this.nalUnits = nalUnits;
-        }
-    }
-
-    private final Slot[] slots;
+    private final EncodedFrame[] slots;
     private final int capacity;
     private final Object lock = new Object();
     private int writeIndex;
     private int count;
+    private long bytes;
+    private long byteBudget;
+    private long droppedToBudget;
 
     NalRing()
     {
-        this(DEFAULT_CAPACITY);
+        this(DEFAULT_CAPACITY, DEFAULT_BYTE_BUDGET);
     }
 
-    NalRing(int capacity)
+    NalRing(int capacity, long byteBudget)
     {
         if (capacity <= 0) throw new IllegalArgumentException("capacity must be positive");
         this.capacity = capacity;
-        this.slots = new Slot[capacity];
+        this.slots = new EncodedFrame[capacity];
+        this.byteBudget = byteBudget > 0 ? byteBudget : DEFAULT_BYTE_BUDGET;
     }
 
-    void put(Slot slot)
+    @Override
+    public void segmentStarted(EncodedSegmentInfo info)
     {
-        if (slot == null) throw new IllegalArgumentException("slot must not be null");
+        // Frames carry their segment id and finalize filters on it.
+    }
+
+    @Override
+    public void frame(EncodedFrame frame)
+    {
+        put(frame);
+    }
+
+    void put(EncodedFrame frame)
+    {
+        if (frame == null) throw new IllegalArgumentException("frame must not be null");
         synchronized (lock)
         {
-            slots[writeIndex] = slot;
+            EncodedFrame replaced = slots[writeIndex];
+            if (replaced != null)
+            {
+                bytes -= replaced.size();
+            }
+            slots[writeIndex] = frame;
+            bytes += frame.size();
             writeIndex = (writeIndex + 1) % capacity;
             if (count < capacity) count++;
+            evictToBudget();
         }
     }
 
-    /** Slots in chronological order (oldest first). */
-    List<Slot> snapshot()
+    /** Caller holds {@code lock}. Keeps one frame: an oversized IDR still
+     *  has to be saveable. */
+    private void evictToBudget()
+    {
+        while (bytes > byteBudget && count > 1)
+        {
+            int oldest = (writeIndex - count + capacity) % capacity;
+            EncodedFrame dropped = slots[oldest];
+            slots[oldest] = null;
+            if (dropped != null)
+            {
+                bytes -= dropped.size();
+            }
+            count--;
+            droppedToBudget++;
+        }
+    }
+
+    void setByteBudget(long budget)
     {
         synchronized (lock)
         {
-            List<Slot> out = new ArrayList<>(count);
+            this.byteBudget = budget > 0 ? budget : DEFAULT_BYTE_BUDGET;
+            evictToBudget();
+        }
+    }
+
+    long byteBudget()
+    {
+        synchronized (lock)
+        {
+            return byteBudget;
+        }
+    }
+
+    /** Frames in chronological order (oldest first). */
+    List<EncodedFrame> snapshot()
+    {
+        synchronized (lock)
+        {
+            List<EncodedFrame> out = new ArrayList<>(count);
             int oldest = (writeIndex - count + capacity) % capacity;
             for (int i = 0; i < count; i++)
             {
-                out.add(slots[(oldest + i) % capacity]);
+                EncodedFrame frame = slots[(oldest + i) % capacity];
+                if (frame != null)
+                {
+                    out.add(frame);
+                }
             }
             return out;
         }
@@ -115,9 +155,42 @@ final class NalRing
         }
     }
 
+    long bytes()
+    {
+        synchronized (lock)
+        {
+            return bytes;
+        }
+    }
+
+    long droppedToBudget()
+    {
+        synchronized (lock)
+        {
+            return droppedToBudget;
+        }
+    }
+
     int capacity()
     {
         return capacity;
+    }
+
+    /** Resized copy, newest frames kept. Must not drop footage: clips grow the
+     *  ring at trigger time, and the pre-roll is what would be lost. */
+    NalRing resized(int newCapacity)
+    {
+        synchronized (lock)
+        {
+            NalRing out = new NalRing(newCapacity, byteBudget);
+            List<EncodedFrame> retained = snapshot();
+            int from = Math.max(0, retained.size() - newCapacity);
+            for (int i = from; i < retained.size(); i++)
+            {
+                out.put(retained.get(i));
+            }
+            return out;
+        }
     }
 
     void reset()
@@ -127,6 +200,7 @@ final class NalRing
             for (int i = 0; i < capacity; i++) slots[i] = null;
             writeIndex = 0;
             count = 0;
+            bytes = 0;
         }
     }
 }

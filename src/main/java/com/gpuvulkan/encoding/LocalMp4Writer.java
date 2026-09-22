@@ -32,6 +32,13 @@ public final class LocalMp4Writer
     public static byte[] toBytes(byte[] h264, byte[] driverSpsPps,
                                  int width, int height, int fps, long[] frameTimestampsMs)
     {
+        return toBytes(h264, driverSpsPps, width, height, fps, frameTimestampsMs, null, 0, 0);
+    }
+
+    public static byte[] toBytes(byte[] h264, byte[] driverSpsPps,
+                                 int width, int height, int fps, long[] frameTimestampsMs,
+                                 byte[] pcm, int sampleRate, int channels)
+    {
         Parsed p = analyze(h264);
         if (p.sps == null || p.pps == null)
         {
@@ -49,10 +56,11 @@ public final class LocalMp4Writer
 
         Mp4Writer.Built built = Mp4Writer.buildSamples(h264, p.frameStartIndices, p.keyframes, durations);
         return new Mp4Writer(width, height, TIMESCALE, p.sps, p.pps)
-            .writeToBytes(built.avccBitstream, built.samples);
+            .writeToBytes(built.avccBitstream, built.samples, pcm, sampleRate, channels);
     }
 
-    private static int[] computeDurations(int sampleCount, int fps, long[] timestampsMs)
+    /** Package-private: shared with StreamingMp4Writer. */
+    static int[] computeDurations(int sampleCount, int fps, long[] timestampsMs)
     {
         int[] durations = new int[sampleCount];
         int fallbackTicks = Math.max(1, TIMESCALE / Math.max(1, fps));

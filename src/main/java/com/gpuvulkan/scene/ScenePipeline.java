@@ -66,6 +66,11 @@ final class ScenePipeline implements AutoCloseable
 	static final int OFFSET_ABHSL    = 12;
 	static final int OFFSET_TEX_UV   = 16;
 
+	/** mat4 mvp | vec4 fogVtx | ivec4 misc | int entityTint. */
+	static final int VERT_PUSH_BYTES = 100;
+	/** fogR | fogG | fogB | brightness | colorBlindIntensity | int modes. */
+	static final int FRAG_PUSH_BYTES = 24;
+
 	private final VulkanDevice device;
 	private long descriptorSetLayout;
 	private long pipelineLayout;
@@ -225,13 +230,12 @@ final class ScenePipeline implements AutoCloseable
 
 	private long createPipelineLayout(MemoryStack stack)
 	{
-		// Push constant layout (128 bytes total — Vulkan's guaranteed minimum):
-		//   Vertex   0..63 mat4 mvp; 64..79 vec4 (cameraX, cameraZ, drawDistance, fogDepth);
-		//   Vertex   80..95 ivec4 misc (.x = tick); Fragment 96..111 vec4 (fogRGB, brightness);
-		//   Fragment 112..127 vec4 (textureLightMode, _, _, _).
+		// One range per stage is a hard Vulkan rule, so both stages carve up the
+		// 128 bytes guaranteed by maxPushConstantsSize. See scene.vert/scene.frag
+		// for the member offsets.
 		VkPushConstantRange.Buffer pc = VkPushConstantRange.calloc(2, stack);
-		pc.get(0).stageFlags(VK_SHADER_STAGE_VERTEX_BIT)  .offset(0) .size(96);
-		pc.get(1).stageFlags(VK_SHADER_STAGE_FRAGMENT_BIT).offset(96).size(32);
+		pc.get(0).stageFlags(VK_SHADER_STAGE_VERTEX_BIT)  .offset(0)                .size(VERT_PUSH_BYTES);
+		pc.get(1).stageFlags(VK_SHADER_STAGE_FRAGMENT_BIT).offset(VERT_PUSH_BYTES)  .size(FRAG_PUSH_BYTES);
 
 		VkPipelineLayoutCreateInfo layoutInfo = VkPipelineLayoutCreateInfo.calloc(stack)
 			.sType$Default()

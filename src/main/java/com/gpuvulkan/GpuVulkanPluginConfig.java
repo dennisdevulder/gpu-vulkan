@@ -77,21 +77,48 @@ public interface GpuVulkanPluginConfig extends Config
 	@ConfigSection(
 		name = "Debug",
 		description = "Runtime diagnostics for Vulkan memory and scene capture.",
-		position = 9,
+		position = 12,
 		closedByDefault = true
 	)
 	String DEBUG_SECTION = "debug";
 
+	// The String value persists the collapsed state, so the main section keeps
+	// "recordings" rather than stranding everyone's expanded/collapsed choice.
 	@ConfigSection(
-		name = "In-flight Encoding",
-		description = "Keep recent frames in memory and write clips to disk.",
+		name = "Recording",
+		description = "Capture clips of your gameplay and keep the library tidy.",
 		position = 8,
 		closedByDefault = true
 	)
-	String IN_FLIGHT_ENCODING_SECTION = "inFlightEncoding";
+	String RECORDINGS_SECTION = "recordings";
+
+	@ConfigSection(
+		name = "Recording events",
+		description = "Which in-game moments save a clip automatically.",
+		position = 9,
+		closedByDefault = true
+	)
+	String RECORDING_EVENTS_SECTION = "recordingEvents";
+
+	@ConfigSection(
+		name = "Recording audio",
+		description = "Capture desktop sound alongside the video.",
+		position = 10,
+		closedByDefault = true
+	)
+	String RECORDING_AUDIO_SECTION = "recordingAudio";
+
+	@ConfigSection(
+		name = "Recording sharing",
+		description = "Post finished recordings to Discord.",
+		position = 11,
+		closedByDefault = true
+	)
+	String RECORDING_SHARING_SECTION = "recordingSharing";
 
 	// --------------------------------------------------------------- top level
 
+	@Range(min = 1, max = 90)
 	@ConfigItem(
 		keyName = "drawDistance",
 		name = "Draw distance (tiles)",
@@ -131,6 +158,7 @@ public interface GpuVulkanPluginConfig extends Config
 	)
 	default int fpsTarget() { return 0; }
 
+	@Range(min = 0, max = 100)
 	@ConfigItem(
 		keyName = "fogDepth",
 		name = "Fog depth (tiles)",
@@ -152,6 +180,7 @@ public interface GpuVulkanPluginConfig extends Config
 	)
 	default AntiAliasingMode antiAliasingMode() { return AntiAliasingMode.DISABLED; }
 
+	@Range(min = 1, max = 16)
 	@ConfigItem(
 		keyName = "anisotropicFilteringLevel",
 		name = "Anisotropic filtering",
@@ -269,10 +298,6 @@ public interface GpuVulkanPluginConfig extends Config
 
 	// -------------------------------------------------------- In-flight Encoding
 
-	enum EncodingType
-	{
-		MP4
-	}
 
 	enum RecordingFps
 	{
@@ -336,69 +361,287 @@ public interface GpuVulkanPluginConfig extends Config
 	}
 
 	@ConfigItem(
-		keyName = "inFlightEncodingEnabled",
-		name = "Enable encoding",
-		description = "Keep a rolling frame buffer and allow clips to be saved to disk when Vulkan H.264 encode is available.",
-		section = IN_FLIGHT_ENCODING_SECTION,
+		keyName = "recordingsEnabled",
+		name = "Enable recording",
+		description = "Keep recent frames encoded in memory so a clip can be saved after "
+			+ "something happens. Needs a GPU with Vulkan H.264 encode.",
+		section = RECORDINGS_SECTION,
 		position = 0
 	)
-	default boolean inFlightEncodingEnabled() { return false; }
+	default boolean recordingsEnabled() { return false; }
+
+	@ConfigItem(
+		keyName = "inFlightEncodingHotkey",
+		name = "Save a clip",
+		description = "Save the last few seconds of play.",
+		section = RECORDINGS_SECTION,
+		position = 1
+	)
+	default Keybind inFlightEncodingHotkey() { return Keybind.NOT_SET; }
 
 	@Range(min = 1, max = 60)
 	@ConfigItem(
 		keyName = "inFlightEncodingBufferSeconds",
-		name = "Buffer length",
-		description = "Seconds kept before the clip trigger. The total pre/post window is capped to 60 seconds.",
-		section = IN_FLIGHT_ENCODING_SECTION,
-		position = 1
+		name = "Seconds before the moment",
+		description = "How much of the lead-up a clip includes. Before plus after is capped at 60.",
+		section = RECORDINGS_SECTION,
+		position = 2
 	)
 	default int inFlightEncodingBufferSeconds() { return 10; }
 
 	@Range(min = 0, max = 60)
 	@ConfigItem(
 		keyName = "inFlightEncodingPostWaitSeconds",
-		name = "Post wait",
-		description = "Seconds captured after the clip trigger before the file is written. The total pre/post window is capped to 60 seconds.",
-		section = IN_FLIGHT_ENCODING_SECTION,
-		position = 2
+		name = "Seconds after the moment",
+		description = "How long a clip keeps recording once triggered. Before plus after is capped at 60.",
+		section = RECORDINGS_SECTION,
+		position = 3
 	)
 	default int inFlightEncodingPostWaitSeconds() { return 4; }
 
 	@ConfigItem(
-		keyName = "inFlightEncodingFps",
-		name = "Recording FPS",
-		description = "Frame rate used for in-flight clips.",
-		section = IN_FLIGHT_ENCODING_SECTION,
-		position = 3
-	)
-	default RecordingFps inFlightEncodingFps() { return RecordingFps.FPS_30; }
-
-	@ConfigItem(
 		keyName = "inFlightEncodingQuality",
-		name = "Recording quality",
-		description = "Bitrate preset used for in-flight clips. Higher settings produce larger files.",
-		section = IN_FLIGHT_ENCODING_SECTION,
+		name = "Quality",
+		description = "Higher settings look better and produce larger files.",
+		section = RECORDINGS_SECTION,
 		position = 4
 	)
 	default RecordingQuality inFlightEncodingQuality() { return RecordingQuality.STANDARD; }
 
 	@ConfigItem(
-		keyName = "inFlightEncodingType",
-		name = "Encoding type",
-		description = "Container/codec used for saved clips.",
-		section = IN_FLIGHT_ENCODING_SECTION,
+		keyName = "inFlightEncodingFps",
+		name = "Frame rate",
+		description = "Frames per second in saved recordings.",
+		section = RECORDINGS_SECTION,
 		position = 5
 	)
-	default EncodingType inFlightEncodingType() { return EncodingType.MP4; }
+	default RecordingFps inFlightEncodingFps() { return RecordingFps.FPS_30; }
 
 	@ConfigItem(
-		keyName = "inFlightEncodingHotkey",
-		name = "Save clip hotkey",
-		description = "Save the current rolling clip to disk.",
-		section = IN_FLIGHT_ENCODING_SECTION,
+		keyName = "recordingSessionsEnabled",
+		name = "Allow long recordings",
+		description = "Let an event record for as long as it lasts instead of a fixed clip. "
+			+ "Written straight to disk, so length is bounded by the limit below.",
+		section = RECORDINGS_SECTION,
 		position = 6
 	)
-	default Keybind inFlightEncodingHotkey() { return Keybind.NOT_SET; }
+	default boolean recordingSessionsEnabled() { return false; }
+
+	@Range(min = 30, max = 3600)
+	@ConfigItem(
+		keyName = "recordingSessionMaxSeconds",
+		name = "Stop long recordings after",
+		description = "Seconds. A long recording is finished and saved when it reaches this.",
+		section = RECORDINGS_SECTION,
+		position = 7
+	)
+	default int recordingSessionMaxSeconds() { return 600; }
+
+	@ConfigItem(
+		keyName = "recordingSessionHotkey",
+		name = "Start/stop a long recording",
+		description = "Begin a long recording, or end the one in progress.",
+		section = RECORDINGS_SECTION,
+		position = 8
+	)
+	default Keybind recordingSessionHotkey() { return Keybind.NOT_SET; }
+
+	@Range(min = 0, max = 512000)
+	@ConfigItem(
+		keyName = "recordingDiskBudgetMb",
+		name = "Library size limit",
+		description = "Delete the oldest unpinned recordings once the library passes this "
+			+ "many megabytes. 0 keeps everything.",
+		section = RECORDINGS_SECTION,
+		position = 9
+	)
+	default int recordingDiskBudgetMb() { return 10_000; }
+
+	@Range(min = 0, max = 3650)
+	@ConfigItem(
+		keyName = "recordingRetentionDays",
+		name = "Delete recordings after",
+		description = "Days. Unpinned recordings older than this are removed. 0 keeps them forever.",
+		section = RECORDINGS_SECTION,
+		position = 10
+	)
+	default int recordingRetentionDays() { return 0; }
+
+	@ConfigItem(
+		keyName = "recordingChatFeedback",
+		name = "Announce saves in chat",
+		description = "Post a game message when a recording is saved.",
+		section = RECORDINGS_SECTION,
+		position = 11
+	)
+	default boolean recordingChatFeedback() { return true; }
+
+	// Interacts with bitrate and clip length in a way that reads as a bug: lower
+	// it and the pre-roll silently gets shorter than the seconds set above.
+	@Range(min = 16, max = 512)
+	@ConfigItem(
+		keyName = "inFlightEncodingRingBudgetMb",
+		name = "Buffer memory cap",
+		description = "Maximum heap the rolling buffer may use.",
+		section = RECORDINGS_SECTION,
+		position = 12,
+		hidden = true
+	)
+	default int inFlightEncodingRingBudgetMb() { return 64; }
+
+	// ------------------------------------------------------------ recording audio
+
+	@ConfigItem(
+		keyName = "recordingAudioEnabled",
+		name = "Record desktop audio",
+		description = "Record system audio alongside video, voice chat included.",
+		section = RECORDING_AUDIO_SECTION,
+		position = 0
+	)
+	default boolean recordingAudioEnabled() { return false; }
+
+	@Range(min = 0, max = 1000)
+	@ConfigItem(
+		keyName = "recordingAudioGain",
+		name = "Input level",
+		description = "Volume of the recorded audio, as a percentage. Capture devices are read "
+			+ "raw, without the gain your desktop applies, so this often needs to be well "
+			+ "above 100. The meter in the Recordings panel shows the result.",
+		section = RECORDING_AUDIO_SECTION,
+		position = 1
+	)
+	default int recordingAudioGain() { return 100; }
+
+	// Chosen from the Recordings panel, where the list can be built from the
+	// devices that actually exist; a config enum would have to be static.
+	@ConfigItem(
+		keyName = "recordingAudioDevice",
+		name = "Audio device",
+		description = "Capture device to record from. Pick one in the Recordings panel.",
+		section = RECORDING_AUDIO_SECTION,
+		position = 2,
+		hidden = true
+	)
+	default String recordingAudioDevice() { return "default"; }
+
+	// ---------------------------------------------------------- recording sharing
+
+	@ConfigItem(
+		keyName = "discordWebhookUrl",
+		name = "Discord webhook",
+		description = "Post finished recordings to this Discord webhook. Leave empty to post "
+			+ "nothing. Create one under Server Settings, Integrations, Webhooks.",
+		section = RECORDING_SHARING_SECTION,
+		position = 0,
+		secret = true
+	)
+	default String discordWebhookUrl() { return ""; }
+
+	@ConfigItem(
+		keyName = "discordAutoUpload",
+		name = "Post automatically",
+		description = "Post every finished recording to the webhook. With this off, recordings "
+			+ "are posted only when you choose Push to Discord in the Recordings panel.",
+		section = RECORDING_SHARING_SECTION,
+		position = 1
+	)
+	default boolean discordAutoUpload() { return false; }
+
+	@Range(min = 1, max = 500)
+	@ConfigItem(
+		keyName = "discordMaxUploadMb",
+		name = "Size limit",
+		description = "Do not attempt to post recordings larger than this. Discord allows 20MB "
+			+ "by default and more on boosted servers, so raise it if yours is boosted.",
+		section = RECORDING_SHARING_SECTION,
+		position = 2
+	)
+	default int discordMaxUploadMb() { return 20; }
+
+	// --------------------------------------------------------- recorded events
+
+	@ConfigItem(
+		keyName = "recordLevelUps",
+		name = "Level ups",
+		description = "Save a clip when a skill levels up.",
+		section = RECORDING_EVENTS_SECTION,
+		position = 0
+	)
+	default boolean recordLevelUps() { return true; }
+
+	@ConfigItem(
+		keyName = "recordDeaths",
+		name = "Deaths",
+		description = "Save a clip when you die.",
+		section = RECORDING_EVENTS_SECTION,
+		position = 1
+	)
+	default boolean recordDeaths() { return true; }
+
+	@ConfigItem(
+		keyName = "recordLoot",
+		name = "Loot",
+		description = "Save a clip when a kill drops loot worth more than the threshold below.",
+		section = RECORDING_EVENTS_SECTION,
+		position = 2
+	)
+	default boolean recordLoot() { return true; }
+
+	@Range(min = 0, max = 1_000_000_000)
+	@ConfigItem(
+		keyName = "recordLootMinimumValue",
+		name = "Loot threshold",
+		description = "Minimum total drop value, in coins, worth recording.",
+		section = RECORDING_EVENTS_SECTION,
+		position = 3
+	)
+	default int recordLootMinimumValue() { return 500_000; }
+
+	@ConfigItem(
+		keyName = "recordPets",
+		name = "Pets",
+		description = "Save a clip on a pet drop.",
+		section = RECORDING_EVENTS_SECTION,
+		position = 4
+	)
+	default boolean recordPets() { return true; }
+
+	@ConfigItem(
+		keyName = "recordQuests",
+		name = "Quest completions",
+		description = "Save a clip when a quest is completed.",
+		section = RECORDING_EVENTS_SECTION,
+		position = 5
+	)
+	default boolean recordQuests() { return true; }
+
+	@ConfigItem(
+		keyName = "recordCollectionLog",
+		name = "Collection log slots",
+		description = "Save a clip when a new collection log slot is filled.",
+		section = RECORDING_EVENTS_SECTION,
+		position = 6
+	)
+	default boolean recordCollectionLog() { return true; }
+
+	@ConfigItem(
+		keyName = "recordClueScrolls",
+		name = "Clue scroll rewards",
+		description = "Save a clip when a clue casket is opened.",
+		section = RECORDING_EVENTS_SECTION,
+		position = 7
+	)
+	default boolean recordClueScrolls() { return true; }
+
+	@ConfigItem(
+		keyName = "recordBossWaves",
+		name = "Wave-based content",
+		description = "Record each Fight Cave or Inferno wave in full as a long recording. "
+			+ "Does nothing unless Allow long recordings is on, in the Recording section.",
+		section = RECORDING_EVENTS_SECTION,
+		position = 8
+	)
+	default boolean recordBossWaves() { return false; }
 
 	// ------------------------------------------------------------------- Debug
 

@@ -5,6 +5,7 @@
 package com.gpuvulkan;
 
 import com.gpuvulkan.encoding.StreamingVulkanEncoder;
+import com.gpuvulkan.recording.RecordingBackend;
 import com.gpuvulkan.encoding.VideoEncoder;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -30,7 +31,7 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.vulkan.VK13.*;
 
 @Slf4j
-final class InFlightClipRecorder implements VulkanRenderExtension
+final class InFlightClipRecorder implements VulkanRenderExtension, RecordingBackend
 {
 	private static final int MAX_TOTAL_SECONDS = 60;
 
@@ -48,10 +49,10 @@ final class InFlightClipRecorder implements VulkanRenderExtension
 
 	private StreamingVulkanEncoder encoder;
 	private boolean probeAttempted;
-	private String unavailableReason = "encoding disabled";
+	private String unavailableReason = "turn on In-flight Encoding > Enable encoding";
 	private long nextCaptureNanos;
-	private int width;
-	private int height;
+	private volatile int width;
+	private volatile int height;
 
 	InFlightClipRecorder(GpuVulkanPluginConfig config, VulkanDevice renderDevice)
 	{
@@ -69,8 +70,7 @@ final class InFlightClipRecorder implements VulkanRenderExtension
 	public synchronized void onConfigChanged(net.runelite.client.events.ConfigChanged event)
 	{
 		String key = event.getKey();
-		if ("inFlightEncodingEnabled".equals(key)
-			|| "inFlightEncodingType".equals(key)
+		if ("recordingsEnabled".equals(key)
 			|| "inFlightEncodingFps".equals(key)
 			|| "inFlightEncodingQuality".equals(key))
 		{
@@ -78,9 +78,14 @@ final class InFlightClipRecorder implements VulkanRenderExtension
 			probeAttempted = false;
 			configureEncoder();
 		}
-		else if ("inFlightEncodingBufferSeconds".equals(key) && encoder != null)
+		else if (("inFlightEncodingBufferSeconds".equals(key)
+			|| "inFlightEncodingPostWaitSeconds".equals(key)) && encoder != null)
 		{
 			updateBufferedFrameCount(encoder);
+		}
+		else if ("inFlightEncodingRingBudgetMb".equals(key) && encoder != null)
+		{
+			encoder.setRingByteBudget(ringBudgetBytes());
 		}
 	}
 
@@ -90,7 +95,7 @@ final class InFlightClipRecorder implements VulkanRenderExtension
 		StreamingVulkanEncoder active;
 		synchronized (this)
 		{
-			if (!config.inFlightEncodingEnabled())
+			if (!config.recordingsEnabled())
 			{
 				return;
 			}
@@ -131,7 +136,7 @@ final class InFlightClipRecorder implements VulkanRenderExtension
 		int postSeconds = clamp(requestedPostSeconds, 0, MAX_TOTAL_SECONDS - preSeconds);
 		synchronized (this)
 		{
-			if (!config.inFlightEncodingEnabled())
+			if (!config.recordingsEnabled())
 			{
 				return CompletableFuture.failedFuture(new IllegalStateException("in-flight encoding is disabled"));
 			}
@@ -177,22 +182,11 @@ final class InFlightClipRecorder implements VulkanRenderExtension
 		return future;
 	}
 
-	synchronized String unavailableReason()
-	{
-		return unavailableReason;
-	}
-
 	private synchronized void configureEncoder()
 	{
-		if (!config.inFlightEncodingEnabled())
+		if (!config.recordingsEnabled())
 		{
-			unavailableReason = "encoding disabled";
-			resetEncoder();
-			return;
-		}
-		if (config.inFlightEncodingType() != GpuVulkanPluginConfig.EncodingType.MP4)
-		{
-			unavailableReason = "only MP4 is implemented";
+			unavailableReason = "turn on Recording > Enable recording";
 			resetEncoder();
 			return;
 		}
@@ -256,7 +250,77 @@ final class InFlightClipRecorder implements VulkanRenderExtension
 	private void applyEncoderSettings(StreamingVulkanEncoder selected)
 	{
 		configureBitrate(selected);
+		selected.setRingByteBudget(ringBudgetBytes());
 		updateBufferedFrameCount(selected);
+	}
+
+	private long ringBudgetBytes()
+	{
+		return Math.max(1, (long) config.inFlightEncodingRingBudgetMb()) * 1024L * 1024L;
+	}
+
+	// ---- RecordingBackend ------------------------------------------------
+
+	@Override
+	public synchronized boolean available()
+	{
+		if (!config.recordingsEnabled())
+		{
+			return false;
+		}
+		if (encoder == null && !probeAttempted)
+		{
+			configureEncoder();
+		}
+		return encoder != null;
+	}
+
+	@Override
+	public synchronized String unavailableReason()
+	{
+		return available() ? null : (unavailableReason == null ? "encoding unavailable" : unavailableReason);
+	}
+
+	@Override
+	public synchronized StreamingVulkanEncoder encoder()
+	{
+		if (encoder == null && !probeAttempted)
+		{
+			configureEncoder();
+		}
+		return encoder;
+	}
+
+	@Override
+	public int frameWidth()
+	{
+		return width;
+	}
+
+	@Override
+	public int frameHeight()
+	{
+		return height;
+	}
+
+	/**
+	 * Widens the rolling buffer so a clip of this shape can be satisfied. Only
+	 * ever grows it: a short request must not shrink the buffer out from under
+	 * a longer one that is still waiting for its post-roll.
+	 */
+	@Override
+	public synchronized void ensureBuffered(int preSeconds, int postSeconds)
+	{
+		StreamingVulkanEncoder active = encoder;
+		if (active == null)
+		{
+			return;
+		}
+		int wanted = (preSeconds + postSeconds) * captureFps();
+		if (wanted > active.ringCapacity())
+		{
+			active.setMaxBufferedFrames(wanted);
+		}
 	}
 
 	private void configureBitrate(StreamingVulkanEncoder selected)
@@ -269,7 +333,8 @@ final class InFlightClipRecorder implements VulkanRenderExtension
 		selected.configureBitrate(quality.averageBitrate(), quality.peakBitrate());
 	}
 
-	private int captureFps()
+	@Override
+	public int captureFps()
 	{
 		GpuVulkanPluginConfig.RecordingFps fps = config.inFlightEncodingFps();
 		return fps == null ? 30 : fps.value();
@@ -335,7 +400,7 @@ final class InFlightClipRecorder implements VulkanRenderExtension
 		{
 			Future<?> drained = frameExecutor.submit(() -> { });
 			drained.get(5, TimeUnit.SECONDS);
-			active.stop();
+			active.stopForRestart();
 			applyEncoderSettings(active);
 			active.start(captureFps());
 		}
@@ -434,7 +499,7 @@ final class InFlightClipRecorder implements VulkanRenderExtension
 
 	private Path writeClip(byte[] bytes, long timestamp) throws IOException
 	{
-		Path root = Paths.get(System.getProperty("user.home"), ".runelite", "recordings");
+		Path root = com.gpuvulkan.recording.RecordingStore.defaultRoot();
 		Files.createDirectories(root);
 		String slug = slugify("vulkan_clip_" + timestamp);
 		Path candidate = root.resolve(slug + ".mp4");

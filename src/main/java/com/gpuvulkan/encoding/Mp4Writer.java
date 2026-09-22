@@ -51,6 +51,53 @@ public final class Mp4Writer
         }
     }
 
+    /**
+     * PCM audio track state. One MP4 sample is one audio frame, so the tables
+     * are kept in constant-size / run-length form rather than per-frame
+     * records: 48 kHz for ten minutes would otherwise be 28M objects.
+     */
+    public static final class AudioTrack
+    {
+        public final int sampleRate;
+        public final int channels;
+        public final int bitsPerSample;
+        /** {offsetInMdat, frameCount} per written block. */
+        private final List<long[]> chunks = new ArrayList<>();
+        private long totalFrames;
+
+        public AudioTrack(int sampleRate, int channels, int bitsPerSample)
+        {
+            this.sampleRate = sampleRate;
+            this.channels = channels;
+            this.bitsPerSample = bitsPerSample;
+        }
+
+        public void addChunk(long offsetInMdat, long frameCount)
+        {
+            if (frameCount <= 0)
+            {
+                return;
+            }
+            chunks.add(new long[]{offsetInMdat, frameCount});
+            totalFrames += frameCount;
+        }
+
+        public int bytesPerFrame()
+        {
+            return channels * (bitsPerSample / 8);
+        }
+
+        public long totalFrames()
+        {
+            return totalFrames;
+        }
+
+        public boolean isEmpty()
+        {
+            return chunks.isEmpty();
+        }
+    }
+
     private final int width;
     private final int height;
     private final int timescale;
@@ -165,12 +212,29 @@ public final class Mp4Writer
     /** Convenience: also exposes the final MP4 as a byte[] (tests and small clips). */
     public byte[] writeToBytes(byte[] avccBitstream, List<Sample> samples)
     {
+        return writeToBytes(avccBitstream, samples, null, 0, 0);
+    }
+
+    /**
+     * Faststart MP4 with an optional PCM track. Audio follows the video in a
+     * single mdat, so the layout stays ftyp | moov | mdat.
+     */
+    public byte[] writeToBytes(byte[] avccBitstream, List<Sample> samples,
+                               byte[] pcm, int sampleRate, int channels)
+    {
+        AudioTrack audio = null;
+        if (pcm != null && pcm.length > 0 && sampleRate > 0 && channels > 0)
+        {
+            audio = new AudioTrack(sampleRate, channels, 16);
+            audio.addChunk(avccBitstream.length, pcm.length / audio.bytesPerFrame());
+        }
+        int pcmBytes = audio == null ? 0 : (int) audio.totalFrames() * audio.bytesPerFrame();
+
         byte[] ftyp = buildFtyp();
-        byte[] moovProbe = buildMoov(samples, 0);
-        int headerSize = ftyp.length + moovProbe.length;
-        int mdatPayloadStart = headerSize + 8;
-        byte[] moov = buildMoov(samples, mdatPayloadStart);
-        int mdatBoxSize = 8 + avccBitstream.length;
+        byte[] moovProbe = buildMoov(samples, audio, 0);
+        int mdatPayloadStart = ftyp.length + moovProbe.length + 8;
+        byte[] moov = buildMoov(samples, audio, mdatPayloadStart);
+        int mdatBoxSize = 8 + avccBitstream.length + pcmBytes;
         int total = ftyp.length + moov.length + mdatBoxSize;
 
         ByteBuffer buf = ByteBuffer.allocate(total);
@@ -179,10 +243,15 @@ public final class Mp4Writer
         buf.putInt(mdatBoxSize);
         buf.putInt(0x6D646174);
         buf.put(avccBitstream);
+        if (pcmBytes > 0)
+        {
+            buf.put(pcm, 0, pcmBytes);
+        }
         return buf.array();
     }
 
-    private byte[] buildFtyp()
+    /** Package-private so StreamingMp4Writer can emit the same header. */
+    static byte[] buildFtyp()
     {
         // ftyp: major_brand='isom', minor_version=512, compatible_brands=['isom','iso2','avc1','mp41']
         BoxBuilder b = new BoxBuilder("ftyp");
@@ -192,21 +261,41 @@ public final class Mp4Writer
         b.writeFourCC("iso2");
         b.writeFourCC("avc1");
         b.writeFourCC("mp41");
+        // ISO/IEC 23003-5; without it players may skip a raw PCM audio track.
+        b.writeFourCC("iso6");
         return b.build();
     }
 
-    private byte[] buildMoov(List<Sample> samples, int mdatPayloadStart)
+    /** Package-private: StreamingMp4Writer appends moov after a streamed mdat. */
+    byte[] buildMoov(List<Sample> samples, int mdatPayloadStart)
     {
-        long totalDuration = 0;
-        for (Sample s : samples) totalDuration += s.durationTicks;
+        return buildMoov(samples, null, mdatPayloadStart);
+    }
+
+    byte[] buildMoov(List<Sample> samples, AudioTrack audio, int mdatPayloadStart)
+    {
+        long videoDuration = 0;
+        for (Sample s : samples) videoDuration += s.durationTicks;
+
+        // mvhd duration is in movie timescale and covers the longest track.
+        long movieDuration = videoDuration;
+        if (audio != null && !audio.isEmpty())
+        {
+            movieDuration = Math.max(movieDuration,
+                audio.totalFrames() * timescale / Math.max(1, audio.sampleRate));
+        }
 
         BoxBuilder moov = new BoxBuilder("moov");
-        moov.writeBytes(buildMvhd(totalDuration));
-        moov.writeBytes(buildTrak(samples, totalDuration, mdatPayloadStart));
+        moov.writeBytes(buildMvhd(movieDuration, audio != null && !audio.isEmpty() ? 3 : 2));
+        moov.writeBytes(buildTrak(samples, videoDuration, mdatPayloadStart));
+        if (audio != null && !audio.isEmpty())
+        {
+            moov.writeBytes(buildAudioTrak(audio, mdatPayloadStart));
+        }
         return moov.build();
     }
 
-    private byte[] buildMvhd(long duration)
+    private byte[] buildMvhd(long duration, int nextTrackId)
     {
         BoxBuilder b = new BoxBuilder("mvhd");
         b.writeInt(0);                          // version + flags
@@ -220,35 +309,35 @@ public final class Mp4Writer
         b.writeInt(0); b.writeInt(0);           // reserved[2]
         writeUnityMatrix(b);                    // 9x int32 matrix
         for (int i = 0; i < 6; i++) b.writeInt(0); // pre_defined[6]
-        b.writeInt(2);                          // next_track_ID
+        b.writeInt(nextTrackId);                // next_track_ID
         return b.build();
     }
 
     private byte[] buildTrak(List<Sample> samples, long totalDuration, int mdatPayloadStart)
     {
         BoxBuilder trak = new BoxBuilder("trak");
-        trak.writeBytes(buildTkhd(totalDuration));
+        trak.writeBytes(buildTkhd(totalDuration, 1, false));
         trak.writeBytes(buildMdia(samples, totalDuration, mdatPayloadStart));
         return trak.build();
     }
 
-    private byte[] buildTkhd(long duration)
+    private byte[] buildTkhd(long duration, int trackId, boolean audio)
     {
         BoxBuilder b = new BoxBuilder("tkhd");
         b.writeInt(0x0000000F);                 // version=0, flags: enabled|in_movie|in_preview|in_poster
         b.writeInt(0);                          // creation_time
         b.writeInt(0);                          // modification_time
-        b.writeInt(1);                          // track_ID
+        b.writeInt(trackId);                    // track_ID
         b.writeInt(0);                          // reserved
         b.writeInt((int) duration);             // duration
         b.writeInt(0); b.writeInt(0);           // reserved[2]
         b.writeShort((short) 0);                // layer
         b.writeShort((short) 0);                // alternate_group
-        b.writeShort((short) 0);                // volume (0 for non-audio)
+        b.writeShort((short) (audio ? 0x0100 : 0)); // volume 1.0 for audio
         b.writeShort((short) 0);                // reserved
         writeUnityMatrix(b);
-        b.writeInt(width << 16);                // width 16.16 fixed
-        b.writeInt(height << 16);               // height
+        b.writeInt(audio ? 0 : width << 16);    // width 16.16 fixed
+        b.writeInt(audio ? 0 : height << 16);   // height
         return b.build();
     }
 
@@ -263,11 +352,16 @@ public final class Mp4Writer
 
     private byte[] buildMdhd(long duration)
     {
+        return buildMdhd(duration, timescale);
+    }
+
+    private byte[] buildMdhd(long duration, int mediaTimescale)
+    {
         BoxBuilder b = new BoxBuilder("mdhd");
         b.writeInt(0);                          // version + flags
         b.writeInt(0);                          // creation
         b.writeInt(0);                          // modification
-        b.writeInt(timescale);
+        b.writeInt(mediaTimescale);
         b.writeInt((int) duration);
         b.writeShort((short) 0x55C4);           // 'und' packed language
         b.writeShort((short) 0);                // pre_defined
@@ -276,12 +370,19 @@ public final class Mp4Writer
 
     private byte[] buildHdlr()
     {
+        return buildHdlr("vide", "VideoHandler");
+    }
+
+    private byte[] buildHdlr(String handler, String name)
+    {
         BoxBuilder b = new BoxBuilder("hdlr");
         b.writeInt(0);                          // version + flags
         b.writeInt(0);                          // pre_defined
-        b.writeFourCC("vide");
+        b.writeFourCC(handler);
         b.writeInt(0); b.writeInt(0); b.writeInt(0); // reserved[3]
-        b.writeBytes(new byte[] { 'V','i','d','e','o','H','a','n','d','l','e','r', 0 });
+        byte[] ascii = name.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        b.writeBytes(ascii);
+        b.writeByte((byte) 0);
         return b.build();
     }
 
@@ -459,6 +560,128 @@ public final class Mp4Writer
         b.writeInt(0);
         b.writeInt(samples.size());
         for (Sample s : samples) b.writeInt(mdatPayloadStart + s.offsetInMdat);
+        return b.build();
+    }
+
+    private byte[] buildAudioTrak(AudioTrack audio, int mdatPayloadStart)
+    {
+        long duration = audio.totalFrames();
+        BoxBuilder trak = new BoxBuilder("trak");
+        trak.writeBytes(buildTkhd(duration * timescale / Math.max(1, audio.sampleRate), 2, true));
+
+        BoxBuilder mdia = new BoxBuilder("mdia");
+        mdia.writeBytes(buildMdhd(duration, audio.sampleRate));
+        mdia.writeBytes(buildHdlr("soun", "SoundHandler"));
+
+        BoxBuilder minf = new BoxBuilder("minf");
+        minf.writeBytes(buildSmhd());
+        minf.writeBytes(buildDinf());
+        minf.writeBytes(buildAudioStbl(audio, mdatPayloadStart));
+        mdia.writeBytes(minf.build());
+
+        trak.writeBytes(mdia.build());
+        return trak.build();
+    }
+
+    private byte[] buildSmhd()
+    {
+        BoxBuilder b = new BoxBuilder("smhd");
+        b.writeInt(0);                          // version + flags
+        b.writeShort((short) 0);                // balance
+        b.writeShort((short) 0);                // reserved
+        return b.build();
+    }
+
+    private byte[] buildAudioStbl(AudioTrack audio, int mdatPayloadStart)
+    {
+        BoxBuilder stbl = new BoxBuilder("stbl");
+        stbl.writeBytes(buildAudioStsd(audio));
+        stbl.writeBytes(buildAudioStts(audio));
+        stbl.writeBytes(buildAudioStsc(audio));
+        stbl.writeBytes(buildAudioStsz(audio));
+        stbl.writeBytes(buildAudioStco(audio, mdatPayloadStart));
+        return stbl.build();
+    }
+
+    /** ISO/IEC 23003-5 ipcm sample entry: an AudioSampleEntry plus pcmC. */
+    private byte[] buildAudioStsd(AudioTrack audio)
+    {
+        BoxBuilder stsd = new BoxBuilder("stsd");
+        stsd.writeInt(0);                       // version + flags
+        stsd.writeInt(1);                       // entry_count
+
+        BoxBuilder ipcm = new BoxBuilder("ipcm");
+        for (int i = 0; i < 6; i++) ipcm.writeByte((byte) 0); // reserved
+        ipcm.writeShort((short) 1);             // data_reference_index
+        ipcm.writeInt(0); ipcm.writeInt(0);     // reserved[2]
+        ipcm.writeShort((short) audio.channels);
+        ipcm.writeShort((short) audio.bitsPerSample);
+        ipcm.writeShort((short) 0);             // pre_defined
+        ipcm.writeShort((short) 0);             // reserved
+        ipcm.writeInt(audio.sampleRate << 16);  // samplerate 16.16
+
+        BoxBuilder pcmC = new BoxBuilder("pcmC");
+        pcmC.writeInt(0);                       // version + flags
+        pcmC.writeByte((byte) 1);               // format_flags bit0: little-endian
+        pcmC.writeByte((byte) audio.bitsPerSample);
+        ipcm.writeBytes(pcmC.build());
+
+        stsd.writeBytes(ipcm.build());
+        return stsd.build();
+    }
+
+    /** Every audio frame is one tick at the media timescale, so one run covers all. */
+    private byte[] buildAudioStts(AudioTrack audio)
+    {
+        BoxBuilder b = new BoxBuilder("stts");
+        b.writeInt(0);
+        b.writeInt(1);
+        b.writeInt((int) audio.totalFrames());
+        b.writeInt(1);
+        return b.build();
+    }
+
+    private byte[] buildAudioStsc(AudioTrack audio)
+    {
+        List<int[]> runs = new ArrayList<>();
+        for (int i = 0; i < audio.chunks.size(); i++)
+        {
+            int perChunk = (int) audio.chunks.get(i)[1];
+            if (runs.isEmpty() || runs.get(runs.size() - 1)[1] != perChunk)
+            {
+                runs.add(new int[]{i + 1, perChunk});
+            }
+        }
+        BoxBuilder b = new BoxBuilder("stsc");
+        b.writeInt(0);
+        b.writeInt(runs.size());
+        for (int[] r : runs)
+        {
+            b.writeInt(r[0]);                   // first_chunk
+            b.writeInt(r[1]);                   // samples_per_chunk
+            b.writeInt(1);                      // sample_description_index
+        }
+        return b.build();
+    }
+
+    private byte[] buildAudioStsz(AudioTrack audio)
+    {
+        BoxBuilder b = new BoxBuilder("stsz");
+        b.writeInt(0);
+        b.writeInt(audio.bytesPerFrame());      // constant sample size
+        b.writeInt((int) audio.totalFrames());
+        return b.build();
+    }
+
+    private byte[] buildAudioStco(AudioTrack audio, int mdatPayloadStart)
+    {
+        BoxBuilder b = new BoxBuilder("stco");
+        b.writeInt(0);
+        b.writeInt(audio.chunks.size());
+        for (long[] c : audio.chunks)
+        {
+            b.writeInt((int) (mdatPayloadStart + c[0]));
+        }
         return b.build();
     }
 
