@@ -152,6 +152,18 @@ final class RecordingCard extends JPanel
 		panel.add(titleLabel);
 		panel.add(kindLabel);
 		panel.add(metaLabel);
+
+		String discord = entry.metadata().get("discord");
+		if (discord != null)
+		{
+			JLabel status = new JLabel("Discord: " + discord);
+			status.setFont(FontManager.getRunescapeSmallFont());
+			boolean pending = "uploading".equals(discord) || "queued".equals(discord);
+			status.setForeground("sent".equals(discord) ? ColorScheme.PROGRESS_COMPLETE_COLOR
+				: pending ? ColorScheme.LIGHT_GRAY_COLOR
+				: ColorScheme.PROGRESS_INPROGRESS_COLOR);
+			panel.add(status);
+		}
 		return panel;
 	}
 

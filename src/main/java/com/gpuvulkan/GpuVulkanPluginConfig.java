@@ -518,6 +518,28 @@ public interface GpuVulkanPluginConfig extends Config
 	default int recordingAudioGain() { return 100; }
 
 	@ConfigItem(
+		keyName = "discordWebhookUrl",
+		name = "Discord webhook",
+		description = "Post finished recordings to this Discord webhook. Leave empty to post "
+			+ "nothing. Create one under Server Settings, Integrations, Webhooks.",
+		section = RECORDINGS_SECTION,
+		position = 11,
+		secret = true
+	)
+	default String discordWebhookUrl() { return ""; }
+
+	@Range(min = 1, max = 500)
+	@ConfigItem(
+		keyName = "discordMaxUploadMb",
+		name = "Discord size limit",
+		description = "Do not attempt to post recordings larger than this. Discord allows 20MB "
+			+ "by default and more on boosted servers, so raise it if yours is boosted.",
+		section = RECORDINGS_SECTION,
+		position = 12
+	)
+	default int discordMaxUploadMb() { return 20; }
+
+	@ConfigItem(
 		keyName = "recordingChatFeedback",
 		name = "Announce in chat",
 		description = "Post a game message when a recording is saved.",

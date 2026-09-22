@@ -65,6 +65,9 @@ public interface RecordingService
 	/** Renames a recording and the files behind it. */
 	boolean rename(String id, String description);
 
+	/** Attaches a key/value to a recording, for state the recorder does not own. */
+	void annotate(String id, String key, String value);
+
 	/** Exempts a recording from retention eviction. */
 	boolean setPinned(String id, boolean pinned);
 

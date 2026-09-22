@@ -187,6 +187,13 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 	}
 
 	@Override
+	public void annotate(String id, String key, String value)
+	{
+		store.annotate(id, key, value).ifPresent(e ->
+			eventBus.post(new com.gpuvulkan.recording.events.RecordingUpdated(e)));
+	}
+
+	@Override
 	public boolean setPinned(String id, boolean pinned)
 	{
 		return store.setPinned(id, pinned).map(e -> e.pinned() == pinned).orElse(false);

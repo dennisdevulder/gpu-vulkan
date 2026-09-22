@@ -125,6 +125,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	private ConfigManager configManager;
 
 	@Inject
+	private okhttp3.OkHttpClient httpClient;
+
+	@Inject
 	private net.runelite.client.game.ItemManager itemManager;
 
 	private final HotkeyListener inFlightClipHotkeyListener = new HotkeyListener(() -> config.inFlightEncodingHotkey())
@@ -172,6 +175,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	private final RecordingKindRegistry recordingKinds = new RecordingKindRegistry();
 	private volatile com.gpuvulkan.recording.RecordingHandle manualSession;
 	private TriggerRegistry recordingTriggers;
+	private com.gpuvulkan.recording.discord.DiscordUploader discordUploader;
 	private RecordingsPanel recordingsPanel;
 	private NavigationButton recordingsNavButton;
 	private com.gpuvulkan.gfx.Renderer gfx;
@@ -498,6 +502,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		recordingTriggers = new TriggerRegistry(new RecordingContext(recordingService, client,
 			clientThread, eventBus, itemManager, config));
 		recordingTriggers.bindAll(BuiltInTriggers.all());
+		discordUploader = new com.gpuvulkan.recording.discord.DiscordUploader(
+			recordingService, config, httpClient);
+		eventBus.register(discordUploader);
 		addRecordingsPanel();
 		extensionQueue.attachQueued(renderExtensions);
 		disposables.add(renderExtensions);
@@ -633,6 +640,12 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		keyManager.unregisterKeyListener(inFlightClipHotkeyListener);
 		keyManager.unregisterKeyListener(recordingSessionHotkeyListener);
 		removeRecordingsPanel();
+		if (discordUploader != null)
+		{
+			eventBus.unregister(discordUploader);
+			discordUploader.close();
+			discordUploader = null;
+		}
 		if (recordingTriggers != null)
 		{
 			recordingTriggers.unbindAll();

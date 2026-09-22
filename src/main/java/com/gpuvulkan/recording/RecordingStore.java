@@ -375,6 +375,34 @@ public final class RecordingStore
 		}
 	}
 
+	/**
+	 * Attaches a key/value to a stored recording. The metadata map is the
+	 * extension point for state the recorder itself knows nothing about.
+	 *
+	 * @return the updated entry, or empty when the id is unknown
+	 */
+	public Optional<RecordingEntry> annotate(String id, String key, String value)
+	{
+		RecordingEntry entry;
+		synchronized (lock)
+		{
+			entry = entries.get(id);
+		}
+		if (entry == null)
+		{
+			return Optional.empty();
+		}
+		try
+		{
+			return Optional.of(commit(entry.toBuilder().meta(key, value).build()));
+		}
+		catch (IOException e)
+		{
+			log.warn("Could not annotate recording {}", id, e);
+			return Optional.of(entry);
+		}
+	}
+
 	public Optional<RecordingEntry> setPinned(String id, boolean pinned)
 	{
 		RecordingEntry entry;

@@ -560,6 +560,12 @@ public final class RecordingsPanel extends PluginPanel
 	}
 
 	@Subscribe
+	public void onRecordingUpdated(com.gpuvulkan.recording.events.RecordingUpdated event)
+	{
+		refresh();
+	}
+
+	@Subscribe
 	public void onRecordingDeleted(RecordingDeleted event)
 	{
 		refresh();
