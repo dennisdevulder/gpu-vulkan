@@ -518,39 +518,6 @@ public interface GpuVulkanPluginConfig extends Config
 	default int recordingAudioGain() { return 100; }
 
 	@ConfigItem(
-		keyName = "recordingMicEnabled",
-		name = "Include microphone",
-		description = "Mix your microphone into the recording. Your own voice does not reach "
-			+ "the system output, so without this you hear everyone in a call except yourself.",
-		section = RECORDINGS_SECTION,
-		position = 8
-	)
-	default boolean recordingMicEnabled() { return false; }
-
-	// Chosen from the Recordings panel, like the capture device.
-	@ConfigItem(
-		keyName = "recordingMicDevice",
-		name = "Microphone",
-		description = "Microphone to mix in. Pick one in the Recordings panel.",
-		section = RECORDINGS_SECTION,
-		position = 9,
-		hidden = true
-	)
-	default String recordingMicDevice() { return "default"; }
-
-	@Range(min = 0, max = 1000)
-	@ConfigItem(
-		keyName = "recordingMicGain",
-		name = "Microphone level",
-		description = "Volume of the mixed-in microphone, as a percentage. Capture devices "
-			+ "are read raw, without the gain your desktop applies, so this often needs to be "
-			+ "well above 100. The meter in the Recordings panel shows the result.",
-		section = RECORDINGS_SECTION,
-		position = 10
-	)
-	default int recordingMicGain() { return 100; }
-
-	@ConfigItem(
 		keyName = "recordingChatFeedback",
 		name = "Announce in chat",
 		description = "Post a game message when a recording is saved.",

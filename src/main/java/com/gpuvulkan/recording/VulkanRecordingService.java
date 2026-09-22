@@ -204,20 +204,6 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 	}
 
 	@Override
-	public float micLevel()
-	{
-		AudioCapture active = audio;
-		return active == null ? 0f : active.micLevel();
-	}
-
-	@Override
-	public boolean micUnavailable()
-	{
-		AudioCapture active = audio;
-		return active != null && active.micFailed();
-	}
-
-	@Override
 	public List<RecordingHandle> activeSessions()
 	{
 		return new ArrayList<>(sessions);
@@ -472,19 +458,15 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 		};
 	}
 
+	/**
+	 * One device, whatever the system mixer routes into it. Combining sources
+	 * is the audio server's job: doing it here means opening hardware
+	 * directly, which takes it away from everything else on the machine.
+	 */
 	private AudioSource buildSource()
 	{
-		AudioSource system = new GainAudioSource(
+		return new GainAudioSource(
 			new SystemAudioSource(config.recordingAudioDevice()), config.recordingAudioGain());
-		if (!config.recordingMicEnabled())
-		{
-			return system;
-		}
-		// No fallback for the mic: the default is usually the output monitor,
-		// and substituting it would mix the system audio in a second time.
-		AudioSource mic = new GainAudioSource(
-			new SystemAudioSource(config.recordingMicDevice(), false), config.recordingMicGain());
-		return new MixingAudioSource(system, mic);
 	}
 
 	/** Sized from the clip window, so the pre-roll always has audio behind it. */

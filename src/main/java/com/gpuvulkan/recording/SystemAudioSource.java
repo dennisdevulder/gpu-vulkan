@@ -25,8 +25,6 @@ public final class SystemAudioSource implements AudioSource
 	private static final int BITS = 16;
 
 	private final String deviceName;
-	/** Wrong for a microphone: the default is usually the output monitor. */
-	private final boolean fallbackToDefault;
 	private TargetDataLine line;
 	private int capturedChannels = CHANNELS;
 	private volatile float level;
@@ -34,13 +32,7 @@ public final class SystemAudioSource implements AudioSource
 
 	public SystemAudioSource(String deviceName)
 	{
-		this(deviceName, true);
-	}
-
-	public SystemAudioSource(String deviceName, boolean fallbackToDefault)
-	{
 		this.deviceName = deviceName;
-		this.fallbackToDefault = fallbackToDefault;
 	}
 
 	@Override
@@ -100,11 +92,6 @@ public final class SystemAudioSource implements AudioSource
 				}
 				Mixer mixer = AudioSystem.getMixer(mi);
 				return mixer.isLineSupported(info) ? (TargetDataLine) mixer.getLine(info) : null;
-			}
-			if (!fallbackToDefault)
-			{
-				throw new IllegalStateException("audio device '" + deviceName
-					+ "' is not present. Available: " + captureDevices());
 			}
 			log.warn("Audio device '{}' is unavailable, using the default instead. Available: {}",
 				deviceName, captureDevices());

@@ -85,24 +85,15 @@ public final class RecordingsPanel extends PluginPanel
 		void set(String device);
 
 		boolean enabled();
-
-		String getMic();
-
-		void setMic(String device);
-
-		boolean micEnabled();
 	}
 
 	private final JLabel summary = new JLabel();
 	private final JLabel status = new JLabel();
 	private final JComboBox<String> kindFilter = new JComboBox<>();
 	private final JComboBox<String> audioDevice = new JComboBox<>();
-	private final JComboBox<String> micDevice = new JComboBox<>();
 	private final JLabel audioHeading = caption("Audio", true);
 	private final JLabel audioDeviceLabel = caption("Record from", false);
-	private final JLabel micDeviceLabel = caption("Microphone", false);
 	private final LevelMeter audioMeter = new LevelMeter();
-	private final LevelMeter micMeter = new LevelMeter();
 	private final JLabel audioStatus = new JLabel();
 	private final JTextField search = new JTextField();
 	private final JPanel livePanel = new JPanel();
@@ -241,17 +232,6 @@ public final class RecordingsPanel extends PluginPanel
 			}
 		});
 
-		micDevice.setAlignmentX(Component.LEFT_ALIGNMENT);
-		micDevice.setMaximumSize(new Dimension(Integer.MAX_VALUE, 24));
-		micDevice.setToolTipText("Microphone mixed into the recording");
-		micDevice.addActionListener(e ->
-		{
-			Object selected = micDevice.getSelectedItem();
-			if (!rebuildingFilters && selected != null)
-			{
-				audioSetting.setMic(String.valueOf(selected));
-			}
-		});
 
 		header.add(Box.createVerticalStrut(6));
 		header.add(filters);
@@ -262,11 +242,6 @@ public final class RecordingsPanel extends PluginPanel
 		header.add(audioDevice);
 		header.add(Box.createVerticalStrut(3));
 		header.add(audioMeter);
-		header.add(Box.createVerticalStrut(6));
-		header.add(micDeviceLabel);
-		header.add(micDevice);
-		header.add(Box.createVerticalStrut(3));
-		header.add(micMeter);
 		header.add(Box.createVerticalStrut(2));
 		header.add(audioStatus);
 		header.add(Box.createVerticalStrut(4));
@@ -344,15 +319,11 @@ public final class RecordingsPanel extends PluginPanel
 	private void refreshAudio()
 	{
 		boolean on = audioSetting.enabled();
-		boolean showMic = on && audioSetting.micEnabled();
 		audioHeading.setVisible(on);
 		audioDeviceLabel.setVisible(on);
 		audioDevice.setVisible(on);
 		audioMeter.setVisible(on);
 		audioStatus.setVisible(on);
-		micDeviceLabel.setVisible(showMic);
-		micDevice.setVisible(showMic);
-		micMeter.setVisible(showMic);
 		if (!on)
 		{
 			return;
@@ -371,14 +342,6 @@ public final class RecordingsPanel extends PluginPanel
 			}
 			audioDevice.setSelectedItem(chosen == null || chosen.isEmpty() ? "default" : chosen);
 
-			String mic = audioSetting.getMic();
-			micDevice.removeAllItems();
-			micDevice.addItem("default");
-			for (String name : devices)
-			{
-				micDevice.addItem(name);
-			}
-			micDevice.setSelectedItem(mic == null || mic.isEmpty() ? "default" : mic);
 		}
 		finally
 		{
@@ -402,11 +365,6 @@ public final class RecordingsPanel extends PluginPanel
 		else if (service.audioSilent())
 		{
 			audioStatus.setText("Audio: no signal");
-			audioStatus.setForeground(ColorScheme.PROGRESS_INPROGRESS_COLOR);
-		}
-		else if (audioSetting.micEnabled() && service.micUnavailable())
-		{
-			audioStatus.setText("Audio: capturing, microphone not found");
 			audioStatus.setForeground(ColorScheme.PROGRESS_INPROGRESS_COLOR);
 		}
 		else
@@ -558,10 +516,6 @@ public final class RecordingsPanel extends PluginPanel
 			return;
 		}
 		audioMeter.setLevel(service.audioLevel());
-		if (audioSetting.micEnabled())
-		{
-			micMeter.setLevel(service.micLevel());
-		}
 	}
 
 	@Subscribe

@@ -725,8 +725,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			clientThread.invokeLater(this::applyClientRuntimeConfig);
 		}
 		if ("recordingAudioEnabled".equals(ev.getKey()) || "recordingAudioDevice".equals(ev.getKey())
-			|| "recordingMicEnabled".equals(ev.getKey()) || "recordingMicDevice".equals(ev.getKey())
-			|| "recordingMicGain".equals(ev.getKey()) || "recordingAudioGain".equals(ev.getKey()))
+			|| "recordingAudioGain".equals(ev.getKey()))
 		{
 			VulkanRecordingService service = recordingService;
 			if (service != null)
@@ -884,24 +883,6 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 					return config.recordingAudioEnabled();
 				}
 
-				@Override
-				public String getMic()
-				{
-					return config.recordingMicDevice();
-				}
-
-				@Override
-				public void setMic(String device)
-				{
-					configManager.setConfiguration(GpuVulkanPluginConfig.GROUP,
-						"recordingMicDevice", device);
-				}
-
-				@Override
-				public boolean micEnabled()
-				{
-					return config.recordingMicEnabled();
-				}
 			});
 		// The panel listens on the same public events any other plugin would.
 		eventBus.register(recordingsPanel);
