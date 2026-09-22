@@ -143,7 +143,7 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 	{
 		if (!config.recordingsEnabled())
 		{
-			return "turn on Recordings > Save recordings";
+			return "turn on Recording > Enable recording";
 		}
 		return backend.unavailableReason();
 	}

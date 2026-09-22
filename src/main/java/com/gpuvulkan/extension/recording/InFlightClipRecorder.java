@@ -70,8 +70,7 @@ final class InFlightClipRecorder implements VulkanRenderExtension, RecordingBack
 	public synchronized void onConfigChanged(net.runelite.client.events.ConfigChanged event)
 	{
 		String key = event.getKey();
-		if ("inFlightEncodingEnabled".equals(key)
-			|| "inFlightEncodingType".equals(key)
+		if ("recordingsEnabled".equals(key)
 			|| "inFlightEncodingFps".equals(key)
 			|| "inFlightEncodingQuality".equals(key))
 		{
@@ -96,7 +95,7 @@ final class InFlightClipRecorder implements VulkanRenderExtension, RecordingBack
 		StreamingVulkanEncoder active;
 		synchronized (this)
 		{
-			if (!config.inFlightEncodingEnabled())
+			if (!config.recordingsEnabled())
 			{
 				return;
 			}
@@ -137,7 +136,7 @@ final class InFlightClipRecorder implements VulkanRenderExtension, RecordingBack
 		int postSeconds = clamp(requestedPostSeconds, 0, MAX_TOTAL_SECONDS - preSeconds);
 		synchronized (this)
 		{
-			if (!config.inFlightEncodingEnabled())
+			if (!config.recordingsEnabled())
 			{
 				return CompletableFuture.failedFuture(new IllegalStateException("in-flight encoding is disabled"));
 			}
@@ -185,15 +184,9 @@ final class InFlightClipRecorder implements VulkanRenderExtension, RecordingBack
 
 	private synchronized void configureEncoder()
 	{
-		if (!config.inFlightEncodingEnabled())
+		if (!config.recordingsEnabled())
 		{
-			unavailableReason = "turn on In-flight Encoding > Enable encoding";
-			resetEncoder();
-			return;
-		}
-		if (config.inFlightEncodingType() != GpuVulkanPluginConfig.EncodingType.MP4)
-		{
-			unavailableReason = "only MP4 is implemented";
+			unavailableReason = "turn on Recording > Enable recording";
 			resetEncoder();
 			return;
 		}
@@ -271,7 +264,7 @@ final class InFlightClipRecorder implements VulkanRenderExtension, RecordingBack
 	@Override
 	public synchronized boolean available()
 	{
-		if (!config.inFlightEncodingEnabled())
+		if (!config.recordingsEnabled())
 		{
 			return false;
 		}

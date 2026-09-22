@@ -206,6 +206,17 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	private ScenePipelines scenePipelines;
 	private SubWorldViewManager subWorldViews;
 
+	/** Settings left behind by removed features. The bare "wireframe" entry
+	 *  still matches BaseRenderer's startsWith check and triggers pointless
+	 *  reconfigures, so it is worth clearing rather than only untidy. */
+	private static final String[] RETIRED_KEYS = {
+		"benchmarkDisableAlphaCoverage", "benchmarkSkipDynamicCapture",
+		"benchmarkSkipScene", "benchmarkSkipUi", "debugClickRegion",
+		"manualActorCapture", "modelComputeDebugDraw", "modelComputeReplacement",
+		"singlePassAlpha", "visualStyle", "wireframe",
+		"recordingMicEnabled", "recordingMicDevice", "recordingMicGain",
+	};
+
 	/** Read by the JVM shutdown hook to find the live instance — must be
 	 *  static because the hook outlives any single plugin instance. */
 	private static volatile GpuVulkanPlugin activeInstance;
@@ -218,6 +229,9 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 	@Override
 	protected void startUp()
 	{
+		// Before the macOS bail-out: a profile should migrate even where the
+		// renderer never starts, since profiles move between machines.
+		migrateConfig();
 		if (isMacOS())
 		{
 			return;
@@ -989,6 +1003,41 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 			.type(net.runelite.api.ChatMessageType.CONSOLE)
 			.runeLiteFormattedMessage(message)
 			.build());
+	}
+
+	/**
+	 * Applies one-time changes to stored settings. Versioned rather than
+	 * inferred from the keys present, so future migrations have somewhere to
+	 * hang and a half-applied one re-runs rather than being skipped.
+	 */
+	private void migrateConfig()
+	{
+		Integer version = configManager.getConfiguration(
+			GpuVulkanPluginConfig.GROUP, "schemaVersion", Integer.class);
+		if (version != null && version >= 1)
+		{
+			return;
+		}
+
+		// Recording used to need two switches, and having only the library one
+		// set recorded nothing at all. Either being set means recording was
+		// wanted, so the merged switch is the union.
+		Boolean encoding = configManager.getConfiguration(
+			GpuVulkanPluginConfig.GROUP, "inFlightEncodingEnabled", Boolean.class);
+		if (Boolean.TRUE.equals(encoding) && !config.recordingsEnabled())
+		{
+			configManager.setConfiguration(GpuVulkanPluginConfig.GROUP, "recordingsEnabled", true);
+		}
+		configManager.unsetConfiguration(GpuVulkanPluginConfig.GROUP, "inFlightEncodingEnabled");
+		configManager.unsetConfiguration(GpuVulkanPluginConfig.GROUP, "inFlightEncodingType");
+
+		for (String retired : RETIRED_KEYS)
+		{
+			configManager.unsetConfiguration(GpuVulkanPluginConfig.GROUP, retired);
+		}
+
+		// Written last: a crash before this point re-runs the migration.
+		configManager.setConfiguration(GpuVulkanPluginConfig.GROUP, "schemaVersion", 1);
 	}
 
 	private void markExtensionBackendDetached()
