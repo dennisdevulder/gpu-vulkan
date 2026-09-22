@@ -249,6 +249,49 @@ public class RecordingStoreTest
 	}
 
 	@Test
+	public void renamingStripsCharactersAFileNameCannotCarry() throws IOException
+	{
+		RecordingEntry entry = write(RecordingKindRegistry.LOOT, "clip", 1_000L, new byte[10]);
+
+		RecordingEntry renamed = store.rename(entry.id(), "party.mp4").get();
+
+		// What the card shows and what is on disk agree.
+		assertEquals("party mp4", renamed.description());
+		assertTrue(renamed.fileName().endsWith("_party_mp4.mp4"));
+	}
+
+	@Test
+	public void renamingCannotEscapeTheRecordingsFolder() throws IOException
+	{
+		RecordingEntry entry = write(RecordingKindRegistry.LOOT, "clip", 1_000L, new byte[10]);
+
+		RecordingEntry renamed = store.rename(entry.id(), "../../etc/passwd").get();
+
+		assertFalse(renamed.fileName().contains(".."));
+		assertFalse(renamed.fileName().contains("/"));
+		assertTrue(Files.isRegularFile(store.videoPath(renamed)));
+	}
+
+	@Test
+	public void aNameOfOnlyPunctuationLeavesTheRecordingAlone() throws IOException
+	{
+		RecordingEntry entry = write(RecordingKindRegistry.LOOT, "clip", 1_000L, new byte[10]);
+		assertEquals("clip", store.rename(entry.id(), "...").get().description());
+	}
+
+	@Test
+	public void aVeryLongNameIsCapped() throws IOException
+	{
+		RecordingEntry entry = write(RecordingKindRegistry.LOOT, "clip", 1_000L, new byte[10]);
+		StringBuilder sb = new StringBuilder();
+		for (int i = 0; i < 40; i++)
+		{
+			sb.append("long ");
+		}
+		assertTrue(store.rename(entry.id(), sb.toString()).get().description().length() <= 60);
+	}
+
+	@Test
 	public void renamingAnUnknownRecordingIsNotFatal()
 	{
 		assertFalse(store.rename("nope", "whatever").isPresent());

@@ -307,14 +307,14 @@ public final class RecordingStore
 		{
 			return Optional.empty();
 		}
-		String slug = slugify(description);
-		if (slug.isEmpty())
+		String clean = sanitizeDescription(description);
+		if (slugify(clean).isEmpty())
 		{
 			return Optional.of(entry);
 		}
 
 		Path folder = folderOf(entry);
-		String base = baseName(entry.triggeredAt(), description);
+		String base = baseName(entry.triggeredAt(), clean);
 		String candidate = base;
 		for (int i = 2; Files.exists(folder.resolve(candidate + VIDEO_EXT)); i++)
 		{
@@ -354,7 +354,7 @@ public final class RecordingStore
 		}
 
 		RecordingEntry renamed = entry.toBuilder()
-			.description(description)
+			.description(clean)
 			.fileName(candidate + VIDEO_EXT)
 			.thumbnailName(newThumbName)
 			.build();
@@ -537,6 +537,22 @@ public final class RecordingStore
 		String stamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.ROOT).format(new Date(triggeredAt));
 		String slug = slugify(description);
 		return slug.isEmpty() ? stamp : stamp + "_" + slug;
+	}
+
+	/**
+	 * Strips what a file name cannot carry, so the description on the card
+	 * matches the file on disk. Extensions and separators go: a recording
+	 * called "party.mp4" is only ever confusing.
+	 */
+	static String sanitizeDescription(String input)
+	{
+		if (input == null)
+		{
+			return "";
+		}
+		String cleaned = input.replaceAll("[\\p{Cntrl}\\\\/:*?\"<>|.]", " ");
+		cleaned = cleaned.replaceAll("\\s+", " ").trim();
+		return cleaned.length() > 60 ? cleaned.substring(0, 60).trim() : cleaned;
 	}
 
 	static String slugify(String input)
