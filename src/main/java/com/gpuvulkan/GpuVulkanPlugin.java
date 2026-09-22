@@ -883,6 +883,13 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 					return config.recordingAudioEnabled();
 				}
 
+				@Override
+				public void setEnabled(boolean enabled)
+				{
+					configManager.setConfiguration(GpuVulkanPluginConfig.GROUP,
+						"recordingAudioEnabled", enabled);
+				}
+
 			});
 		// The panel listens on the same public events any other plugin would.
 		eventBus.register(recordingsPanel);

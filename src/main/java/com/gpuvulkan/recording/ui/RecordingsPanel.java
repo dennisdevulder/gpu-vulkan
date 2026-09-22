@@ -72,6 +72,8 @@ import net.runelite.client.ui.PluginPanel;
 public final class RecordingsPanel extends PluginPanel
 {
 	private static final String ALL_KINDS = "All kinds";
+	/** Off, as an entry in the device list rather than a separate toggle. */
+	private static final String NO_AUDIO = "None";
 
 	private final RecordingService service;
 	private final Path root;
@@ -85,6 +87,8 @@ public final class RecordingsPanel extends PluginPanel
 		void set(String device);
 
 		boolean enabled();
+
+		void setEnabled(boolean enabled);
 	}
 
 	private final JLabel summary = new JLabel();
@@ -226,10 +230,20 @@ public final class RecordingsPanel extends PluginPanel
 		audioDevice.addActionListener(e ->
 		{
 			Object selected = audioDevice.getSelectedItem();
-			if (!rebuildingFilters && selected != null)
+			if (rebuildingFilters || selected == null)
+			{
+				return;
+			}
+			if (NO_AUDIO.equals(selected))
+			{
+				audioSetting.setEnabled(false);
+			}
+			else
 			{
 				audioSetting.set(String.valueOf(selected));
+				audioSetting.setEnabled(true);
 			}
+			refreshAudio();
 		});
 
 
@@ -319,15 +333,10 @@ public final class RecordingsPanel extends PluginPanel
 	private void refreshAudio()
 	{
 		boolean on = audioSetting.enabled();
-		audioHeading.setVisible(on);
-		audioDeviceLabel.setVisible(on);
-		audioDevice.setVisible(on);
+		// The picker stays visible when off: choosing a device is how audio is
+		// turned back on, so hiding it would strand the user on "None".
 		audioMeter.setVisible(on);
 		audioStatus.setVisible(on);
-		if (!on)
-		{
-			return;
-		}
 
 		rebuildingFilters = true;
 		try
@@ -335,12 +344,14 @@ public final class RecordingsPanel extends PluginPanel
 			List<String> devices = SystemAudioSource.captureDevices();
 			String chosen = audioSetting.get();
 			audioDevice.removeAllItems();
+			audioDevice.addItem(NO_AUDIO);
 			audioDevice.addItem("default");
 			for (String name : devices)
 			{
 				audioDevice.addItem(name);
 			}
-			audioDevice.setSelectedItem(chosen == null || chosen.isEmpty() ? "default" : chosen);
+			audioDevice.setSelectedItem(!on ? NO_AUDIO
+				: chosen == null || chosen.isEmpty() ? "default" : chosen);
 
 		}
 		finally
