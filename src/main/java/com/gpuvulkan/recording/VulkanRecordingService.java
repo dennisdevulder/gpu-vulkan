@@ -179,6 +179,14 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 	}
 
 	@Override
+	public boolean rename(String id, String description)
+	{
+		return store.rename(id, description)
+			.map(e -> description.equals(e.description()))
+			.orElse(false);
+	}
+
+	@Override
 	public boolean setPinned(String id, boolean pinned)
 	{
 		return store.setPinned(id, pinned).map(e -> e.pinned() == pinned).orElse(false);

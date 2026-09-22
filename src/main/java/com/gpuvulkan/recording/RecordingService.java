@@ -62,6 +62,9 @@ public interface RecordingService
 
 	boolean delete(String id);
 
+	/** Renames a recording and the files behind it. */
+	boolean rename(String id, String description);
+
 	/** Exempts a recording from retention eviction. */
 	boolean setPinned(String id, boolean pinned);
 

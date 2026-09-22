@@ -59,6 +59,8 @@ final class RecordingCard extends JPanel
 
 		void reveal(RecordingEntry entry);
 
+		void rename(RecordingEntry entry);
+
 		void togglePin(RecordingEntry entry);
 
 		void delete(RecordingEntry entry);
@@ -108,6 +110,7 @@ final class RecordingCard extends JPanel
 		JPopupMenu menu = new JPopupMenu();
 		menu.add(item("Play", () -> actions.open(entry)));
 		menu.add(item("Show in folder", () -> actions.reveal(entry)));
+		menu.add(item("Rename...", () -> actions.rename(entry)));
 		menu.add(item(entry.pinned() ? "Unpin" : "Pin (keep forever)", () -> actions.togglePin(entry)));
 		menu.addSeparator();
 		menu.add(item("Delete", () -> actions.delete(entry)));

@@ -290,6 +290,91 @@ public final class RecordingStore
 		return true;
 	}
 
+	/**
+	 * Renames a recording and the files behind it, so the description a user
+	 * gave it is what they see in the folder too.
+	 *
+	 * @return the updated entry, or empty when the id is unknown
+	 */
+	public Optional<RecordingEntry> rename(String id, String description)
+	{
+		RecordingEntry entry;
+		synchronized (lock)
+		{
+			entry = entries.get(id);
+		}
+		if (entry == null)
+		{
+			return Optional.empty();
+		}
+		String slug = slugify(description);
+		if (slug.isEmpty())
+		{
+			return Optional.of(entry);
+		}
+
+		Path folder = folderOf(entry);
+		String base = baseName(entry.triggeredAt(), description);
+		String candidate = base;
+		for (int i = 2; Files.exists(folder.resolve(candidate + VIDEO_EXT)); i++)
+		{
+			candidate = base + "_" + i;
+		}
+
+		Path oldSidecar = sidecarPath(entry);
+		try
+		{
+			Files.move(videoPath(entry), folder.resolve(candidate + VIDEO_EXT));
+		}
+		catch (IOException e)
+		{
+			log.warn("Could not rename recording {}", id, e);
+			return Optional.of(entry);
+		}
+
+		String thumbName = entry.thumbnailName();
+		String newThumbName = null;
+		if (thumbName != null && !thumbName.isEmpty())
+		{
+			Path thumbs = folder.resolve(THUMB_DIR);
+			Path from = thumbs.resolve(thumbName);
+			if (Files.isRegularFile(from))
+			{
+				try
+				{
+					Files.move(from, thumbs.resolve(candidate + THUMB_EXT));
+					newThumbName = candidate + THUMB_EXT;
+				}
+				catch (IOException e)
+				{
+					// The video already moved; keep going without the thumbnail.
+					log.debug("Could not rename thumbnail for {}", id, e);
+				}
+			}
+		}
+
+		RecordingEntry renamed = entry.toBuilder()
+			.description(description)
+			.fileName(candidate + VIDEO_EXT)
+			.thumbnailName(newThumbName)
+			.build();
+		try
+		{
+			RecordingCodec.write(sidecarPath(renamed), renamed);
+			deleteQuietly(oldSidecar);
+			synchronized (lock)
+			{
+				entries.put(renamed.id(), renamed);
+			}
+			return Optional.of(renamed);
+		}
+		catch (IOException e)
+		{
+			log.warn("Renamed the files for {} but could not write its sidecar", id, e);
+			return Optional.of(entry);
+		}
+	}
+
 	public Optional<RecordingEntry> setPinned(String id, boolean pinned)
 	{
 		RecordingEntry entry;

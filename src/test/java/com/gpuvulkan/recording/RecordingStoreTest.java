@@ -213,6 +213,55 @@ public class RecordingStoreTest
 	}
 
 	@Test
+	public void renamingMovesTheFilesAndKeepsTheIndexConsistent() throws IOException
+	{
+		RecordingTarget target = store.allocate(RecordingKindRegistry.LOOT, "clip", 1_000L);
+		Files.write(target.file(), new byte[10]);
+		Files.createDirectories(target.thumbnail().getParent());
+		Files.write(target.thumbnail(), new byte[]{1});
+		RecordingEntry entry = store.commit(target.entry()
+			.description("clip").thumbnailName(target.thumbnailName()).build());
+
+		RecordingEntry renamed = store.rename(entry.id(), "WTF drop party").get();
+
+		assertEquals("WTF drop party", renamed.description());
+		assertTrue(renamed.fileName().endsWith("_wtf_drop_party.mp4"));
+		assertFalse("old video is gone", Files.exists(target.file()));
+		assertFalse("old thumbnail is gone", Files.exists(target.thumbnail()));
+		assertTrue(Files.isRegularFile(store.videoPath(renamed)));
+		assertTrue(store.thumbnailPath(renamed).isPresent());
+		// The id is stable, so pins and links survive a rename.
+		assertEquals(entry.id(), renamed.id());
+		assertEquals(1, store.list().size());
+	}
+
+	@Test
+	public void aRenameSurvivesAScan() throws IOException
+	{
+		RecordingEntry entry = write(RecordingKindRegistry.LOOT, "clip", 1_000L, new byte[10]);
+		store.rename(entry.id(), "Zulrah pet");
+
+		RecordingStore reopened = new RecordingStore(root, kinds);
+		reopened.scan();
+
+		assertEquals(1, reopened.list().size());
+		assertEquals("Zulrah pet", reopened.list().get(0).description());
+	}
+
+	@Test
+	public void renamingAnUnknownRecordingIsNotFatal()
+	{
+		assertFalse(store.rename("nope", "whatever").isPresent());
+	}
+
+	@Test
+	public void anEmptyNameLeavesTheRecordingAlone() throws IOException
+	{
+		RecordingEntry entry = write(RecordingKindRegistry.LOOT, "clip", 1_000L, new byte[10]);
+		assertEquals("clip", store.rename(entry.id(), "   ").get().description());
+	}
+
+	@Test
 	public void pinningPersistsAcrossAScan() throws IOException
 	{
 		RecordingEntry entry = write(RecordingKindRegistry.LOOT, "keep", 1_000L, new byte[10]);

@@ -125,6 +125,25 @@ public final class RecordingsPanel extends PluginPanel
 		}
 
 		@Override
+		public void rename(RecordingEntry entry)
+		{
+			String current = entry.description().isEmpty()
+				? service.kinds().resolve(entry.kindId()).displayName() : entry.description();
+			String chosen = JOptionPane.showInputDialog(RecordingsPanel.this,
+				"Name this recording", current);
+			if (chosen == null || chosen.trim().isEmpty() || chosen.equals(current))
+			{
+				return;
+			}
+			if (!service.rename(entry.id(), chosen.trim()))
+			{
+				JOptionPane.showMessageDialog(RecordingsPanel.this,
+					"Could not rename that recording.", "Rename", JOptionPane.WARNING_MESSAGE);
+			}
+			refresh();
+		}
+
+		@Override
 		public void togglePin(RecordingEntry entry)
 		{
 			service.setPinned(entry.id(), !entry.pinned());
