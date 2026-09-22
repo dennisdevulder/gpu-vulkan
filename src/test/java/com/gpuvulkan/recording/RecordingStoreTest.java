@@ -137,6 +137,30 @@ public class RecordingStoreTest
 	}
 
 	@Test
+	public void thumbnailsLiveInTheirOwnDirectory() throws IOException
+	{
+		RecordingTarget target = store.allocate(RecordingKindRegistry.LOOT, "zulrah", 1_000L);
+		// Beside the video is what this moved away from.
+		assertEquals("thumbs", target.thumbnail().getParent().getFileName().toString());
+		assertEquals(target.file().getParent(), target.thumbnail().getParent().getParent());
+	}
+
+	@Test
+	public void scanMovesThumbnailsWrittenBesideTheirVideo() throws IOException
+	{
+		RecordingEntry entry = write(RecordingKindRegistry.LOOT, "legacy", 1_000L, new byte[10]);
+		Path loose = root.resolve("loot").resolve(entry.fileName().replace(".mp4", ".png"));
+		Files.write(loose, new byte[]{1});
+
+		RecordingStore reopened = new RecordingStore(root, kinds);
+		reopened.scan();
+
+		assertFalse(Files.exists(loose));
+		assertTrue(Files.isRegularFile(root.resolve("loot").resolve("thumbs")
+			.resolve(loose.getFileName())));
+	}
+
+	@Test
 	public void aScratchThumbnailIsAdoptedByItsRecording() throws IOException
 	{
 		Path scratch = store.thumbnailScratch(RecordingKindRegistry.LOOT, 1_000L);
@@ -176,6 +200,7 @@ public class RecordingStoreTest
 	{
 		RecordingTarget target = store.allocate(RecordingKindRegistry.PET, "Herbi", 1_000L);
 		Files.write(target.file(), new byte[10]);
+		Files.createDirectories(target.thumbnail().getParent());
 		Files.write(target.thumbnail(), new byte[4]);
 		store.commit(target.entry().description("Herbi").thumbnailName(target.thumbnailName()).build());
 

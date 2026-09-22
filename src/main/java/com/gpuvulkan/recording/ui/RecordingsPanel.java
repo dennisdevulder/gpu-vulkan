@@ -472,7 +472,7 @@ public final class RecordingsPanel extends PluginPanel
 		{
 			return null;
 		}
-		Path path = root.resolve(kind.folder()).resolve(name);
+		Path path = root.resolve(kind.folder()).resolve("thumbs").resolve(name);
 		return Files.isRegularFile(path) ? path : null;
 	}
 

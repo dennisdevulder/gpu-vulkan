@@ -51,6 +51,8 @@ public final class RecordingStore
 {
 	private static final String VIDEO_EXT = ".mp4";
 	private static final String THUMB_EXT = ".png";
+	/** Thumbnails live under the kind folder, not beside the videos. */
+	private static final String THUMB_DIR = "thumbs";
 	private static final String SIDECAR_EXT = ".json";
 
 	private final Path root;
@@ -102,7 +104,8 @@ public final class RecordingStore
 
 	private void scanFolder(Path folder, Map<String, RecordingEntry> found)
 	{
-		sweepPendingThumbnails(folder);
+		sweepPendingThumbnails(folder.resolve(THUMB_DIR));
+		relocateLooseThumbnails(folder);
 		try (DirectoryStream<Path> files = Files.newDirectoryStream(folder, "*" + SIDECAR_EXT))
 		{
 			for (Path sidecar : files)
@@ -151,7 +154,7 @@ public final class RecordingStore
 			candidate + VIDEO_EXT,
 			candidate + THUMB_EXT,
 			folder.resolve(candidate + VIDEO_EXT),
-			folder.resolve(candidate + THUMB_EXT),
+			folder.resolve(THUMB_DIR).resolve(candidate + THUMB_EXT),
 			folder.resolve(candidate + SIDECAR_EXT));
 	}
 
@@ -174,6 +177,25 @@ public final class RecordingStore
 			entries.put(stored.id(), stored);
 		}
 		return stored;
+	}
+
+	/** Thumbnails written before they had their own directory. */
+	private void relocateLooseThumbnails(Path folder)
+	{
+		try (DirectoryStream<Path> loose = Files.newDirectoryStream(folder, "*" + THUMB_EXT))
+		{
+			Path thumbs = folder.resolve(THUMB_DIR);
+			for (Path path : loose)
+			{
+				Files.createDirectories(thumbs);
+				Files.move(path, thumbs.resolve(path.getFileName()),
+					java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+			}
+		}
+		catch (IOException e)
+		{
+			log.debug("Failed to relocate thumbnails in {}", folder, e);
+		}
 	}
 
 	/** Scratch thumbnails outlive a clip that failed before it was written. */
@@ -200,7 +222,7 @@ public final class RecordingStore
 	public Path thumbnailScratch(RecordingKind kind, long triggeredAt) throws IOException
 	{
 		RecordingKind resolved = kind == null ? RecordingKindRegistry.GENERIC : kind;
-		Path folder = root.resolve(resolved.folder());
+		Path folder = root.resolve(resolved.folder()).resolve(THUMB_DIR);
 		Files.createDirectories(folder);
 		return folder.resolve(".pending_" + triggeredAt + THUMB_EXT);
 	}
@@ -218,6 +240,11 @@ public final class RecordingStore
 		}
 		try
 		{
+			Path parent = target.thumbnail().getParent();
+			if (parent != null)
+			{
+				Files.createDirectories(parent);
+			}
 			Files.move(scratch, target.thumbnail(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
 			return target.thumbnailName();
 		}
@@ -369,7 +396,7 @@ public final class RecordingStore
 		{
 			return Optional.empty();
 		}
-		Path path = folderOf(entry).resolve(name);
+		Path path = folderOf(entry).resolve(THUMB_DIR).resolve(name);
 		return Files.isRegularFile(path) ? Optional.of(path) : Optional.empty();
 	}
 
@@ -392,7 +419,7 @@ public final class RecordingStore
 		String thumb = entry.thumbnailName();
 		if (thumb != null && !thumb.isEmpty())
 		{
-			deleteQuietly(folderOf(entry).resolve(thumb));
+			deleteQuietly(folderOf(entry).resolve(THUMB_DIR).resolve(thumb));
 		}
 	}
 
