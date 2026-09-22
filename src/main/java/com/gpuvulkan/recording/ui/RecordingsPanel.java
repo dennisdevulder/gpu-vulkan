@@ -78,6 +78,15 @@ public final class RecordingsPanel extends PluginPanel
 	private final RecordingService service;
 	private final Path root;
 	private final AudioDeviceSetting audioSetting;
+	private final DiscordAction discord;
+
+	/** Supplied by the plugin; keeps the panel free of the uploader itself. */
+	public interface DiscordAction
+	{
+		boolean configured();
+
+		void push(RecordingEntry entry, Path file);
+	}
 
 	/** How the panel persists the chosen device; the plugin supplies config access. */
 	public interface AudioDeviceSetting
@@ -144,6 +153,18 @@ public final class RecordingsPanel extends PluginPanel
 		}
 
 		@Override
+		public boolean canPush()
+		{
+			return discord != null && discord.configured();
+		}
+
+		@Override
+		public void push(RecordingEntry entry)
+		{
+			discord.push(entry, pathOf(entry));
+		}
+
+		@Override
 		public void togglePin(RecordingEntry entry)
 		{
 			service.setPinned(entry.id(), !entry.pinned());
@@ -163,12 +184,14 @@ public final class RecordingsPanel extends PluginPanel
 		}
 	};
 
-	public RecordingsPanel(RecordingService service, Path root, AudioDeviceSetting audioSetting)
+	public RecordingsPanel(RecordingService service, Path root, AudioDeviceSetting audioSetting,
+		DiscordAction discord)
 	{
 		super(false);
 		this.service = service;
 		this.root = root;
 		this.audioSetting = audioSetting;
+		this.discord = discord;
 
 		// The thumbnail preview is a peek, not a hint; the default delay reads
 		// as the popup being broken.

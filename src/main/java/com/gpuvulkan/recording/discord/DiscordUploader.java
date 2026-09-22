@@ -85,13 +85,26 @@ public final class DiscordUploader
 	@Subscribe
 	public void onRecordingSaved(RecordingSaved event)
 	{
+		if (config.discordAutoUpload())
+		{
+			push(event.entry(), event.path());
+		}
+	}
+
+	/** True when a usable webhook is set, so the panel can offer the action. */
+	public boolean configured()
+	{
+		return webhook() != null;
+	}
+
+	/** Posts one recording regardless of the automatic setting. */
+	public void push(RecordingEntry entry, Path file)
+	{
 		HttpUrl url = webhook();
 		if (url == null)
 		{
 			return;
 		}
-		RecordingEntry entry = event.entry();
-		Path file = event.path();
 
 		long limit = (long) Math.max(1, config.discordMaxUploadMb()) * 1024L * 1024L;
 		if (entry.sizeBytes() > limit)

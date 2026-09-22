@@ -902,7 +902,23 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 					configManager.setConfiguration(GpuVulkanPluginConfig.GROUP,
 						"recordingAudioEnabled", enabled);
 				}
+			},
+			new RecordingsPanel.DiscordAction()
+			{
+				@Override
+				public boolean configured()
+				{
+					return discordUploader != null && discordUploader.configured();
+				}
 
+				@Override
+				public void push(com.gpuvulkan.recording.RecordingEntry entry, java.nio.file.Path file)
+				{
+					if (discordUploader != null)
+					{
+						discordUploader.push(entry, file);
+					}
+				}
 			});
 		// The panel listens on the same public events any other plugin would.
 		eventBus.register(recordingsPanel);

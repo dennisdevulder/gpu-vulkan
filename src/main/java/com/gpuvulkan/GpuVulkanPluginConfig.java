@@ -528,6 +528,16 @@ public interface GpuVulkanPluginConfig extends Config
 	)
 	default String discordWebhookUrl() { return ""; }
 
+	@ConfigItem(
+		keyName = "discordAutoUpload",
+		name = "Post automatically",
+		description = "Post every finished recording to the webhook. With this off, recordings "
+			+ "are posted only when you choose Push to Discord in the Recordings panel.",
+		section = RECORDINGS_SECTION,
+		position = 12
+	)
+	default boolean discordAutoUpload() { return false; }
+
 	@Range(min = 1, max = 500)
 	@ConfigItem(
 		keyName = "discordMaxUploadMb",
@@ -535,7 +545,7 @@ public interface GpuVulkanPluginConfig extends Config
 		description = "Do not attempt to post recordings larger than this. Discord allows 20MB "
 			+ "by default and more on boosted servers, so raise it if yours is boosted.",
 		section = RECORDINGS_SECTION,
-		position = 12
+		position = 13
 	)
 	default int discordMaxUploadMb() { return 20; }
 

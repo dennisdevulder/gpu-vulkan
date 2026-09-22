@@ -61,6 +61,11 @@ final class RecordingCard extends JPanel
 
 		void rename(RecordingEntry entry);
 
+		/** False hides the Discord action entirely. */
+		boolean canPush();
+
+		void push(RecordingEntry entry);
+
 		void togglePin(RecordingEntry entry);
 
 		void delete(RecordingEntry entry);
@@ -111,6 +116,10 @@ final class RecordingCard extends JPanel
 		menu.add(item("Play", () -> actions.open(entry)));
 		menu.add(item("Show in folder", () -> actions.reveal(entry)));
 		menu.add(item("Rename...", () -> actions.rename(entry)));
+		if (actions.canPush())
+		{
+			menu.add(item("Push to Discord", () -> actions.push(entry)));
+		}
 		menu.add(item(entry.pinned() ? "Unpin" : "Pin (keep forever)", () -> actions.togglePin(entry)));
 		menu.addSeparator();
 		menu.add(item("Delete", () -> actions.delete(entry)));
