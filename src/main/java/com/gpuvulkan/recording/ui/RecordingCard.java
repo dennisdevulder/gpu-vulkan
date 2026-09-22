@@ -157,13 +157,50 @@ final class RecordingCard extends JPanel
 		JLabel label = new JLabel();
 		label.setPreferredSize(new Dimension(THUMB_WIDTH, THUMB_HEIGHT));
 		label.setHorizontalAlignment(SwingConstants.CENTER);
-		if (thumbnail != null)
+		BufferedImage shot = thumbnail == null ? null : read(thumbnail);
+		if (shot != null)
 		{
-			label.setIcon(new ImageIcon(thumbnail.toString()));
+			label.setIcon(new ImageIcon(fit(shot)));
 			return label;
 		}
 		label.setIcon(new ImageIcon(placeholder(kind)));
 		return label;
+	}
+
+	private static BufferedImage read(Path path)
+	{
+		try
+		{
+			return javax.imageio.ImageIO.read(path.toFile());
+		}
+		catch (java.io.IOException | RuntimeException e)
+		{
+			return null;
+		}
+	}
+
+	/** Centre-crops to the card's aspect, then scales; letterboxing a 64px
+	 *  wide row wastes most of it. */
+	private static BufferedImage fit(BufferedImage source)
+	{
+		double want = (double) THUMB_WIDTH / THUMB_HEIGHT;
+		int cropW = source.getWidth();
+		int cropH = (int) Math.round(cropW / want);
+		if (cropH > source.getHeight())
+		{
+			cropH = source.getHeight();
+			cropW = (int) Math.round(cropH * want);
+		}
+		BufferedImage cropped = source.getSubimage(
+			(source.getWidth() - cropW) / 2, (source.getHeight() - cropH) / 2, cropW, cropH);
+
+		BufferedImage out = new BufferedImage(THUMB_WIDTH, THUMB_HEIGHT, BufferedImage.TYPE_INT_RGB);
+		Graphics2D g = out.createGraphics();
+		g.setRenderingHint(RenderingHints.KEY_INTERPOLATION,
+			RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+		g.drawImage(cropped, 0, 0, THUMB_WIDTH, THUMB_HEIGHT, null);
+		g.dispose();
+		return out;
 	}
 
 	/** No thumbnail yet: a tinted initial keeps rows scannable by kind. */

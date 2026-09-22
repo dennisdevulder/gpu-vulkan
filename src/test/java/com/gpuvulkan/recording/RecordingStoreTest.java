@@ -137,6 +137,41 @@ public class RecordingStoreTest
 	}
 
 	@Test
+	public void aScratchThumbnailIsAdoptedByItsRecording() throws IOException
+	{
+		Path scratch = store.thumbnailScratch(RecordingKindRegistry.LOOT, 1_000L);
+		Files.write(scratch, new byte[]{1, 2, 3});
+		RecordingTarget target = store.allocate(RecordingKindRegistry.LOOT, "zulrah", 1_000L);
+
+		assertEquals(target.thumbnailName(), store.adoptThumbnail(scratch, target));
+		assertFalse("scratch is moved, not copied", Files.exists(scratch));
+		assertTrue(Files.isRegularFile(target.thumbnail()));
+	}
+
+	@Test
+	public void aMissingScratchThumbnailIsNotFatal() throws IOException
+	{
+		RecordingTarget target = store.allocate(RecordingKindRegistry.LOOT, "zulrah", 1_000L);
+		assertEquals(null, store.adoptThumbnail(null, target));
+		assertEquals(null, store.adoptThumbnail(
+			store.thumbnailScratch(RecordingKindRegistry.LOOT, 999L), target));
+	}
+
+	@Test
+	public void scanRemovesScratchThumbnailsLeftByAFailedClip() throws IOException
+	{
+		write(RecordingKindRegistry.LOOT, "kept", 1_000L, new byte[10]);
+		Path orphan = store.thumbnailScratch(RecordingKindRegistry.LOOT, 4_000L);
+		Files.write(orphan, new byte[]{1});
+
+		RecordingStore reopened = new RecordingStore(root, kinds);
+		reopened.scan();
+
+		assertFalse(Files.exists(orphan));
+		assertEquals(1, reopened.list().size());
+	}
+
+	@Test
 	public void deleteRemovesVideoThumbnailAndSidecar() throws IOException
 	{
 		RecordingTarget target = store.allocate(RecordingKindRegistry.PET, "Herbi", 1_000L);

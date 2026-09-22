@@ -65,6 +65,7 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 	private final EventBus eventBus;
 	private final GpuVulkanPluginConfig config;
 	private final Consumer<String> announce;
+	private final ThumbnailCapture thumbnails;
 
 	private final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor(r ->
 	{
@@ -77,8 +78,9 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 
 	public VulkanRecordingService(RecordingBackend backend, RecordingStore store,
 		RecordingKindRegistry kinds, EventBus eventBus, GpuVulkanPluginConfig config,
-		Consumer<String> announce)
+		Consumer<String> announce, net.runelite.client.ui.DrawManager drawManager)
 	{
+		this.thumbnails = new ThumbnailCapture(drawManager);
 		this.backend = backend;
 		this.store = store;
 		this.kinds = kinds;
@@ -238,12 +240,26 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 			syncAudioCapture();
 		});
 
+		// The interesting frame is the one at the trigger, so ask for it now
+		// rather than when the file is written post-roll seconds later.
+		java.util.concurrent.atomic.AtomicReference<Path> thumb = new java.util.concurrent.atomic.AtomicReference<>();
+		try
+		{
+			Path pendingThumb = store.thumbnailScratch(request.kind(), triggeredAt);
+			thumbnails.capture(pendingThumb, ok -> thumb.set(ok ? pendingThumb : null));
+		}
+		catch (IOException e)
+		{
+			// A thumbnail is decoration; the clip still gets written.
+			log.debug("Could not prepare a thumbnail", e);
+		}
+
 		CompletableFuture<RecordingEntry> future = new CompletableFuture<>();
 		executor.schedule(() ->
 		{
 			try
 			{
-				future.complete(writeClip(encoder, request, triggeredAt, pre, post));
+				future.complete(writeClip(encoder, request, triggeredAt, pre, post, thumb.get()));
 			}
 			catch (Throwable t)
 			{
@@ -256,7 +272,7 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 	}
 
 	private RecordingEntry writeClip(StreamingVulkanEncoder encoder, RecordingRequest request,
-		long triggeredAt, int pre, int post) throws IOException
+		long triggeredAt, int pre, int post, Path thumbnail) throws IOException
 	{
 		long start = triggeredAt - TimeUnit.SECONDS.toMillis(pre);
 		long end = triggeredAt + TimeUnit.SECONDS.toMillis(post);
@@ -274,12 +290,14 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 		byte[] bytes = clip.getFrames().get(0);
 		Files.write(target.file(), bytes);
 
+		String thumbName = store.adoptThumbnail(thumbnail, target);
 		RecordingEntry entry = target.entry()
 			.description(request.description())
 			.durationMs(TimeUnit.SECONDS.toMillis((long) pre + post))
 			.dimensions(backend.frameWidth(), backend.frameHeight())
 			.fps(backend.captureFps())
 			.sizeBytes(bytes.length)
+			.thumbnailName(thumbName)
 			.metadata(request.metadata())
 			.build();
 		return publishSaved(store.commit(entry), target.file());
@@ -326,6 +344,7 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 			return new FailedHandle(request, e);
 		}
 
+		thumbnails.capture(target.thumbnail(), ok -> { });
 		SessionRecording session = new SessionRecording(target, request, this, maxSeconds,
 			continuationOf, audio);
 		sessions.add(session);

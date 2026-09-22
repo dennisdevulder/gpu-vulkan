@@ -320,6 +320,8 @@ final class SessionRecording implements NalSink, RecordingHandle
 
 		EncodedSegmentInfo info = segment;
 		return target.entry()
+			.thumbnailName(java.nio.file.Files.isRegularFile(target.thumbnail())
+				? target.thumbnailName() : null)
 			.description(description)
 			.durationMs(duration)
 			.dimensions(info == null ? 0 : info.sourceWidth, info == null ? 0 : info.sourceHeight)

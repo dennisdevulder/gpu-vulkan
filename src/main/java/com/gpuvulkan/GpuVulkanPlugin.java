@@ -493,7 +493,7 @@ public class GpuVulkanPlugin extends Plugin implements DrawCallbacks, VulkanRend
 		renderExtensions.register(inFlightClipRecorder);
 		recordingService = new VulkanRecordingService(inFlightClipRecorder,
 			new RecordingStore(RecordingStore.defaultRoot(), recordingKinds),
-			recordingKinds, eventBus, config, this::announceRecording);
+			recordingKinds, eventBus, config, this::announceRecording, drawManager);
 		recordingService.start();
 		recordingTriggers = new TriggerRegistry(new RecordingContext(recordingService, client,
 			clientThread, eventBus, itemManager, config));

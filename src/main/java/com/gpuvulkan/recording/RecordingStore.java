@@ -102,6 +102,7 @@ public final class RecordingStore
 
 	private void scanFolder(Path folder, Map<String, RecordingEntry> found)
 	{
+		sweepPendingThumbnails(folder);
 		try (DirectoryStream<Path> files = Files.newDirectoryStream(folder, "*" + SIDECAR_EXT))
 		{
 			for (Path sidecar : files)
@@ -173,6 +174,59 @@ public final class RecordingStore
 			entries.put(stored.id(), stored);
 		}
 		return stored;
+	}
+
+	/** Scratch thumbnails outlive a clip that failed before it was written. */
+	private void sweepPendingThumbnails(Path folder)
+	{
+		try (DirectoryStream<Path> pending = Files.newDirectoryStream(folder, ".pending_*"))
+		{
+			for (Path path : pending)
+			{
+				deleteQuietly(path);
+			}
+		}
+		catch (IOException e)
+		{
+			log.debug("Failed to sweep pending thumbnails in {}", folder, e);
+		}
+	}
+
+	/**
+	 * A temporary path for a thumbnail captured before its recording exists.
+	 * A clip's frame is grabbed at the trigger, but the file is only allocated
+	 * post-roll seconds later.
+	 */
+	public Path thumbnailScratch(RecordingKind kind, long triggeredAt) throws IOException
+	{
+		RecordingKind resolved = kind == null ? RecordingKindRegistry.GENERIC : kind;
+		Path folder = root.resolve(resolved.folder());
+		Files.createDirectories(folder);
+		return folder.resolve(".pending_" + triggeredAt + THUMB_EXT);
+	}
+
+	/**
+	 * Moves a scratch thumbnail alongside its recording.
+	 *
+	 * @return the entry's thumbnail name, or null when there was none
+	 */
+	public String adoptThumbnail(Path scratch, RecordingTarget target)
+	{
+		if (scratch == null || !Files.isRegularFile(scratch))
+		{
+			return null;
+		}
+		try
+		{
+			Files.move(scratch, target.thumbnail(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+			return target.thumbnailName();
+		}
+		catch (IOException e)
+		{
+			log.debug("Could not store thumbnail for {}", target.id(), e);
+			deleteQuietly(scratch);
+			return null;
+		}
 	}
 
 	/** Newest first. */
