@@ -26,7 +26,8 @@ import net.runelite.client.ui.DrawManager;
 @Slf4j
 final class ThumbnailCapture
 {
-	private static final int MAX_EDGE = 320;
+	/** Also the hover preview in the panel, so larger than a card row needs. */
+	private static final int MAX_EDGE = 480;
 
 	private final DrawManager drawManager;
 

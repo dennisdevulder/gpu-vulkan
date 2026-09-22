@@ -151,6 +151,11 @@ public final class RecordingsPanel extends PluginPanel
 		this.root = root;
 		this.audioSetting = audioSetting;
 
+		// The thumbnail preview is a peek, not a hint; the default delay reads
+		// as the popup being broken.
+		javax.swing.ToolTipManager.sharedInstance().setInitialDelay(250);
+		javax.swing.ToolTipManager.sharedInstance().setDismissDelay(20_000);
+
 		setLayout(new BorderLayout());
 		setBorder(BorderFactory.createEmptyBorder(8, 8, 8, 8));
 		setBackground(ColorScheme.DARK_GRAY_COLOR);

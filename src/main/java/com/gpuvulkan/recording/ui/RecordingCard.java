@@ -161,6 +161,9 @@ final class RecordingCard extends JPanel
 		if (shot != null)
 		{
 			label.setIcon(new ImageIcon(fit(shot)));
+			// A 64px row is too small to recognise a moment; hovering shows the
+			// frame at the size it was stored.
+			label.setToolTipText("<html><img src=\"" + thumbnail.toUri() + "\"></html>");
 			return label;
 		}
 		label.setIcon(new ImageIcon(placeholder(kind)));
