@@ -225,7 +225,7 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
     @Override
     public synchronized void stop()
     {
-        stop(new IllegalStateException("encoder stopped"));
+        stop(new IllegalStateException("encoder stopped"), false);
     }
 
     /**
@@ -234,14 +234,17 @@ public final class StreamingVulkanEncoder implements VideoEncoder, AutoCloseable
      */
     public synchronized void stopForRestart()
     {
-        stop(new EncoderRestart());
+        stop(new EncoderRestart(), true);
     }
 
-    private synchronized void stop(Throwable detachCause)
+    private synchronized void stop(Throwable detachCause, boolean keepBuffered)
     {
         drainPending();
         detachAll(detachCause);
-        nalRing.reset();
+        if (!keepBuffered)
+        {
+            nalRing.reset();
+        }
         segments.clear();
         inFlight.clear();
         destroySession();

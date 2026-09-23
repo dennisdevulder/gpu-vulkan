@@ -58,6 +58,8 @@ import net.runelite.client.eventbus.EventBus;
 public final class VulkanRecordingService implements RecordingService, SessionRecording.Owner
 {
 	public static final int MAX_CLIP_SECONDS = 60;
+	/** Long enough to outlast a window drag's burst of swapchain rebuilds. */
+	private static final long CONTINUATION_SETTLE_MS = 1_000;
 
 	private final RecordingBackend backend;
 	private final RecordingStore store;
@@ -75,6 +77,8 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 	});
 	private final List<SessionRecording> sessions = new CopyOnWriteArrayList<>();
 	private volatile AudioCapture audio;
+	/** Identity of the newest queued continuation; older ones stand down. */
+	private Object pendingContinuation;
 
 	public VulkanRecordingService(RecordingBackend backend, RecordingStore store,
 		RecordingKindRegistry kinds, EventBus eventBus, GpuVulkanPluginConfig config,
@@ -389,6 +393,30 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 		return session;
 	}
 
+	/**
+	 * Reopens a cut recording once the cutting stops.
+	 *
+	 * Dragging a window rebuilds the swapchain continuously, and opening a
+	 * file per rebuild leaves a pile of fragments too short to hold a
+	 * keyframe. Waiting lets the burst settle into one continuation. Runs on
+	 * the executor, so the pending flag needs no lock.
+	 */
+	private void scheduleContinuation(RecordingRequest request, String continuationOf)
+	{
+		pendingContinuation = new Object();
+		Object token = pendingContinuation;
+		executor.schedule(() ->
+		{
+			if (token != pendingContinuation)
+			{
+				// Another cut landed while we waited; that one continues instead.
+				return;
+			}
+			pendingContinuation = null;
+			openSession(request, continuationOf);
+		}, CONTINUATION_SETTLE_MS, TimeUnit.MILLISECONDS);
+	}
+
 	@Override
 	public void finalizeSession(SessionRecording session, SessionRecording.StopReason reason)
 	{
@@ -400,27 +428,33 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 				encoder.detachSink(session);
 			}
 			sessions.remove(session);
+
+			// A drag produces a swapchain rebuild per size change, so a long
+			// recording is cut repeatedly and most fragments are too short to
+			// hold a keyframe. The chain must survive those: continuing is a
+			// property of why we stopped, not of whether this fragment
+			// happened to be usable.
+			boolean continues = reason == SessionRecording.StopReason.RESIZED
+				|| reason == SessionRecording.StopReason.SIZE_LIMIT
+				|| reason == SessionRecording.StopReason.ENCODER_RESTART;
 			try
 			{
 				RecordingEntry entry = session.finish(backend.captureFps());
 				if (entry == null)
 				{
-					IllegalStateException empty = new IllegalStateException(
-						"recording produced no decodable frames");
-					session.failed(empty);
-					eventBus.post(new RecordingFailed(session.id(), session.kind(),
-						session.description(), empty));
+					if (!continues)
+					{
+						IllegalStateException empty = new IllegalStateException(
+							"recording produced no decodable frames");
+						session.failed(empty);
+						eventBus.post(new RecordingFailed(session.id(), session.kind(),
+							session.description(), empty));
+					}
+					// finish() already removed the unusable file.
 					return;
 				}
 				RecordingEntry stored = publishSaved(store.commit(entry), session.target().file());
 				session.completed(stored);
-
-				if (reason == SessionRecording.StopReason.RESIZED
-					|| reason == SessionRecording.StopReason.SIZE_LIMIT
-					|| reason == SessionRecording.StopReason.ENCODER_RESTART)
-				{
-					openSession(session.request(), session.id());
-				}
 			}
 			catch (Throwable t)
 			{
@@ -428,6 +462,13 @@ public final class VulkanRecordingService implements RecordingService, SessionRe
 				session.failed(t);
 				eventBus.post(new RecordingFailed(session.id(), session.kind(),
 					session.description(), t));
+			}
+			finally
+			{
+				if (continues)
+				{
+					scheduleContinuation(session.request(), session.id());
+				}
 			}
 		});
 	}
